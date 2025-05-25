@@ -8,6 +8,8 @@ on:
 jobs:
   cleanup-images:
     runs-on: ubuntu-latest
+    permissions:
+      packages: write # forcefully enable deleting of images
     steps:
       - name: "Clean up old images"
         uses: dataaxiom/ghcr-cleanup-action@v1
