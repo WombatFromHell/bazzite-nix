@@ -53,14 +53,34 @@ jobs:
         run: |
           echo "date=$(date -u +%Y\-%m\-%d\T%H\:%M\:%S\Z)" >> $GITHUB_OUTPUT
 
+      - name: Extract parent image version from OCI metadata
+        id: parent_tag
+        run: |
+          # Extract the FROM line from Containerfile
+          FROM_LINE=$(grep -E "^FROM " ${{ matrix.containerfile }} | head -1)
+          PARENT_IMAGE=$(echo "$FROM_LINE" | awk '{print $2}')
+          echo "Found parent image: $PARENT_IMAGE"
+
+          # Use skopeo to inspect the parent image and extract org.opencontainers.image.version
+          PARENT_VERSION=$(skopeo inspect docker://$PARENT_IMAGE | jq -r '.Labels."org.opencontainers.image.version" // empty')
+
+          if [ -n "$PARENT_VERSION" ] && [ "$PARENT_VERSION" != "null" ]; then
+            echo "Found parent image version: $PARENT_VERSION"
+            echo "parent_date_version=$PARENT_VERSION" >> $GITHUB_OUTPUT
+            echo "use_parent_version=true" >> $GITHUB_OUTPUT
+          else
+            echo "No version found in parent image metadata, using current date"
+            echo "parent_date_version=$(date -u +%Y%m%d)" >> $GITHUB_OUTPUT
+            echo "use_parent_version=false" >> $GITHUB_OUTPUT
+          fi
+
       - name: Image Metadata
         uses: docker/metadata-action@902fa8ec7d6ecbf8d84d538b9b233a880e428804 # v5
         id: metadata
         with:
           tags: |
             type=raw,value=latest
-            type=raw,value=latest.{{date 'YYYYMMDD'}}
-            type=raw,value={{date 'YYYYMMDD'}}
+            type=raw,value=${{ steps.parent_tag.outputs.parent_date_version }}
             type=sha,enable=${{ github.event_name == 'pull_request' }}
             type=ref,event=pr
           labels: |
@@ -72,7 +92,7 @@ jobs:
             org.opencontainers.image.title=${{ env.IMAGE_NAME }}${{ matrix.image_suffix }}
             org.opencontainers.image.url=https://github.com/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
             org.opencontainers.image.vendor=${{ github.repository_owner }}
-            org.opencontainers.image.version=latest
+            org.opencontainers.image.version=${{ steps.parent_tag.outputs.parent_date_version }}
             io.artifacthub.package.deprecated=false
             io.artifacthub.package.keywords=bootc,ublue,universal-blue
             io.artifacthub.package.license=Apache-2.0
@@ -98,28 +118,6 @@ jobs:
           tags: ${{ steps.metadata.outputs.tags }}
           labels: ${{ steps.metadata.outputs.labels }}
           oci: false
-
-      # - name: Run Rechunker
-      #   id: rechunk
-      #   uses: hhd-dev/rechunk@f153348d8100c1f504dec435460a0d7baf11a9d2 # v1.1.1
-      #   with:
-      #     rechunk: "ghcr.io/hhd-dev/rechunk:v1.0.1"
-      #     ref: "localhost/${{ env.IMAGE_NAME }}${{ matrix.image_suffix }}:${{ env.DEFAULT_TAG }}"
-      #     prev-ref: "${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}${{ matrix.image_suffix }}:${{ env.DEFAULT_TAG }}"
-      #     skip_compression: true
-      #     labels: ${{ steps.metadata.outputs.labels }}
-      #
-      # - name: Load in podman and tag
-      #   run: |
-      #     IMAGE=$(podman pull ${{ steps.rechunk.outputs.ref }})
-      #     if [ -z "$IMAGE" ]; then
-      #       echo "Error: Failed to pull image"
-      #       exit 1
-      #     fi
-      #     sudo rm -rf ${{ steps.rechunk.outputs.output }} || true
-      #     for tag in ${{ steps.metadata.outputs.tags }}; do
-      #       podman tag $IMAGE ${{ env.IMAGE_NAME }}${{ matrix.image_suffix }}:$tag
-      #     done
 
       - name: Login to GitHub Container Registry
         uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3
