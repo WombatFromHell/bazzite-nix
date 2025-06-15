@@ -16,7 +16,7 @@ jobs:
         suffix: ["", "-deck"]
 
     steps:
-      - name: Clean up ${{ matrix.suffix == "" && "main" || "deck" }} images
+      - name: Clean up images for package ${{ github.event.repository.name }}${{ matrix.suffix }}
         uses: dataaxiom/ghcr-cleanup-action@v1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
