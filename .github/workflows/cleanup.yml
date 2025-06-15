@@ -1,8 +1,8 @@
 ---
 name: Cleanup Old Images
 on:
-  schedule:
-    - cron: "0 1 * * 0" # 01:00 UTC every Sunday
+  # schedule:
+  #   - cron: "0 1 * * 0" # 01:00 UTC every Sunday
   workflow_dispatch:
 
 jobs:

@@ -1,16 +1,16 @@
 ---
 name: Build Custom Image
 on:
-  pull_request:
-    branches:
-      - main
-  schedule:
-    - cron: "0 0 * * 0" # 00:00 UTC every Sunday
-  push:
-    branches:
-      - main
-    paths-ignore:
-      - "**/README.md"
+  # pull_request:
+  #   branches:
+  #     - main
+  # schedule:
+  #   - cron: "0 0 * * 0" # 00:00 UTC every Sunday
+  # push:
+  #   branches:
+  #     - main
+  #   paths-ignore:
+  #     - "**/README.md"
   workflow_dispatch:
 
 env:
