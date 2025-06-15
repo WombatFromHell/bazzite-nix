@@ -24,4 +24,4 @@ jobs:
           keep-n-tagged: 12
           delete-untagged: true
           delete-partial-images: true
-          dry-run: true
+          dry-run: false

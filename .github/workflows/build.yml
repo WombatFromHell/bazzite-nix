@@ -63,17 +63,32 @@ jobs:
           echo "Found parent image: $PARENT_IMAGE"
 
           # Use skopeo to inspect the parent image and extract org.opencontainers.image.version
+          echo "Inspecting parent image metadata..."
           PARENT_VERSION=$(skopeo inspect docker://$PARENT_IMAGE | jq -r '.Labels."org.opencontainers.image.version" // empty')
 
-          if [ -n "$PARENT_VERSION" ] && [ "$PARENT_VERSION" != "null" ]; then
-            echo "Found parent image version: $PARENT_VERSION"
-            echo "parent_date_version=$PARENT_VERSION" >> $GITHUB_OUTPUT
-            echo "use_parent_version=true" >> $GITHUB_OUTPUT
+          PARENT_TAG=$(echo "$PARENT_IMAGE" | sed -n 's/.*:\(.*\)$/\1/p')
+          echo "Parent image tag: $PARENT_TAG"
+          echo "Parent image version from metadata: $PARENT_VERSION"
+
+          # Use metadata version if available, otherwise try to extract from tag
+          if [ -n "$PARENT_VERSION" ] && [ "$PARENT_VERSION" != "null" ] && [ "$PARENT_VERSION" != "latest" ]; then
+            echo "Using parent image version from metadata: $PARENT_VERSION"
+            FINAL_VERSION="$PARENT_VERSION"
+          elif [[ "$PARENT_TAG" =~ (testing-[0-9]+\.[0-9]{8}\.[0-9]+) ]]; then
+            # Extract the full version part (e.g., testing-42.20250611.3)
+            FINAL_VERSION="${BASH_REMATCH[1]}"
+            echo "Extracted version from tag: $FINAL_VERSION"
+          elif [[ "$PARENT_TAG" =~ ([0-9]{8}\.[0-9]+) ]]; then
+            # Fallback to just the date.build pattern
+            FINAL_VERSION="${BASH_REMATCH[1]}"
+            echo "Extracted date version from tag: $FINAL_VERSION"
           else
-            echo "No version found in parent image metadata, using current date"
-            echo "parent_date_version=$(date -u +%Y%m%d)" >> $GITHUB_OUTPUT
-            echo "use_parent_version=false" >> $GITHUB_OUTPUT
+            echo "No version found, using current date"
+            FINAL_VERSION="$(date -u +%Y%m%d)"
           fi
+
+          echo "Final version to use: $FINAL_VERSION"
+          echo "parent_date_version=$FINAL_VERSION" >> $GITHUB_OUTPUT
 
       - name: Image Metadata
         uses: docker/metadata-action@902fa8ec7d6ecbf8d84d538b9b233a880e428804 # v5
@@ -81,6 +96,7 @@ jobs:
         with:
           tags: |
             type=raw,value=latest
+            type=raw,value=latest.${{ steps.parent_tag.outputs.parent_date_version }}
             type=raw,value=${{ steps.parent_tag.outputs.parent_date_version }}
             type=sha,enable=${{ github.event_name == 'pull_request' }}
             type=ref,event=pr
