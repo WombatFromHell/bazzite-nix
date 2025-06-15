@@ -9,12 +9,19 @@ jobs:
   cleanup-images:
     runs-on: ubuntu-latest
     permissions:
-      packages: write # forcefully enable deleting of images
+      packages: write
+
+    strategy:
+      matrix:
+        suffix: ["", "-deck"]
+
     steps:
-      - name: "Clean up old images"
+      - name: Clean up ${{ matrix.suffix == "" && "main" || "deck" }} images
         uses: dataaxiom/ghcr-cleanup-action@v1
         with:
-          dry-run: false
+          token: ${{ secrets.GITHUB_TOKEN }}
+          package: ${{ github.event.repository.name }}${{ matrix.suffix }}
           keep-n-tagged: 12
           delete-untagged: true
           delete-partial-images: true
+          dry-run: false
