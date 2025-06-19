@@ -53,12 +53,33 @@ jobs:
         id: date
         run: |
           echo "date=$(date -u +%Y\-%m\-%d\T%H\:%M\:%S\Z)" >> $GITHUB_OUTPUT
+          echo "short_date=$(date -u +%Y%m%d)" >> $GITHUB_OUTPUT
 
       - name: Extract upstream version from parent image
         id: parent_tag
         run: |
-          FROM=$(grep -m1 '^FROM ' ${{ matrix.containerfile }} | awk '{print $2}')
-          echo "Parent image: $FROM"
+          echo "=== DEBUG: Containerfile content ==="
+          cat ${{ matrix.containerfile }}
+          echo "=================================="
+
+          # Find the main base image (not build stages like "FROM scratch AS ctx")
+          # Look for FROM lines that don't have "AS <stage_name>" and aren't scratch
+          FROM=$(grep '^FROM ' ${{ matrix.containerfile }} | grep -v ' AS ' | grep -v '^FROM scratch' | head -n1 | awk '{print $2}')
+
+          echo "DEBUG: All FROM lines:"
+          grep '^FROM ' ${{ matrix.containerfile }} || echo "No FROM lines found"
+          echo "DEBUG: FROM lines without AS:"
+          grep '^FROM ' ${{ matrix.containerfile }} | grep -v ' AS ' || echo "No FROM lines without AS found"
+          echo "DEBUG: FROM lines without AS and not scratch:"
+          grep '^FROM ' ${{ matrix.containerfile }} | grep -v ' AS ' | grep -v '^FROM scratch' || echo "No valid FROM lines found"
+          echo "DEBUG: Selected FROM value: '$FROM'"
+          echo "DEBUG: FROM length: ${#FROM}"
+
+          if [ -z "$FROM" ]; then
+            echo "::error::Failed to find a valid base image FROM line in Containerfile"
+            echo "::error::Looking for FROM lines that are not build stages (no AS clause) and not scratch"
+            exit 1
+          fi
 
           if [ "$FROM" = "scratch" ]; then
             echo "Parent is scratch → no upstream version to extract, defaulting to DEFAULT_TAG"
@@ -71,21 +92,27 @@ jobs:
           echo "is_scratch=false" >> $GITHUB_OUTPUT
 
           # Get the version label from the parent image
+          echo "DEBUG: About to inspect docker://$FROM"
           UPSTREAM_VERSION=$(skopeo inspect docker://$FROM \
                            | jq -r '.Labels["org.opencontainers.image.version"] // empty')
-          echo "Upstream version label: $UPSTREAM_VERSION"
+          echo "DEBUG: Upstream version label: '$UPSTREAM_VERSION'"
 
-          if [ -z "$UPSTREAM_VERSION" ] || [ "$UPSTREAM_VERSION" = "latest" ]; then
-            echo "Warning: couldn't find a version label on $FROM, using tag from FROM line"
-            # Extract tag from FROM line as fallback
-            UPSTREAM_TAG=$(echo "$FROM" | sed 's/.*://')
-            echo "upstream_tag=$UPSTREAM_TAG" >> $GITHUB_OUTPUT
-            echo "parent_version=$UPSTREAM_TAG" >> $GITHUB_OUTPUT
-          else
-            # Use the version label as our upstream tag
-            echo "upstream_tag=$UPSTREAM_VERSION" >> $GITHUB_OUTPUT
-            echo "parent_version=$UPSTREAM_VERSION" >> $GITHUB_OUTPUT
+          if [ -z "$UPSTREAM_VERSION" ]; then
+            echo "::error::Failed to get org.opencontainers.image.version label from $FROM"
+            echo "::error::This is required for proper versioning. The upstream image must have this label."
+            exit 1
           fi
+
+          if [ "$UPSTREAM_VERSION" = "latest" ]; then
+            echo "::error::Upstream version label is 'latest' which is not a valid version"
+            echo "::error::Expected a version like 'testing-42.20250619.5' from $FROM"
+            exit 1
+          fi
+
+          # Use the version label as our upstream tag
+          echo "DEBUG: Using version label as tag: '$UPSTREAM_VERSION'"
+          echo "upstream_tag=$UPSTREAM_VERSION" >> $GITHUB_OUTPUT
+          echo "parent_version=$UPSTREAM_VERSION" >> $GITHUB_OUTPUT
 
       - name: Login to GHCR (for inspection)
         run: |
@@ -111,18 +138,22 @@ jobs:
       - name: Update Containerfile with versioned upstream
         if: steps.version_check.outputs.skip_build != 'true' && steps.parent_tag.outputs.is_scratch != 'true'
         run: |
-          # Get the base image without tag
-          BASE_IMAGE=$(grep -m1 '^FROM ' ${{ matrix.containerfile }} | awk '{print $2}' | sed 's/:.*//')
+          # Find the main base image line (not build stages)
+          ORIGINAL_FROM_LINE=$(grep '^FROM ' ${{ matrix.containerfile }} | grep -v ' AS ' | grep -v '^FROM scratch' | head -n1)
+          BASE_IMAGE=$(echo "$ORIGINAL_FROM_LINE" | awk '{print $2}' | sed 's/:.*//')
           UPSTREAM_TAG="${{ steps.parent_tag.outputs.upstream_tag }}"
 
+          echo "DEBUG: Original FROM line: $ORIGINAL_FROM_LINE"
+          echo "DEBUG: Base image: $BASE_IMAGE"
+          echo "DEBUG: New upstream tag: $UPSTREAM_TAG"
           echo "Updating Containerfile to use: ${BASE_IMAGE}:${UPSTREAM_TAG}"
 
-          # Create a temporary Containerfile with the versioned tag
-          sed "s|^FROM .*|FROM ${BASE_IMAGE}:${UPSTREAM_TAG}|" ${{ matrix.containerfile }} > ${{ matrix.containerfile }}.tmp
+          # Replace only the main base image FROM line, not the build stage ones
+          sed "s|^FROM ${BASE_IMAGE}.*$|FROM ${BASE_IMAGE}:${UPSTREAM_TAG}|" ${{ matrix.containerfile }} > ${{ matrix.containerfile }}.tmp
           mv ${{ matrix.containerfile }}.tmp ${{ matrix.containerfile }}
 
-          echo "Updated FROM line:"
-          head -n 1 ${{ matrix.containerfile }}
+          echo "Updated Containerfile FROM lines:"
+          grep '^FROM ' ${{ matrix.containerfile }}
 
       - name: Image Metadata
         if: steps.version_check.outputs.skip_build != 'true'
@@ -131,6 +162,7 @@ jobs:
         with:
           tags: |
             type=raw,value=${{ steps.parent_tag.outputs.parent_version }}
+            type=raw,value=${{ steps.date.outputs.short_date }}
             type=raw,value=latest
           labels: |
             io.artifacthub.package.readme-url=https://raw.githubusercontent.com/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}/refs/heads/main/README.md
