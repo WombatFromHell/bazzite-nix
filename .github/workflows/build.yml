@@ -47,59 +47,91 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        uses: actions/checkout@v4
 
-      - name: Get current date
+      - name: Get current UTC timestamp
         id: date
         run: |
           echo "date=$(date -u +%Y\-%m\-%d\T%H\:%M\:%S\Z)" >> $GITHUB_OUTPUT
 
-      - name: Extract parent image version from OCI metadata
+      - name: Extract upstream version from parent image
         id: parent_tag
         run: |
-          # Extract the FROM line from Containerfile
-          FROM_LINE=$(grep -E "^FROM " ${{ matrix.containerfile }} | head -1)
-          PARENT_IMAGE=$(echo "$FROM_LINE" | awk '{print $2}')
-          echo "Found parent image: $PARENT_IMAGE"
+          FROM=$(grep -m1 '^FROM ' ${{ matrix.containerfile }} | awk '{print $2}')
+          echo "Parent image: $FROM"
 
-          # Use skopeo to inspect the parent image and extract org.opencontainers.image.version
-          echo "Inspecting parent image metadata..."
-          PARENT_VERSION=$(skopeo inspect docker://$PARENT_IMAGE | jq -r '.Labels."org.opencontainers.image.version" // empty')
-
-          PARENT_TAG=$(echo "$PARENT_IMAGE" | sed -n 's/.*:\(.*\)$/\1/p')
-          echo "Parent image tag: $PARENT_TAG"
-          echo "Parent image version from metadata: $PARENT_VERSION"
-
-          # Use metadata version if available, otherwise try to extract from tag
-          if [ -n "$PARENT_VERSION" ] && [ "$PARENT_VERSION" != "null" ] && [ "$PARENT_VERSION" != "latest" ]; then
-            echo "Using parent image version from metadata: $PARENT_VERSION"
-            FINAL_VERSION="$PARENT_VERSION"
-          elif [[ "$PARENT_TAG" =~ (testing-[0-9]+\.[0-9]{8}\.[0-9]+) ]]; then
-            # Extract the full version part (e.g., testing-42.20250611.3)
-            FINAL_VERSION="${BASH_REMATCH[1]}"
-            echo "Extracted version from tag: $FINAL_VERSION"
-          elif [[ "$PARENT_TAG" =~ ([0-9]{8}\.[0-9]+) ]]; then
-            # Fallback to just the date.build pattern
-            FINAL_VERSION="${BASH_REMATCH[1]}"
-            echo "Extracted date version from tag: $FINAL_VERSION"
-          else
-            echo "No version found, using current date"
-            FINAL_VERSION="$(date -u +%Y%m%d)"
+          if [ "$FROM" = "scratch" ]; then
+            echo "Parent is scratch → no upstream version to extract, defaulting to DEFAULT_TAG"
+            echo "parent_version=${{ env.DEFAULT_TAG }}" >> $GITHUB_OUTPUT
+            echo "upstream_tag=latest" >> $GITHUB_OUTPUT
+            echo "is_scratch=true" >> $GITHUB_OUTPUT
+            exit 0
           fi
 
-          echo "Final version to use: $FINAL_VERSION"
-          echo "parent_date_version=$FINAL_VERSION" >> $GITHUB_OUTPUT
+          echo "is_scratch=false" >> $GITHUB_OUTPUT
+
+          # Get the version label from the parent image
+          UPSTREAM_VERSION=$(skopeo inspect docker://$FROM \
+                           | jq -r '.Labels["org.opencontainers.image.version"] // empty')
+          echo "Upstream version label: $UPSTREAM_VERSION"
+
+          if [ -z "$UPSTREAM_VERSION" ] || [ "$UPSTREAM_VERSION" = "latest" ]; then
+            echo "Warning: couldn't find a version label on $FROM, using tag from FROM line"
+            # Extract tag from FROM line as fallback
+            UPSTREAM_TAG=$(echo "$FROM" | sed 's/.*://')
+            echo "upstream_tag=$UPSTREAM_TAG" >> $GITHUB_OUTPUT
+            echo "parent_version=$UPSTREAM_TAG" >> $GITHUB_OUTPUT
+          else
+            # Use the version label as our upstream tag
+            echo "upstream_tag=$UPSTREAM_VERSION" >> $GITHUB_OUTPUT
+            echo "parent_version=$UPSTREAM_VERSION" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Login to GHCR (for inspection)
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" \
+            | skopeo login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Bail if upstream hasn't changed
+        run: |
+          EXISTING=$(skopeo inspect \
+            --format='{{ index .Labels "org.opencontainers.image.version" }}' \
+            docker://${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:latest 2>/dev/null || echo "")
+          echo "Existing latest has version: $EXISTING"
+          echo "New upstream version: ${{ steps.parent_tag.outputs.parent_version }}"
+
+          if [ -n "$EXISTING" ] && [ "$EXISTING" = "${{ steps.parent_tag.outputs.parent_version }}" ]; then
+            echo "::notice::No new upstream version detected ($EXISTING). Skipping build."
+            echo "skip_build=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          echo "skip_build=false" >> $GITHUB_OUTPUT
+        id: version_check
+
+      - name: Update Containerfile with versioned upstream
+        if: steps.version_check.outputs.skip_build != 'true' && steps.parent_tag.outputs.is_scratch != 'true'
+        run: |
+          # Get the base image without tag
+          BASE_IMAGE=$(grep -m1 '^FROM ' ${{ matrix.containerfile }} | awk '{print $2}' | sed 's/:.*//')
+          UPSTREAM_TAG="${{ steps.parent_tag.outputs.upstream_tag }}"
+
+          echo "Updating Containerfile to use: ${BASE_IMAGE}:${UPSTREAM_TAG}"
+
+          # Create a temporary Containerfile with the versioned tag
+          sed "s|^FROM .*|FROM ${BASE_IMAGE}:${UPSTREAM_TAG}|" ${{ matrix.containerfile }} > ${{ matrix.containerfile }}.tmp
+          mv ${{ matrix.containerfile }}.tmp ${{ matrix.containerfile }}
+
+          echo "Updated FROM line:"
+          head -n 1 ${{ matrix.containerfile }}
 
       - name: Image Metadata
-        uses: docker/metadata-action@902fa8ec7d6ecbf8d84d538b9b233a880e428804 # v5
+        if: steps.version_check.outputs.skip_build != 'true'
+        uses: docker/metadata-action@v5.7.0
         id: metadata
         with:
           tags: |
+            type=raw,value=${{ steps.parent_tag.outputs.parent_version }}
             type=raw,value=latest
-            type=raw,value=latest.${{ steps.parent_tag.outputs.parent_date_version }}
-            type=raw,value=${{ steps.parent_tag.outputs.parent_date_version }}
-            type=sha,enable=${{ github.event_name == 'pull_request' }}
-            type=ref,event=pr
           labels: |
             io.artifacthub.package.readme-url=https://raw.githubusercontent.com/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}/refs/heads/main/README.md
             org.opencontainers.image.created=${{ steps.date.outputs.date }}
@@ -109,7 +141,7 @@ jobs:
             org.opencontainers.image.title=${{ env.IMAGE_NAME }}${{ matrix.image_suffix }}
             org.opencontainers.image.url=https://github.com/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
             org.opencontainers.image.vendor=${{ github.repository_owner }}
-            org.opencontainers.image.version=${{ steps.parent_tag.outputs.parent_date_version }}
+            org.opencontainers.image.version=${{ steps.parent_tag.outputs.parent_version }}
             io.artifacthub.package.deprecated=false
             io.artifacthub.package.keywords=bootc,ublue,universal-blue
             io.artifacthub.package.license=Apache-2.0
@@ -119,16 +151,10 @@ jobs:
           sep-tags: " "
           sep-annotations: " "
 
-      - name: Verify Containerfile exists
-        run: |
-          if [ ! -f "${{ matrix.containerfile }}" ]; then
-            echo "Error: ${{ matrix.containerfile }} not found!"
-            exit 1
-          fi
-
       - name: Build Image
+        if: steps.version_check.outputs.skip_build != 'true'
         id: build_image
-        uses: redhat-actions/buildah-build@7a95fa7ee0f02d552a32753e7414641a04307056 # v2
+        uses: redhat-actions/buildah-build@v2.13
         with:
           containerfiles: ./${{ matrix.containerfile }}
           image: ${{ env.IMAGE_NAME }}${{ matrix.image_suffix }}
@@ -137,14 +163,15 @@ jobs:
           oci: false
 
       - name: Login to GitHub Container Registry
-        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3
-        if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        uses: docker/login-action@v3.4.0
+        if: steps.version_check.outputs.skip_build != 'true' && github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Lowercase Registry and Image
+        if: steps.version_check.outputs.skip_build != 'true'
         id: lowercase
         run: |
           REGISTRY_LOWER=$(echo "${{ env.IMAGE_REGISTRY }}" | tr '[:upper:]' '[:lower:]')
@@ -153,8 +180,8 @@ jobs:
           echo "image_lower=${IMAGE_LOWER}" >> $GITHUB_OUTPUT
 
       - name: Push To GHCR
-        uses: redhat-actions/push-to-registry@5ed88d269cf581ea9ef6dd6806d01562096bee9c # v2
-        if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        uses: redhat-actions/push-to-registry@v2.8
+        if: steps.version_check.outputs.skip_build != 'true' && github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
         id: push
         env:
           REGISTRY_USER: ${{ github.actor }}
@@ -167,11 +194,11 @@ jobs:
           password: ${{ env.REGISTRY_PASSWORD }}
 
       - name: Install Cosign
-        uses: sigstore/cosign-installer@v3.8.2
-        if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        uses: sigstore/cosign-installer@v3.9.0
+        if: steps.version_check.outputs.skip_build != 'true' && github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
 
       - name: Sign container image
-        if: github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        if: steps.version_check.outputs.skip_build != 'true' && github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
         run: |
           # Use the digest from the push step output instead of tags
           IMAGE_DIGEST="${{ steps.push.outputs.digest }}"
