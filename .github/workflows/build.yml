@@ -225,6 +225,24 @@ jobs:
           username: ${{ env.REGISTRY_USER }}
           password: ${{ env.REGISTRY_PASSWORD }}
 
+      - name: Tag with SHA256 Digest
+        if: steps.version_check.outputs.skip_build != 'true' && github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        id: digest_tag
+        run: |
+          FULL_DIGEST="${{ steps.push.outputs.digest }}"
+          echo "Full digest: $FULL_DIGEST"
+          SHA256_HASH=$(echo "$FULL_DIGEST" | sed 's/sha256://')
+          echo "SHA256 hash: $SHA256_HASH"
+          REGISTRY_LOWER="${{ steps.lowercase.outputs.registry_lower }}"
+          IMAGE_LOWER="${{ steps.lowercase.outputs.image_lower }}"
+          echo "Tagging image with SHA256 digest: $SHA256_HASH"
+          skopeo copy \
+            docker://${REGISTRY_LOWER}/${IMAGE_LOWER}@${FULL_DIGEST} \
+            docker://${REGISTRY_LOWER}/${IMAGE_LOWER}:${SHA256_HASH}
+
+          echo "Successfully tagged and pushed image with SHA256 digest: ${REGISTRY_LOWER}/${IMAGE_LOWER}:${SHA256_HASH}"
+          echo "sha256_tag=${SHA256_HASH}" >> $GITHUB_OUTPUT
+
       - name: Install Cosign
         uses: sigstore/cosign-installer@v3.9.1
         if: steps.version_check.outputs.skip_build != 'true' && github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
