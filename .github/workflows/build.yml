@@ -116,21 +116,74 @@ jobs:
       - name: Build image
         if: steps.version_check.outputs.skip_build != 'true'
         id: build_image
-        uses: redhat-actions/buildah-build@v2.13
-        with:
-          containerfiles: ./${{ matrix.containerfile }}
-          image: ${{ env.IMAGE_NAME }}${{ matrix.image_suffix }}
-          tags: ${{ steps.metadata.outputs.tags }}
-          labels: ${{ steps.metadata.outputs.labels }}
-          oci: true
+        run: |
+          # Builds image in root store as root, to be picked up by Rechunker
+          sudo buildah bud \
+            --format docker \
+            --tag "localhost/${{ env.IMAGE_NAME }}${{ matrix.image_suffix }}:${{ env.DEFAULT_TAG }}" \
+            --file ./${{ matrix.containerfile }}
 
-      - name: Login to GitHub Container Registry
-        uses: docker/login-action@v3.4.0
-        if: steps.version_check.outputs.skip_build != 'true' && github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+      - name: Remove source images
+        run: |
+          images=$(sudo podman images -n --sort repository --format '{{.ID}} {{.Repository}}' | grep -v localhost | awk '{print $1}')
+          if [ -n "${images}" ]; then
+            for image in ${images}; do
+              echo "Removing image: $image"
+              sudo podman rmi --force "$image"
+            done
+          else
+            echo "No images to remove."
+          fi
+
+      - name: Run Rechunker
+        id: rechunk
+        uses: hhd-dev/rechunk@ca77507401f8700bb0b25ebecbbf980a078cd180 # v1.2.2
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          rechunk: "ghcr.io/hhd-dev/rechunk:v1.2.2"
+          ref: "localhost/${{ env.IMAGE_NAME }}${{ matrix.image_suffix }}:${{ env.DEFAULT_TAG }}"
+          prev-ref: "${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}${{ matrix.image_suffix }}:${{ env.DEFAULT_TAG }}"
+          skip_compression: false
+          max-layers: 100
+          labels: ${{ steps.metadata.outputs.labels }} # Rechunk strips out all the labels during build, this needs to be reapplied here with newline separator
+
+      - name: Rechunk output
+        run: |
+          if [[ "${STEPS_RECHUNK_CONCLUSION}" == "success" ]]; then
+            echo "${STEPS_RECHUNK_OUTPUTS_CHANGELOG}"
+            echo "${STEPS_RECHUNK_OUTPUTS_MANIFEST}"
+            cat "${STEPS_RECHUNK_OUTPUTS_CHANGELOG}"
+            cat "${STEPS_RECHUNK_OUTPUTS_MANIFEST}"
+
+          else
+            echo "Rechunk conclusion:"
+            echo "${STEPS_RECHUNK_CONCLUSION}"
+          fi
+        env:
+          STEPS_RECHUNK_CONCLUSION: ${{ steps.rechunk.conclusion }}
+          STEPS_RECHUNK_OUTPUTS_CHANGELOG: ${{ steps.rechunk.outputs.changelog }}
+          STEPS_RECHUNK_OUTPUTS_MANIFEST: ${{ steps.rechunk.outputs.manifest }}
+
+      - name: Remove Rechunker image
+        run: |
+          image=$(sudo podman images -n --sort repository --format '{{.ID}} {{.Repository}}' | grep rechunk | awk '{print $1}')
+          if [ -n "${image}" ]; then
+            sudo podman rmi --force "$image"
+          else
+            echo "No image to remove"
+          fi
+
+      - name: Load in podman and tag
+        run: |
+          IMAGE=$(podman pull ${STEPS_RECHUNK_OUTPUTS_REF})
+          sudo rm -rf ${STEPS_RECHUNK_OUTPUTS_LOCATION}
+          for tag in ${STEPS_METADATA_OUTPUTS_TAGS}; do
+            podman tag $IMAGE ${IMAGE_NAME}:$tag
+          done
+        env:
+          STEPS_RECHUNK_OUTPUTS_REF: ${{ steps.rechunk.outputs.ref }}
+          STEPS_RECHUNK_OUTPUTS_LOCATION: ${{ steps.rechunk.outputs.location }}
+          STEPS_METADATA_OUTPUTS_TAGS: ${{ steps.metadata.outputs.tags }}
+          IMAGE_NAME: ${{ env.IMAGE_NAME }}
 
       - name: Lowercase Registry and Image
         if: steps.version_check.outputs.skip_build != 'true'
@@ -140,6 +193,14 @@ jobs:
           IMAGE_LOWER=$(echo "${{ env.IMAGE_NAME }}${{ matrix.image_suffix }}" | tr '[:upper:]' '[:lower:]')
           echo "registry_lower=${REGISTRY_LOWER}" >> $GITHUB_OUTPUT
           echo "image_lower=${IMAGE_LOWER}" >> $GITHUB_OUTPUT
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3.4.0
+        if: steps.version_check.outputs.skip_build != 'true' && github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Push To GHCR
         uses: redhat-actions/push-to-registry@v2.8
@@ -154,6 +215,9 @@ jobs:
           tags: ${{ steps.metadata.outputs.tags }}
           username: ${{ env.REGISTRY_USER }}
           password: ${{ env.REGISTRY_PASSWORD }}
+          extra-args: |
+            --compression-format=gzip
+            --compression-level=9
 
       - name: Tag with SHA256 Digest
         if: steps.version_check.outputs.skip_build != 'true' && github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
