@@ -49,6 +49,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Install podman
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y podman
+
       - name: Get current UTC timestamp
         id: date
         run: |
@@ -65,22 +70,15 @@ jobs:
           # Find the main base image (not build stages like "FROM scratch AS ctx")
           # Look for FROM lines that don't have "AS <stage_name>" and aren't scratch
           FROM=$(grep '^FROM ' ${{ matrix.containerfile }} | grep -v ' AS ' | grep -v '^FROM scratch' | head -n1 | awk '{print $2}')
-
-          echo "DEBUG: All FROM lines:"
           grep '^FROM ' ${{ matrix.containerfile }} || echo "No FROM lines found"
-          echo "DEBUG: FROM lines without AS:"
           grep '^FROM ' ${{ matrix.containerfile }} | grep -v ' AS ' || echo "No FROM lines without AS found"
-          echo "DEBUG: FROM lines without AS and not scratch:"
           grep '^FROM ' ${{ matrix.containerfile }} | grep -v ' AS ' | grep -v '^FROM scratch' || echo "No valid FROM lines found"
-          echo "DEBUG: Selected FROM value: '$FROM'"
-          echo "DEBUG: FROM length: ${#FROM}"
 
           if [ -z "$FROM" ]; then
             echo "::error::Failed to find a valid base image FROM line in Containerfile"
             echo "::error::Looking for FROM lines that are not build stages (no AS clause) and not scratch"
             exit 1
           fi
-
           if [ "$FROM" = "scratch" ]; then
             echo "Parent is scratch → no upstream version to extract, defaulting to DEFAULT_TAG"
             echo "parent_version=${{ env.DEFAULT_TAG }}" >> $GITHUB_OUTPUT
@@ -92,10 +90,9 @@ jobs:
           echo "is_scratch=false" >> $GITHUB_OUTPUT
 
           # Get the version label from the parent image
-          echo "DEBUG: About to inspect docker://$FROM"
           UPSTREAM_VERSION=$(skopeo inspect docker://$FROM \
                            | jq -r '.Labels["org.opencontainers.image.version"] // empty')
-          echo "DEBUG: Upstream version label: '$UPSTREAM_VERSION'"
+          echo "Upstream version label: '$UPSTREAM_VERSION'"
 
           if [ -z "$UPSTREAM_VERSION" ]; then
             echo "::error::Failed to get org.opencontainers.image.version label from $FROM"
@@ -110,7 +107,6 @@ jobs:
           fi
 
           # Use the version label as our upstream tag
-          echo "DEBUG: Using version label as tag: '$UPSTREAM_VERSION'"
           echo "upstream_tag=$UPSTREAM_VERSION" >> $GITHUB_OUTPUT
           echo "parent_version=$UPSTREAM_VERSION" >> $GITHUB_OUTPUT
 
@@ -123,7 +119,7 @@ jobs:
         run: |
           EXISTING=$(skopeo inspect \
             --format='{{ index .Labels "org.opencontainers.image.version" }}' \
-            docker://${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:latest 2>/dev/null || echo "")
+            docker://${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}${{ matrix.image_suffix }}:latest 2>/dev/null || echo "")
           echo "Existing latest has version: $EXISTING"
           echo "New upstream version: ${{ steps.parent_tag.outputs.parent_version }}"
 
@@ -142,17 +138,9 @@ jobs:
           ORIGINAL_FROM_LINE=$(grep '^FROM ' ${{ matrix.containerfile }} | grep -v ' AS ' | grep -v '^FROM scratch' | head -n1)
           BASE_IMAGE=$(echo "$ORIGINAL_FROM_LINE" | awk '{print $2}' | sed 's/:.*//')
           UPSTREAM_TAG="${{ steps.parent_tag.outputs.upstream_tag }}"
-
-          echo "DEBUG: Original FROM line: $ORIGINAL_FROM_LINE"
-          echo "DEBUG: Base image: $BASE_IMAGE"
-          echo "DEBUG: New upstream tag: $UPSTREAM_TAG"
-          echo "Updating Containerfile to use: ${BASE_IMAGE}:${UPSTREAM_TAG}"
-
           # Replace only the main base image FROM line, not the build stage ones
           sed "s|^FROM ${BASE_IMAGE}.*$|FROM ${BASE_IMAGE}:${UPSTREAM_TAG}|" ${{ matrix.containerfile }} > ${{ matrix.containerfile }}.tmp
           mv ${{ matrix.containerfile }}.tmp ${{ matrix.containerfile }}
-
-          echo "Updated Containerfile FROM lines:"
           grep '^FROM ' ${{ matrix.containerfile }}
 
       - name: Image Metadata
@@ -183,24 +171,107 @@ jobs:
           sep-tags: " "
           sep-annotations: " "
 
-      - name: Build Image
+      - name: Build OCI Image with Podman
         if: steps.version_check.outputs.skip_build != 'true'
         id: build_image
-        uses: redhat-actions/buildah-build@v2.13
+        run: |
+          set -euo pipefail
+
+          # Build the image using podman with OCI format
+          echo "Building image with podman..."
+
+          # Prepare label arguments
+          LABEL_ARGS=""
+          LABELS="${{ steps.metadata.outputs.labels }}"
+          if [[ -n "$LABELS" ]]; then
+            while IFS= read -r label; do
+              if [[ -n "$label" ]]; then
+                LABEL_ARGS="$LABEL_ARGS --label \"$label\""
+              fi
+            done <<< "$LABELS"
+          fi
+
+          # Build the image
+          eval "podman build \
+            --format oci \
+            --file ${{ matrix.containerfile }} \
+            --tag ${{ env.IMAGE_NAME }}${{ matrix.image_suffix }}:${{ env.DEFAULT_TAG }} \
+            $LABEL_ARGS \
+            ."
+
+          echo "Image built successfully"
+
+          # Verify the image was created
+          if ! podman image exists "${{ env.IMAGE_NAME }}${{ matrix.image_suffix }}:${{ env.DEFAULT_TAG }}"; then
+            echo "::error::Built image not found in local storage"
+            exit 1
+          fi
+
+          # Get the full image ID for rechunker
+          IMAGE_ID=$(podman image inspect "${{ env.IMAGE_NAME }}${{ matrix.image_suffix }}:${{ env.DEFAULT_TAG }}" --format='{{.Id}}')
+          echo "image_id=$IMAGE_ID" >> $GITHUB_OUTPUT
+
+          echo "=== Built image details ==="
+          echo "Image ID: $IMAGE_ID"
+          podman images | grep "${{ env.IMAGE_NAME }}${{ matrix.image_suffix }}" || echo "Image not found in listing"
+          echo "=========================="
+
+      - name: Run Rechunker
+        if: steps.version_check.outputs.skip_build != 'true'
+        id: rechunk
+        uses: hhd-dev/rechunk@v1.2.2
         with:
-          containerfiles: ./${{ matrix.containerfile }}
-          image: ${{ env.IMAGE_NAME }}${{ matrix.image_suffix }}
-          tags: ${{ steps.metadata.outputs.tags }}
+          rechunk: "ghcr.io/hhd-dev/rechunk:v1.2.2"
+          ref: "${{ steps.build_image.outputs.image_id }}"
+          prev-ref: "${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}${{ matrix.image_suffix }}:${{ env.DEFAULT_TAG }}"
+          skip_compression: true
+          version: ${{ steps.parent_tag.outputs.parent_version }}
           labels: ${{ steps.metadata.outputs.labels }}
-          oci: false
+
+      - name: Load rechunked image and tag
+        if: steps.version_check.outputs.skip_build != 'true'
+        run: |
+          set -euo pipefail
+          RECHUNKED_REF="${{ steps.rechunk.outputs.ref }}"
+          echo "Rechunked image reference: $RECHUNKED_REF"
+          if [[ -z "$RECHUNKED_REF" ]]; then
+            echo "::error::Rechunk output ref is empty"
+            exit 1
+          fi
+          echo "=== Available images in podman storage ==="
+          podman images
+          echo "=========================================="
+          IMAGE="$RECHUNKED_REF"
+          if ! podman image exists "$IMAGE"; then
+            echo "::error::Rechunked image $IMAGE not found in local storage"
+            echo "::error::Available images:"
+            podman images
+            exit 1
+          fi
+          echo "Successfully found rechunked image: $IMAGE"
+          # Tag the image with all metadata tags
+          TAGS="${{ steps.metadata.outputs.tags }}"
+          if [[ -n "$TAGS" ]]; then
+            echo "Tagging image with tags: $TAGS"
+            for tag in $TAGS; do
+              podman tag "$IMAGE" "${{ env.IMAGE_NAME }}${{ matrix.image_suffix }}:$tag"
+            done
+          else
+            echo "::warning::No tags found in metadata output"
+          fi
+          echo "=== Final tagged images ==="
+          podman images | grep "${{ env.IMAGE_NAME }}${{ matrix.image_suffix }}" || echo "No tagged images found"
+          echo "============================"
+          # Safely cleanup rechunk output after successful tagging
+          if [[ -n "${{ steps.rechunk.outputs.output }}" ]] && [[ -d "${{ steps.rechunk.outputs.output }}" ]]; then
+            echo "Cleaning up rechunk output directory: ${{ steps.rechunk.outputs.output }}"
+            rm -rf "${{ steps.rechunk.outputs.output }}"
+          fi
 
       - name: Login to GitHub Container Registry
-        uses: docker/login-action@v3.4.0
         if: steps.version_check.outputs.skip_build != 'true' && github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | podman login ghcr.io -u "${{ github.actor }}" --password-stdin
 
       - name: Lowercase Registry and Image
         if: steps.version_check.outputs.skip_build != 'true'
@@ -211,19 +282,38 @@ jobs:
           echo "registry_lower=${REGISTRY_LOWER}" >> $GITHUB_OUTPUT
           echo "image_lower=${IMAGE_LOWER}" >> $GITHUB_OUTPUT
 
-      - name: Push To GHCR
-        uses: redhat-actions/push-to-registry@v2.8
+      - name: Push To GHCR with Podman
         if: steps.version_check.outputs.skip_build != 'true' && github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
         id: push
-        env:
-          REGISTRY_USER: ${{ github.actor }}
-          REGISTRY_PASSWORD: ${{ github.token }}
-        with:
-          registry: ${{ steps.lowercase.outputs.registry_lower }}
-          image: ${{ steps.lowercase.outputs.image_lower }}
-          tags: ${{ steps.metadata.outputs.tags }}
-          username: ${{ env.REGISTRY_USER }}
-          password: ${{ env.REGISTRY_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          REGISTRY_LOWER="${{ steps.lowercase.outputs.registry_lower }}"
+          IMAGE_LOWER="${{ steps.lowercase.outputs.image_lower }}"
+          TAGS="${{ steps.metadata.outputs.tags }}"
+
+          echo "Pushing images to registry..."
+
+          # Push each tag and capture the digest from the first push
+          DIGEST=""
+          for tag in $TAGS; do
+            echo "Pushing: ${REGISTRY_LOWER}/${IMAGE_LOWER}:${tag}"
+            PUSH_OUTPUT=$(podman push "${{ env.IMAGE_NAME }}${{ matrix.image_suffix }}:${tag}" "${REGISTRY_LOWER}/${IMAGE_LOWER}:${tag}" 2>&1)
+            echo "$PUSH_OUTPUT"
+            
+            # Extract digest from the first push (all tags point to the same image)
+            if [[ -z "$DIGEST" ]]; then
+              DIGEST=$(echo "$PUSH_OUTPUT" | grep -o 'sha256:[a-f0-9]\{64\}' | head -n1 || echo "")
+            fi
+          done
+
+          if [[ -z "$DIGEST" ]]; then
+            echo "::error::Failed to extract digest from push output"
+            exit 1
+          fi
+
+          echo "Successfully pushed with digest: $DIGEST"
+          echo "digest=$DIGEST" >> $GITHUB_OUTPUT
 
       - name: Tag with SHA256 Digest
         if: steps.version_check.outputs.skip_build != 'true' && github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
