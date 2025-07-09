@@ -14,6 +14,8 @@ RUN --mount=type=bind,from=ctx,source=/,target=/ctx \
   mkdir -p /nix && \
   # pick up any outstanding updates since the last base image
   dnf5 up --refresh -y && \
+  # prevent dnf from polluting the new layers
+  dnf5 clean all && rm -rf /var/cache/dnf /var/cache/yum /var/log/* && \
   ostree container commit
 
 ### LINTING
