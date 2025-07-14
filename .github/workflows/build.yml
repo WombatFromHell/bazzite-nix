@@ -146,12 +146,12 @@ jobs:
 
       - name: Run Rechunker
         id: rechunk
-        uses: hhd-dev/rechunk@ca77507401f8700bb0b25ebecbbf980a078cd180 # v1.2.2
+        uses: hhd-dev/rechunk@v1.2.3
         with:
-          rechunk: "ghcr.io/hhd-dev/rechunk:v1.2.2"
+          rechunk: "ghcr.io/hhd-dev/rechunk:v1.2.3"
           ref: "localhost/${{ env.IMAGE_NAME }}${{ matrix.image_suffix }}:${{ env.DEFAULT_TAG }}"
           prev-ref: "${{ steps.lowercase.outputs.registry_lower }}/${{ env.IMAGE_NAME }}${{ matrix.image_suffix }}:${{ env.DEFAULT_TAG }}"
-          skip_compression: false
+          skip_compression: true
           max-layers: 100
           labels: ${{ steps.metadata.outputs.labels }} # Rechunk strips out all the labels during build, this needs to be reapplied here with newline separator
 
