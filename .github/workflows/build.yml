@@ -274,18 +274,6 @@ jobs:
             --tag "localhost/${{ env.IMAGE_NAME }}${{ matrix.image_suffix }}:${{ env.DEFAULT_TAG }}" \
             --file ./${{ matrix.containerfile }}
 
-      - name: Remove source images
-        run: |
-          images=$(sudo podman images -n --sort repository --format '{{.ID}} {{.Repository}}' | grep -v localhost | awk '{print $1}')
-          if [ -n "${images}" ]; then
-            for image in ${images}; do
-              echo "Removing image: $image"
-              sudo podman rmi --force "$image"
-            done
-          else
-            echo "No images to remove."
-          fi
-
       - name: Lowercase Registry and Image
         if: steps.version_check.outputs.skip_build != 'true'
         id: lowercase
@@ -322,15 +310,6 @@ jobs:
           STEPS_RECHUNK_CONCLUSION: ${{ steps.rechunk.conclusion }}
           STEPS_RECHUNK_OUTPUTS_CHANGELOG: ${{ steps.rechunk.outputs.changelog }}
           STEPS_RECHUNK_OUTPUTS_MANIFEST: ${{ steps.rechunk.outputs.manifest }}
-
-      - name: Remove Rechunker image
-        run: |
-          image=$(sudo podman images -n --sort repository --format '{{.ID}} {{.Repository}}' | grep rechunk | awk '{print $1}')
-          if [ -n "${image}" ]; then
-            sudo podman rmi --force "$image"
-          else
-            echo "No image to remove"
-          fi
 
       - name: Regenerate tags
         run: |
