@@ -6,8 +6,8 @@ on:
   #     - main
   #   paths-ignore:
   #     - "**/README.md"
-  schedule:
-    - cron: "0 6 */2 * *" # 06:00 UTC (every other day)
+  # schedule:
+  #   - cron: "0 6 */2 * *" # 06:00 UTC (every other day)
   workflow_dispatch:
     inputs:
       force_build:
@@ -267,6 +267,7 @@ jobs:
           rechunk: "ghcr.io/hhd-dev/rechunk:v1.2.3"
           ref: "raw-img"
           prev-ref: "${{ steps.lowercase.outputs.registry_lower }}/${{ env.IMAGE_NAME }}${{ matrix.image_suffix }}:${{ env.DEFAULT_TAG }}"
+          skip_compression: true
           max-layers: 100
           labels: |
             io.artifacthub.package.readme-url=https://raw.githubusercontent.com/${{ github.repository_owner }}/${{ github.event.repository.name }}/refs/heads/main/README.md
@@ -289,26 +290,21 @@ jobs:
           attempt_limit: 3
           attempt_delay: 15000
           command: |
+            FULL_DIGEST=$(sudo skopeo inspect --format '{{.Digest}}' ${{ steps.rechunk.outputs.ref }})
+            DIGEST=$(echo "$FULL_DIGEST" | sed 's/sha256://')
+            echo "Rechunk digest is: $DIGEST"
+            echo "digest=${DIGEST}" >> $GITHUB_OUTPUT
             tags=(
               ${{ steps.parent_tag.outputs.parent_version }}
+              ${DIGEST}
               latest
             )
             echo "${{ secrets.GITHUB_TOKEN }}" | sudo podman login ghcr.io -u ${{ github.actor }} --password-stdin
-            IMAGE=$(sudo podman pull ${{ steps.rechunk.outputs.ref }})
             for tag in ${tags}; do
               dest_image="${{ steps.lowercase.outputs.registry_lower }}/${{ env.IMAGE_NAME }}:$tag"
-              sudo skopeo copy ${IMAGE} docker://$dest_image &&
+              sudo skopeo copy ${{ steps.rechunk.outputs.ref }} docker://$dest_image &&
                 log_sum "$dest_image"
             done
-
-      - name: Get Image Digest
-        id: digest
-        if: steps.version_check.outputs.skip_build != 'true'
-        run: |
-          # Get digest for signing
-          DIGEST=$(sudo skopeo inspect --format '{{.Digest}}' ${{ steps.rechunk.outputs.ref }})
-          echo "Digest is: $DIGEST"
-          echo "digest=${DIGEST}" >> $GITHUB_OUTPUT
 
       - name: Install Cosign
         uses: sigstore/cosign-installer@v3.9.1
@@ -317,7 +313,7 @@ jobs:
       - name: Sign container image
         if: steps.version_check.outputs.skip_build != 'true'
         run: |
-          IMAGE_DIGEST="${{ steps.digest.outputs.digest }}"
+          IMAGE_DIGEST="${{ steps.push.outputs.digest }}"
           IMAGE_REGISTRY="${{ steps.lowercase.outputs.registry_lower }}"
           IMAGE_NAME="${{ steps.lowercase.outputs.image_lower }}"
           echo "Signing image: ${IMAGE_REGISTRY}/${IMAGE_NAME}@${IMAGE_DIGEST}"
