@@ -31,6 +31,7 @@ concurrency:
 
 jobs:
   check_upstream_digest:
+    name: Check for changes in upstream digest
     runs-on: ubuntu-24.04
     outputs:
       digest_changed: ${{ steps.compare.outputs.changed }}
@@ -174,7 +175,7 @@ jobs:
           fi
 
   build_push:
-    name: Build and push image if upstream digest has changed
+    name: Build and push image
     needs: check_upstream_digest
     if: needs.check_upstream_digest.outputs.should_build == 'true'
     runs-on: ubuntu-24.04
@@ -331,15 +332,15 @@ jobs:
             echo "No image to remove"
           fi
 
-      - name: Load in podman and tag
+      - name: Regenerate tags
         run: |
-          podman pull ${LOCAL_REF}
+          IMAGE=$(podman pull ${STEPS_RECHUNK_OUTPUTS_REF})
           sudo rm -rf ${{ steps.rechunk.outputs.location }}
           for tag in ${{ steps.metadata.outputs.tags }}; do
-            podman tag ${LOCAL_REF} ${{ env.IMAGE_NAME }}:$tag
+            sudo podman tag $IMAGE ${{ env.IMAGE_NAME }}:$tag
           done
         env:
-          LOCAL_REF: ${{ steps.rechunk.outputs.ref }}
+          STEPS_RECHUNK_OUTPUTS_REF: ${{ steps.rechunk.outputs.ref }}
 
       - name: Login to GitHub Container Registry
         uses: docker/login-action@v3.4.0
