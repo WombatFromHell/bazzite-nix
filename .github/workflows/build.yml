@@ -334,13 +334,15 @@ jobs:
 
       - name: Regenerate tags
         run: |
-          IMAGE=$(podman pull ${STEPS_RECHUNK_OUTPUTS_REF})
+          IMAGE=$(sudo podman pull ${{ steps.rechunk.outputs.ref }})
+          echo "Got image ref: $IMAGE"
           sudo rm -rf ${{ steps.rechunk.outputs.location }}
-          for tag in ${{ steps.metadata.outputs.tags }}; do
-            sudo podman tag $IMAGE ${{ env.IMAGE_NAME }}:$tag
+          echo "${{ steps.metadata.outputs.tags }}" | while IFS= read -r tag; do
+            if [ -n "$tag" ]; then
+                echo "Tagging $IMAGE with: $tag"
+                sudo podman tag $IMAGE ${{ env.IMAGE_NAME }}:$tag
+            fi
           done
-        env:
-          STEPS_RECHUNK_OUTPUTS_REF: ${{ steps.rechunk.outputs.ref }}
 
       - name: Login to GitHub Container Registry
         uses: docker/login-action@v3.4.0
