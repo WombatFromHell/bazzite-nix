@@ -294,23 +294,6 @@ jobs:
           max-layers: 100
           labels: ${{ steps.metadata.outputs.labels }} # Rechunk strips out all the labels during build, this needs to be reapplied here with newline separator
 
-      - name: Rechunk output
-        run: |
-          if [[ "${STEPS_RECHUNK_CONCLUSION}" == "success" ]]; then
-            echo "${STEPS_RECHUNK_OUTPUTS_CHANGELOG}"
-            echo "${STEPS_RECHUNK_OUTPUTS_MANIFEST}"
-            cat "${STEPS_RECHUNK_OUTPUTS_CHANGELOG}"
-            cat "${STEPS_RECHUNK_OUTPUTS_MANIFEST}"
-
-          else
-            echo "Rechunk conclusion:"
-            echo "${STEPS_RECHUNK_CONCLUSION}"
-          fi
-        env:
-          STEPS_RECHUNK_CONCLUSION: ${{ steps.rechunk.conclusion }}
-          STEPS_RECHUNK_OUTPUTS_CHANGELOG: ${{ steps.rechunk.outputs.changelog }}
-          STEPS_RECHUNK_OUTPUTS_MANIFEST: ${{ steps.rechunk.outputs.manifest }}
-
       - name: Regenerate tags
         run: |
           IMAGE=$(sudo podman pull ${{ steps.rechunk.outputs.ref }})
