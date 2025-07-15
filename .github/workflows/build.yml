@@ -1,32 +1,182 @@
 ---
 name: Build Custom Image
 on:
-  # pull_request:
-  #   branches:
-  #     - main
-  # schedule:
-  #   - cron: "0 0 * * 0" # 00:00 UTC every Sunday
   # push:
   #   branches:
   #     - main
   #   paths-ignore:
   #     - "**/README.md"
+  schedule:
+    - cron: "0 6 * * *" # 06:00 UTC every day
   workflow_dispatch:
+    inputs:
+      force_build:
+        description: "Force build even if digest unchanged"
+        required: false
+        default: false
+        type: boolean
 
 env:
   DEFAULT_TAG: "latest"
+  UPSTREAM_IMAGE: "ghcr.io/ublue-os/bazzite:testing-42"
   IMAGE_NAME: "${{ github.event.repository.name }}"
   IMAGE_DESC: "Bazzite Testing image with Nix mount support"
   IMAGE_REGISTRY: "ghcr.io/${{ github.repository_owner }}"
   ARTIFACTHUB_LOGO_URL: "https://avatars.githubusercontent.com/u/120078124?s=200&v=4"
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref || github.run_id }}-${{ inputs.brand_name}}-${{ inputs.stream_name }}
+  # Ensure only one run per branch/ref at a time
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  check_upstream_digest:
+    runs-on: ubuntu-24.04
+    outputs:
+      digest_changed: ${{ steps.compare.outputs.changed }}
+      current_digest: ${{ steps.get_digest.outputs.digest }}
+      should_build: ${{ steps.decide.outputs.should_build }}
+    steps:
+      - name: Get current digest from GHCR
+        id: get_digest
+        run: |
+          echo "Fetching digest for ${{ env.UPSTREAM_IMAGE }}"
+          # Retry logic for network issues
+          for i in {1..3}; do
+            if DIGEST=$(skopeo inspect docker://${{ env.UPSTREAM_IMAGE }} | jq -r '.Digest'); then
+              echo "Successfully fetched digest: $DIGEST"
+              echo "digest=$DIGEST" >> $GITHUB_OUTPUT
+              break
+            else
+              echo "Attempt $i failed, retrying in 10 seconds..."
+              sleep 10
+              if [ $i -eq 3 ]; then
+                echo "::error::Failed to fetch digest after 3 attempts"
+                exit 1
+              fi
+            fi
+          done
+
+      - name: Generate cache keys
+        id: cache_keys
+        run: |
+          # Use repository and branch for cache key diversity
+          REPO_HASH=$(echo "${{ github.repository }}" | sha256sum | cut -c1-8)
+          BRANCH_HASH=$(echo "${{ github.ref_name }}" | sha256sum | cut -c1-8)
+          # Different cache strategies based on trigger
+          if [ "${{ github.event_name }}" == "schedule" ]; then
+            # For scheduled runs: persistent cache (no date rotation)
+            PRIMARY_KEY="digest-cache-${REPO_HASH}-${BRANCH_HASH}"
+            echo "Using persistent cache for scheduled build"
+          elif [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            # For manual runs: allow cache bypass with date if needed
+            if [ "${{ github.event.inputs.force_build }}" == "true" ]; then
+              DATE_KEY=$(date +%Y%m%d%H%M)  # Include time for unique key
+              PRIMARY_KEY="digest-cache-${REPO_HASH}-${BRANCH_HASH}-force-${DATE_KEY}"
+              echo "Using force cache key for manual build"
+            else
+              PRIMARY_KEY="digest-cache-${REPO_HASH}-${BRANCH_HASH}"
+              echo "Using persistent cache for manual build"
+            fi
+          else
+            # For other triggers (push, PR): use persistent cache
+            PRIMARY_KEY="digest-cache-${REPO_HASH}-${BRANCH_HASH}"
+            echo "Using persistent cache for ${{ github.event_name }} trigger"
+          fi
+          # Fallback keys for cache restoration (properly formatted)
+          FALLBACK_KEYS="digest-cache-${REPO_HASH}"
+          echo "primary_key=$PRIMARY_KEY" >> $GITHUB_OUTPUT
+          # Use proper multi-line format for GitHub Actions output
+          echo "fallback_keys<<EOF" >> $GITHUB_OUTPUT
+          echo "$FALLBACK_KEYS" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+          echo "Cache keys generated:"
+          echo "  Primary: $PRIMARY_KEY"
+          echo "  Fallbacks: $FALLBACK_KEYS"
+
+      - name: Restore digest cache
+        id: restore_cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .digest-cache
+          key: ${{ steps.cache_keys.outputs.primary_key }}
+          restore-keys: ${{ steps.cache_keys.outputs.fallback_keys }}
+
+      - name: Check cache restoration
+        id: cache_status
+        run: |
+          CACHE_HIT="${{ steps.restore_cache.outputs.cache-hit }}"
+          CACHE_KEY="${{ steps.restore_cache.outputs.cache-matched-key }}"
+          if [ "$CACHE_HIT" == "true" ]; then
+            echo "Cache hit with key: $CACHE_KEY"
+            echo "cache_available=true" >> $GITHUB_OUTPUT
+          else
+            echo "Cache miss, will perform full comparison"
+            echo "cache_available=false" >> $GITHUB_OUTPUT
+          fi
+          # List cache contents for debugging
+          echo "Cache directory contents:"
+          ls -la .digest-cache/ || echo "Cache directory is empty"
+
+      - name: Compare digests
+        id: compare
+        run: |
+          CURRENT_DIGEST="${{ steps.get_digest.outputs.digest }}"
+          CHANGED="false"
+          REASON=""
+          # Check if this is a forced build
+          if [ "${{ github.event.inputs.force_build }}" == "true" ]; then
+            CHANGED="true"
+            REASON="Force build requested"
+          elif [ ! -f .digest-cache/last_digest ]; then
+            # No previous digest found (first run or cache evicted)
+            CHANGED="true"
+            REASON="No previous digest found (first run or cache evicted)"
+          else
+            # Compare with previous digest
+            LAST_DIGEST=$(cat .digest-cache/last_digest)
+            echo "Current digest:  $CURRENT_DIGEST"
+            echo "Previous digest: $LAST_DIGEST"
+            if [ "$CURRENT_DIGEST" != "$LAST_DIGEST" ]; then
+              CHANGED="true"
+              REASON="Digest changed from $LAST_DIGEST to $CURRENT_DIGEST"
+            else
+              CHANGED="false"
+              REASON="Digest unchanged: $CURRENT_DIGEST"
+            fi
+          fi
+          echo "changed=$CHANGED" >> $GITHUB_OUTPUT
+          echo "reason=$REASON" >> $GITHUB_OUTPUT
+          echo "Comparison result: $CHANGED"
+          echo "Reason: $REASON"
+
+      - name: Update digest cache
+        run: |
+          mkdir -p .digest-cache
+          echo "${{ steps.get_digest.outputs.digest }}" > .digest-cache/last_digest
+          echo "Updated digest cache with: ${{ steps.get_digest.outputs.digest }}"
+
+      - name: Save digest cache
+        uses: actions/cache/save@v4
+        with:
+          path: .digest-cache
+          key: ${{ steps.cache_keys.outputs.primary_key }}
+
+      - name: Final build decision
+        id: decide
+        run: |
+          SHOULD_BUILD="${{ steps.compare.outputs.changed }}"
+          echo "should_build=$SHOULD_BUILD" >> $GITHUB_OUTPUT
+          if [ "$SHOULD_BUILD" == "true" ]; then
+            echo "Build will proceed: ${{ steps.compare.outputs.reason }}"
+          else
+            echo "Build will be skipped: ${{ steps.compare.outputs.reason }}"
+          fi
+
   build_push:
-    name: Build and push image
+    name: Build and push image if upstream digest has changed
+    needs: check_upstream_digest
+    if: needs.check_upstream_digest.outputs.should_build == 'true'
     runs-on: ubuntu-24.04
     strategy:
       matrix:
@@ -151,7 +301,7 @@ jobs:
           rechunk: "ghcr.io/hhd-dev/rechunk:v1.2.3"
           ref: "localhost/${{ env.IMAGE_NAME }}${{ matrix.image_suffix }}:${{ env.DEFAULT_TAG }}"
           prev-ref: "${{ steps.lowercase.outputs.registry_lower }}/${{ env.IMAGE_NAME }}${{ matrix.image_suffix }}:${{ env.DEFAULT_TAG }}"
-          skip_compression: true
+          skip_compression: false # don't skip compression here to save a little space
           max-layers: 100
           labels: ${{ steps.metadata.outputs.labels }} # Rechunk strips out all the labels during build, this needs to be reapplied here with newline separator
 
@@ -183,16 +333,13 @@ jobs:
 
       - name: Load in podman and tag
         run: |
-          IMAGE=$(podman pull ${STEPS_RECHUNK_OUTPUTS_REF})
-          sudo rm -rf ${STEPS_RECHUNK_OUTPUTS_LOCATION}
-          for tag in ${STEPS_METADATA_OUTPUTS_TAGS}; do
-            podman tag $IMAGE ${IMAGE_NAME}:$tag
+          podman pull ${LOCAL_REF}
+          sudo rm -rf ${{ steps.rechunk.outputs.location }}
+          for tag in ${{ steps.metadata.outputs.tags }}; do
+            podman tag ${LOCAL_REF} ${{ env.IMAGE_NAME }}:$tag
           done
         env:
-          STEPS_RECHUNK_OUTPUTS_REF: ${{ steps.rechunk.outputs.ref }}
-          STEPS_RECHUNK_OUTPUTS_LOCATION: ${{ steps.rechunk.outputs.location }}
-          STEPS_METADATA_OUTPUTS_TAGS: ${{ steps.metadata.outputs.tags }}
-          IMAGE_NAME: ${{ env.IMAGE_NAME }}
+          LOCAL_REF: ${{ steps.rechunk.outputs.ref }}
 
       - name: Login to GitHub Container Registry
         uses: docker/login-action@v3.4.0
@@ -215,9 +362,6 @@ jobs:
           tags: ${{ steps.metadata.outputs.tags }}
           username: ${{ env.REGISTRY_USER }}
           password: ${{ env.REGISTRY_PASSWORD }}
-          extra-args: |
-            --compression-format=gzip
-            --compression-level=9
 
       - name: Tag with SHA256 Digest
         if: steps.version_check.outputs.skip_build != 'true' && github.event_name != 'pull_request' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
