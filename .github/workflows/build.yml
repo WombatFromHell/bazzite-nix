@@ -295,15 +295,17 @@ jobs:
             echo "Rechunk digest is: $DIGEST"
             echo "digest=${DIGEST}" >> $GITHUB_OUTPUT
             tags=(
-              ${{ steps.parent_tag.outputs.parent_version }}
-              ${DIGEST}
               latest
+              ${{ steps.parent_tag.outputs.parent_version }}
+              $DIGEST
             )
             echo "${{ secrets.GITHUB_TOKEN }}" | sudo podman login ghcr.io -u ${{ github.actor }} --password-stdin
-            for tag in ${tags}; do
-              dest_image="${{ steps.lowercase.outputs.registry_lower }}/${{ env.IMAGE_NAME }}:$tag"
-              echo "Uploading to: ${dest_image}"
-              sudo skopeo copy ${{ steps.rechunk.outputs.ref }} docker://$dest_image
+            # Use Skopeo to upload 'latest' tag first
+            BASE_IMG="docker://${{ steps.lowercase.outputs.registry_lower }}/${{ env.IMAGE_NAME }}"
+            sudo skopeo copy ${{ steps.rechunk.outputs.ref }} ${BASE_IMG}:${tags[0]}
+            # Then copy from the target to apply aliases
+            for tag in "${tags[@]:1}"; do
+              sudo skopeo copy ${BASE_IMG}:${tags[0]} ${BASE_IMG}:${tag}
             done
 
       - name: Install Cosign
