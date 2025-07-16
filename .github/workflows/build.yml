@@ -218,7 +218,11 @@ jobs:
             echo "::error::No valid FROM found in ${{ matrix.containerfile }}" && exit 1
           fi
           if [ "$BASE" = "scratch" ]; then
-            echo "parent_version=$DEFAULT_TAG" >> $GITHUB_OUTPUT && exit 0
+            echo "parent_version=${{ env.DEFAULT_TAG }}" >> $GITHUB_OUTPUT && exit 0
+          fi
+          # Verify the base image matches our upstream tracking
+          if [ "$BASE" != "${{ env.UPSTREAM_IMAGE }}" ]; then
+            echo "::warning::Containerfile base ($BASE) differs from tracked upstream (${{ env.UPSTREAM_IMAGE }})"
           fi
           skopeo inspect docker://$BASE \
             | jq -r '.Labels["org.opencontainers.image.version"]' \
@@ -241,17 +245,7 @@ jobs:
           echo "registry_lower=${REGISTRY_LOWER}" >> $GITHUB_OUTPUT
           echo "image_lower=${IMAGE_LOWER}" >> $GITHUB_OUTPUT
 
-      - name: Skip if unchanged
-        id: version_check
-        run: |
-          EXIST=$(skopeo inspect --format '{{ index .Labels "org.opencontainers.image.version" }}' \
-            docker://${{ env.IMAGE_REGISTRY }}/${{ steps.lowercase.outputs.image_lower }}:latest 2>/dev/null || echo "")
-          [[ "$EXIST" == "${{ steps.parent_tag.outputs.parent_version }}" ]] \
-            && echo "skip_build=true" >> $GITHUB_OUTPUT && exit 0
-          echo "skip_build=false" >> $GITHUB_OUTPUT
-
       - name: Build image
-        if: steps.version_check.outputs.skip_build != 'true'
         id: build_image
         run: |
           # Builds image in root store as root, to be picked up by Rechunker
@@ -262,7 +256,6 @@ jobs:
       - name: Run Rechunker
         id: rechunk
         uses: hhd-dev/rechunk@ded27feba22df48134eece2c66ba0fca1289ff40 # v1.2.3
-        if: steps.version_check.outputs.skip_build != 'true'
         with:
           rechunk: "ghcr.io/hhd-dev/rechunk:v1.2.3"
           ref: "raw-img"
@@ -283,7 +276,6 @@ jobs:
             containers.bootc=1
 
       - name: Get Digest
-        if: steps.version_check.outputs.skip_build != 'true'
         id: digest
         run: |
           FULL_DIGEST=$(sudo skopeo inspect --format '{{.Digest}}' ${{ steps.rechunk.outputs.ref }})
@@ -293,7 +285,6 @@ jobs:
 
       - name: Push To GHCR
         uses: Wandalen/wretry.action@e68c23e6309f2871ca8ae4763e7629b9c258e1ea # v3.8.0
-        if: steps.version_check.outputs.skip_build != 'true'
         id: push
         with:
           attempt_limit: 3
@@ -315,10 +306,8 @@ jobs:
 
       - name: Install Cosign
         uses: sigstore/cosign-installer@v3.9.1
-        if: steps.version_check.outputs.skip_build != 'true'
 
       - name: Sign container image
-        if: steps.version_check.outputs.skip_build != 'true'
         run: |
           IMAGE_DIGEST="${{ steps.digest.outputs.full_digest }}"
           IMAGE_REGISTRY="${{ steps.lowercase.outputs.registry_lower }}"
