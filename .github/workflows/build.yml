@@ -6,8 +6,8 @@ on:
   #     - main
   #   paths-ignore:
   #     - "**/README.md"
-  # schedule:
-  #   - cron: "0 6 */2 * *" # 06:00 UTC (every other day)
+  schedule:
+    - cron: "0 6 */2 * *" # 06:00 UTC (every other day)
   workflow_dispatch:
     inputs:
       force_build:
@@ -302,8 +302,8 @@ jobs:
             echo "${{ secrets.GITHUB_TOKEN }}" | sudo podman login ghcr.io -u ${{ github.actor }} --password-stdin
             for tag in ${tags}; do
               dest_image="${{ steps.lowercase.outputs.registry_lower }}/${{ env.IMAGE_NAME }}:$tag"
-              sudo skopeo copy ${{ steps.rechunk.outputs.ref }} docker://$dest_image &&
-                log_sum "$dest_image"
+              echo "Uploading to: ${dest_image}"
+              sudo skopeo copy ${{ steps.rechunk.outputs.ref }} docker://$dest_image
             done
 
       - name: Install Cosign
