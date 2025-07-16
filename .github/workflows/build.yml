@@ -233,11 +233,19 @@ jobs:
         run: echo "${{ secrets.GITHUB_TOKEN }}" \
           | skopeo login ghcr.io -u ${{ github.actor }} --password-stdin
 
+      - name: Lowercase Registry and Image
+        id: lowercase
+        run: |
+          REGISTRY_LOWER=$(echo "${{ env.IMAGE_REGISTRY }}" | tr '[:upper:]' '[:lower:]')
+          IMAGE_LOWER=$(echo "${{ env.IMAGE_NAME }}${{ matrix.image_suffix }}" | tr '[:upper:]' '[:lower:]')
+          echo "registry_lower=${REGISTRY_LOWER}" >> $GITHUB_OUTPUT
+          echo "image_lower=${IMAGE_LOWER}" >> $GITHUB_OUTPUT
+
       - name: Skip if unchanged
         id: version_check
         run: |
           EXIST=$(skopeo inspect --format '{{ index .Labels "org.opencontainers.image.version" }}' \
-            docker://${{ env.IMAGE_REGISTRY }}/${{ env.IMAGE_NAME }}:latest 2>/dev/null || echo "")
+            docker://${{ env.IMAGE_REGISTRY }}/${{ steps.lowercase.outputs.image_lower }}:latest 2>/dev/null || echo "")
           [[ "$EXIST" == "${{ steps.parent_tag.outputs.parent_version }}" ]] \
             && echo "skip_build=true" >> $GITHUB_OUTPUT && exit 0
           echo "skip_build=false" >> $GITHUB_OUTPUT
@@ -251,14 +259,6 @@ jobs:
             --tag "raw-img" \
             --file ./${{ matrix.containerfile }}
 
-      - name: Lowercase Registry and Image
-        id: lowercase
-        run: |
-          REGISTRY_LOWER=$(echo "${{ env.IMAGE_REGISTRY }}" | tr '[:upper:]' '[:lower:]')
-          IMAGE_LOWER=$(echo "${{ env.IMAGE_NAME }}${{ matrix.image_suffix }}" | tr '[:upper:]' '[:lower:]')
-          echo "registry_lower=${REGISTRY_LOWER}" >> $GITHUB_OUTPUT
-          echo "image_lower=${IMAGE_LOWER}" >> $GITHUB_OUTPUT
-
       - name: Run Rechunker
         id: rechunk
         uses: hhd-dev/rechunk@ded27feba22df48134eece2c66ba0fca1289ff40 # v1.2.3
@@ -266,7 +266,7 @@ jobs:
         with:
           rechunk: "ghcr.io/hhd-dev/rechunk:v1.2.3"
           ref: "raw-img"
-          prev-ref: "${{ steps.lowercase.outputs.registry_lower }}/${{ env.IMAGE_NAME }}${{ matrix.image_suffix }}:${{ env.DEFAULT_TAG }}"
+          prev-ref: "${{ steps.lowercase.outputs.registry_lower }}/${{ steps.lowercase.outputs.image_lower }}:${{ env.DEFAULT_TAG }}"
           skip_compression: true
           max-layers: 100
           labels: |
@@ -275,7 +275,7 @@ jobs:
             org.opencontainers.image.description=${{ env.IMAGE_DESC }}
             org.opencontainers.image.documentation=https://raw.githubusercontent.com/${{ github.repository_owner }}/${{ github.event.repository.name }}/refs/heads/main/README.md
             org.opencontainers.image.source=https://github.com/${{ github.repository_owner }}/${{ github.event.repository.name }}/blob/main/${{ matrix.containerfile }}
-            org.opencontainers.image.title=${{ env.IMAGE_NAME }}${{ matrix.image_suffix }}
+            org.opencontainers.image.title=${{ steps.lowercase.outputs.image_lower }}
             org.opencontainers.image.url=https://github.com/${{ github.repository_owner }}/${{ github.event.repository.name }}
             org.opencontainers.image.vendor=${{ github.repository_owner }}
             org.opencontainers.image.version=${{ steps.parent_tag.outputs.parent_version }}
@@ -306,7 +306,7 @@ jobs:
             )
             echo "${{ secrets.GITHUB_TOKEN }}" | sudo podman login ghcr.io -u ${{ github.actor }} --password-stdin
             # Use Skopeo to upload 'latest' tag first
-            BASE_IMG="docker://${{ steps.lowercase.outputs.registry_lower }}/${{ env.IMAGE_NAME }}"
+            BASE_IMG="docker://${{ steps.lowercase.outputs.registry_lower }}/${{ steps.lowercase.outputs.image_lower }}"
             sudo skopeo copy ${{ steps.rechunk.outputs.ref }} ${BASE_IMG}:${tags[0]}
             # Then copy from the target to apply aliases
             for tag in "${tags[@]:1}"; do
