@@ -7,12 +7,16 @@ on:
   #   paths-ignore:
   #     - "**/README.md"
   schedule:
-    - cron: "0 6 */2 * *" # 06:00 UTC (every other day)
     - cron: "0 6 * * 0" # 06:00 UTC (every Sunday)
   workflow_dispatch:
     inputs:
       force_build:
         description: "Force build even if digest unchanged"
+        required: false
+        default: false
+        type: boolean
+      skip_rechunk:
+        description: "Skip rechunk step (faster build, larger layers)"
         required: false
         default: false
         type: boolean
@@ -256,12 +260,12 @@ jobs:
 
       - name: Run Rechunker
         id: rechunk
+        if: github.event.inputs.skip_rechunk != 'true'
         uses: hhd-dev/rechunk@ded27feba22df48134eece2c66ba0fca1289ff40 # v1.2.3
         with:
           rechunk: "ghcr.io/hhd-dev/rechunk:v1.2.3"
           ref: "raw-img"
           prev-ref: "${{ steps.lowercase.outputs.registry_lower }}/${{ steps.lowercase.outputs.image_lower }}:${{ env.DEFAULT_TAG }}"
-          skip_compression: true
           max-layers: 100
           labels: |
             io.artifacthub.package.readme-url=https://raw.githubusercontent.com/${{ github.repository_owner }}/${{ github.event.repository.name }}/refs/heads/main/README.md
@@ -276,10 +280,35 @@ jobs:
             io.artifacthub.package.logo-url=${{ env.ARTIFACTHUB_LOGO_URL }}
             containers.bootc=1
 
+      - name: Prepare image for push (without rechunk)
+        id: prepare_no_rechunk
+        if: github.event.inputs.skip_rechunk == 'true'
+        run: |
+          # Add labels to the built image when not using rechunk
+          sudo buildah config \
+            --label "io.artifacthub.package.readme-url=https://raw.githubusercontent.com/${{ github.repository_owner }}/${{ github.event.repository.name }}/refs/heads/main/README.md" \
+            --label "org.opencontainers.image.created=${{ steps.date.outputs.date }}" \
+            --label "org.opencontainers.image.description=${{ env.IMAGE_DESC }}" \
+            --label "org.opencontainers.image.documentation=https://raw.githubusercontent.com/${{ github.repository_owner }}/${{ github.event.repository.name }}/refs/heads/main/README.md" \
+            --label "org.opencontainers.image.source=https://github.com/${{ github.repository_owner }}/${{ github.event.repository.name }}/blob/main/${{ matrix.containerfile }}" \
+            --label "org.opencontainers.image.title=${{ steps.lowercase.outputs.image_lower }}" \
+            --label "org.opencontainers.image.url=https://github.com/${{ github.repository_owner }}/${{ github.event.repository.name }}" \
+            --label "org.opencontainers.image.vendor=${{ github.repository_owner }}" \
+            --label "org.opencontainers.image.version=${{ steps.parent_tag.outputs.parent_version }}" \
+            --label "io.artifacthub.package.logo-url=${{ env.ARTIFACTHUB_LOGO_URL }}" \
+            --label "containers.bootc=1" \
+            raw-img
+          echo "ref=containers-storage:raw-img" >> $GITHUB_OUTPUT
+
       - name: Get Digest
         id: digest
         run: |
-          FULL_DIGEST=$(sudo skopeo inspect --format '{{.Digest}}' ${{ steps.rechunk.outputs.ref }})
+          if [ "${{ github.event.inputs.skip_rechunk }}" == "true" ]; then
+            IMAGE_REF="containers-storage:raw-img"
+          else
+            IMAGE_REF="${{ steps.rechunk.outputs.ref }}"
+          fi
+          FULL_DIGEST=$(sudo skopeo inspect --format '{{.Digest}}' ${IMAGE_REF})
           DIGEST=$(echo "$FULL_DIGEST" | sed 's/sha256://')
           echo "full_digest=${FULL_DIGEST}" >> $GITHUB_OUTPUT
           echo "digest=${DIGEST}" >> $GITHUB_OUTPUT
@@ -297,9 +326,17 @@ jobs:
               ${{ steps.digest.outputs.digest }}
             )
             echo "${{ secrets.GITHUB_TOKEN }}" | sudo podman login ghcr.io -u ${{ github.actor }} --password-stdin
+
+            # Determine source image reference
+            if [ "${{ github.event.inputs.skip_rechunk }}" == "true" ]; then
+              SOURCE_REF="containers-storage:raw-img"
+            else
+              SOURCE_REF="${{ steps.rechunk.outputs.ref }}"
+            fi
+
             # Use Skopeo to upload 'latest' tag first
             BASE_IMG="docker://${{ steps.lowercase.outputs.registry_lower }}/${{ steps.lowercase.outputs.image_lower }}"
-            sudo skopeo copy ${{ steps.rechunk.outputs.ref }} ${BASE_IMG}:${tags[0]}
+            sudo skopeo copy ${SOURCE_REF} ${BASE_IMG}:${tags[0]}
             # Then copy from the target to apply aliases
             for tag in "${tags[@]:1}"; do
               sudo skopeo copy ${BASE_IMG}:${tags[0]} ${BASE_IMG}:${tag}
