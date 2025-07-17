@@ -306,7 +306,6 @@ jobs:
           rechunk: "ghcr.io/hhd-dev/rechunk:v1.2.3"
           ref: "raw-img"
           prev-ref: "${{ steps.lowercase.outputs.registry_lower }}/${{ steps.lowercase.outputs.image_lower }}:${{ env.DEFAULT_TAG }}"
-          skip_compression: true
           max-layers: 100
           labels: ${{ steps.labels.outputs.rechunk_labels }}
 
