@@ -346,11 +346,16 @@ jobs:
         uses: sigstore/cosign-installer@v3.9.1
 
       - name: Sign container image
+        if: needs.check_upstream_digest.outputs.should_build == 'true'
         run: |
           IMAGE_DIGEST="${{ steps.digest.outputs.full_digest }}"
           IMAGE_REGISTRY="${{ steps.lowercase.outputs.registry_lower }}"
           IMAGE_NAME="${{ steps.lowercase.outputs.image_lower }}"
           echo "Signing image: ${IMAGE_REGISTRY}/${IMAGE_NAME}@${IMAGE_DIGEST}"
+
+          # Login to GHCR for cosign
+          echo "${{ secrets.GITHUB_TOKEN }}" | cosign login ghcr.io -u ${{ github.actor }} --password-stdin
+
           cosign sign -y --key env://COSIGN_PRIVATE_KEY ${IMAGE_REGISTRY}/${IMAGE_NAME}@${IMAGE_DIGEST}
         env:
           COSIGN_EXPERIMENTAL: false
