@@ -352,7 +352,7 @@ jobs:
             done
 
       - name: Install Cosign
-        uses: sigstore/cosign-installer@v3.9.1
+        uses: sigstore/cosign-installer@v3.9.2
 
       - name: Sign container image
         if: needs.check_upstream_digest.outputs.should_build == 'true'
