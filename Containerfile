@@ -14,6 +14,8 @@ RUN --mount=type=bind,from=ctx,source=/,target=/ctx \
   mkdir -p /nix && \
   # pick up any outstanding updates since the last base image
   dnf5 up --refresh -y && \
+  # ensure 'qtpaths' exists to fix issues with 'xdg-mime default ...'
+  dnf5 install -y qt5-qttools && \
   # prevent dnf from polluting the new layers
   dnf5 clean all && \
   rm -rf /var/cache/dnf /var/lib/dnf /var/lib/waydroid /var/log/* && \
