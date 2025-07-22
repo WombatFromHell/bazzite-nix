@@ -59,6 +59,51 @@ jobs:
         run: |
           echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_OUTPUT
 
+      - name: Generate cache keys
+        id: cache_keys
+        shell: bash
+        run: |
+          # one‑time hashes
+          REPO_HASH=$(echo "${{ github.repository }}"  | sha256sum | cut -c1-8)
+          BRANCH_HASH=$(echo "${{ github.ref_name }}" | sha256sum | cut -c1-8)
+          #
+          # base key is always persistent
+          BASE_KEY="digest-cache-${REPO_HASH}-${BRANCH_HASH}"
+          #
+          # if this is a forced manual run, add a timestamp suffix
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]] && \
+            [[ "${{ github.event.inputs.force_build }}" == "true" ]]; then
+            BASE_KEY="${BASE_KEY}-force-$(date +%Y%m%d%H%M)"
+            echo "Forcing a fresh cache key: $BASE_KEY"
+          else
+            echo "Using persistent cache key: $BASE_KEY"
+          fi
+          # emit outputs
+          echo "primary_key=$BASE_KEY" >> $GITHUB_OUTPUT
+          echo "fallback_keys=digest-cache-${REPO_HASH}" >> $GITHUB_OUTPUT
+
+      - name: Restore digest cache
+        id: restore_cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .digest-cache
+          key: ${{ steps.cache_keys.outputs.primary_key }}
+          restore-keys: |
+            ${{ steps.cache_keys.outputs.fallback_keys }}
+
+      - name: Check cache restoration
+        id: cache_status
+        run: |
+          CACHE_HIT="${{ steps.restore_cache.outputs.cache-hit }}"
+          CACHE_KEY="${{ steps.restore_cache.outputs.cache-matched-key }}"
+          if [ "$CACHE_HIT" == "true" ]; then
+            echo "Cache hit with key: $CACHE_KEY"
+            echo "cache_available=true" >> $GITHUB_OUTPUT
+          else
+            echo "Cache miss, will perform full comparison"
+            echo "cache_available=false" >> $GITHUB_OUTPUT
+          fi
+
       - name: Extract metadata from upstream image
         id: metadata
         run: |
@@ -97,67 +142,6 @@ jobs:
           echo "parent_version=$VER" >> $GITHUB_OUTPUT
           echo "digest=$DIGEST" >> $GITHUB_OUTPUT
 
-      - name: Generate cache keys
-        id: cache_keys
-        run: |
-          # Use repository and branch for cache key diversity
-          REPO_HASH=$(echo "${{ github.repository }}" | sha256sum | cut -c1-8)
-          BRANCH_HASH=$(echo "${{ github.ref_name }}" | sha256sum | cut -c1-8)
-          # Different cache strategies based on trigger
-          if [ "${{ github.event_name }}" == "schedule" ]; then
-            # For scheduled runs: persistent cache (no date rotation)
-            PRIMARY_KEY="digest-cache-${REPO_HASH}-${BRANCH_HASH}"
-            echo "Using persistent cache for scheduled build"
-          elif [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
-            # For manual runs: allow cache bypass with date if needed
-            if [ "${{ github.event.inputs.force_build }}" == "true" ]; then
-              DATE_KEY=$(date +%Y%m%d%H%M)  # Include time for unique key
-              PRIMARY_KEY="digest-cache-${REPO_HASH}-${BRANCH_HASH}-force-${DATE_KEY}"
-              echo "Using force cache key for manual build"
-            else
-              PRIMARY_KEY="digest-cache-${REPO_HASH}-${BRANCH_HASH}"
-              echo "Using persistent cache for manual build"
-            fi
-          else
-            # For other triggers (push, PR): use persistent cache
-            PRIMARY_KEY="digest-cache-${REPO_HASH}-${BRANCH_HASH}"
-            echo "Using persistent cache for ${{ github.event_name }} trigger"
-          fi
-          # Fallback keys for cache restoration (properly formatted)
-          FALLBACK_KEYS="digest-cache-${REPO_HASH}"
-          echo "primary_key=$PRIMARY_KEY" >> $GITHUB_OUTPUT
-          # Use proper multi-line format for GitHub Actions output
-          echo "fallback_keys<<EOF" >> $GITHUB_OUTPUT
-          echo "$FALLBACK_KEYS" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-          echo "Cache keys generated:"
-          echo "  Primary: $PRIMARY_KEY"
-          echo "  Fallbacks: $FALLBACK_KEYS"
-
-      - name: Restore digest cache
-        id: restore_cache
-        uses: actions/cache/restore@v4
-        with:
-          path: .digest-cache
-          key: ${{ steps.cache_keys.outputs.primary_key }}
-          restore-keys: ${{ steps.cache_keys.outputs.fallback_keys }}
-
-      - name: Check cache restoration
-        id: cache_status
-        run: |
-          CACHE_HIT="${{ steps.restore_cache.outputs.cache-hit }}"
-          CACHE_KEY="${{ steps.restore_cache.outputs.cache-matched-key }}"
-          if [ "$CACHE_HIT" == "true" ]; then
-            echo "Cache hit with key: $CACHE_KEY"
-            echo "cache_available=true" >> $GITHUB_OUTPUT
-          else
-            echo "Cache miss, will perform full comparison"
-            echo "cache_available=false" >> $GITHUB_OUTPUT
-          fi
-          # List cache contents for debugging
-          echo "Cache directory contents:"
-          ls -la .digest-cache/ || echo "Cache directory is empty"
-
       - name: Compare digests
         id: compare
         run: |
@@ -190,18 +174,6 @@ jobs:
           echo "Comparison result: $CHANGED"
           echo "Reason: $REASON"
 
-      - name: Update digest cache
-        run: |
-          mkdir -p .digest-cache
-          echo "${{ steps.metadata.outputs.digest }}" > .digest-cache/last_digest
-          echo "Updated digest cache with: ${{ steps.metadata.outputs.digest }}"
-
-      - name: Save digest cache
-        uses: actions/cache/save@v4
-        with:
-          path: .digest-cache
-          key: ${{ steps.cache_keys.outputs.primary_key }}
-
       - name: Build decision
         id: decide
         run: |
@@ -212,7 +184,7 @@ jobs:
             echo "## ⚠️ Build Skipped" >> $GITHUB_STEP_SUMMARY
             echo "**Reason:** ${{ steps.compare.outputs.reason }}" >> $GITHUB_STEP_SUMMARY
             echo "**Current digest:** \`${{ steps.metadata.outputs.digest }}\`" >> $GITHUB_STEP_SUMMARY
-            exit 0
+            exit 1
           fi
 
       - name: Login for Skopeo
@@ -266,7 +238,7 @@ jobs:
       - name: Build image
         id: build_image
         run: |
-          if [ "${{ github.event.inputs.skip_rechunk }}" == true ]; then
+          if [ "${{ github.event.inputs.skip_rechunk }}" != "true" ]; then
             # Build with labels when not using rechunk
             sudo buildah build --tag localhost/raw-img ${{ steps.labels.outputs.buildah_args }} --file ./${{ matrix.containerfile }} && \
               echo "skopeo_ref=containers-storage:localhost/raw-img" >> $GITHUB_OUTPUT
@@ -277,7 +249,7 @@ jobs:
 
       - name: Run Rechunker
         id: rechunk
-        if: github.event.inputs.skip_rechunk == false
+        if: github.event.inputs.skip_rechunk != true
         uses: hhd-dev/rechunk@ded27feba22df48134eece2c66ba0fca1289ff40 # v1.2.3
         with:
           rechunk: "ghcr.io/hhd-dev/rechunk:v1.2.3"
