@@ -23,7 +23,6 @@ on:
 
 env:
   DEFAULT_TAG: "latest"
-  UPSTREAM_IMAGE: "ghcr.io/ublue-os/bazzite:testing-42"
   IMAGE_NAME: "${{ github.event.repository.name }}"
   IMAGE_DESC: "Bazzite Testing image with Nix mount support"
   IMAGE_REGISTRY: "ghcr.io/${{ github.repository_owner }}"
@@ -35,33 +34,68 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  check_upstream_digest:
-    name: Check for changes in upstream digest
+  build_push:
+    name: Build and push image
     runs-on: ubuntu-24.04
-    outputs:
-      digest_changed: ${{ steps.compare.outputs.changed }}
-      current_digest: ${{ steps.get_digest.outputs.digest }}
-      should_build: ${{ steps.decide.outputs.should_build }}
+    strategy:
+      matrix:
+        include:
+          - variant: ""
+            containerfile: "Containerfile"
+          # - variant: "-deck"
+          #   containerfile: "Containerfile.deck"
+
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+
     steps:
-      - name: Get current digest from GHCR
-        id: get_digest
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set timestamps
+        id: date
         run: |
-          echo "Fetching digest for ${{ env.UPSTREAM_IMAGE }}"
-          # Retry logic for network issues
+          echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_OUTPUT
+
+      - name: Extract metadata from upstream image
+        id: metadata
+        run: |
+          BASE=$(grep '^FROM ' ./${{ matrix.containerfile }} \
+            | grep -v ' AS ' \
+            | grep -v '^FROM scratch' \
+            | head -n1 \
+            | awk '{print $2}')
+          if [ -z "$BASE" ]; then
+            echo "::error::No valid FROM found in ${{ matrix.containerfile }}" && exit 1
+          fi
+
           for i in {1..3}; do
-            if DIGEST=$(skopeo inspect docker://${{ env.UPSTREAM_IMAGE }} | jq -r '.Digest'); then
-              echo "Successfully fetched digest: $DIGEST"
-              echo "digest=$DIGEST" >> $GITHUB_OUTPUT
-              break
+            if INSPECT=$(skopeo inspect docker://$BASE); then
+              VER=$(echo "$INSPECT" | jq -r '.Labels["org.opencontainers.image.version"]')
+              DIGEST=$(echo "$INSPECT" | jq -r '.Digest')
+
+              if [[ -z "$VER" || "$VER" == "latest" ]]; then
+                echo "::error::Invalid or missing upstream version label: $VER"
+                exit 1
+              fi
+              if [[ -z "$DIGEST" ]]; then
+                echo "::error::Unable to fetch digest: $DIGEST"
+                exit 1
+              fi
             else
               echo "Attempt $i failed, retrying in 10 seconds..."
               sleep 10
               if [ $i -eq 3 ]; then
-                echo "::error::Failed to fetch digest after 3 attempts"
+                echo "::error::Failed inspection fetch after 3 attempts"
                 exit 1
               fi
             fi
           done
+          echo "base_image=$BASE" >> $GITHUB_OUTPUT
+          echo "parent_version=$VER" >> $GITHUB_OUTPUT
+          echo "digest=$DIGEST" >> $GITHUB_OUTPUT
 
       - name: Generate cache keys
         id: cache_keys
@@ -127,7 +161,7 @@ jobs:
       - name: Compare digests
         id: compare
         run: |
-          CURRENT_DIGEST="${{ steps.get_digest.outputs.digest }}"
+          CURRENT_DIGEST="${{ steps.metadata.outputs.digest }}"
           CHANGED="false"
           REASON=""
           # Check if this is a forced build
@@ -159,8 +193,8 @@ jobs:
       - name: Update digest cache
         run: |
           mkdir -p .digest-cache
-          echo "${{ steps.get_digest.outputs.digest }}" > .digest-cache/last_digest
-          echo "Updated digest cache with: ${{ steps.get_digest.outputs.digest }}"
+          echo "${{ steps.metadata.outputs.digest }}" > .digest-cache/last_digest
+          echo "Updated digest cache with: ${{ steps.metadata.outputs.digest }}"
 
       - name: Save digest cache
         uses: actions/cache/save@v4
@@ -168,75 +202,18 @@ jobs:
           path: .digest-cache
           key: ${{ steps.cache_keys.outputs.primary_key }}
 
-      - name: Final build decision
+      - name: Build decision
         id: decide
         run: |
-          SHOULD_BUILD="${{ steps.compare.outputs.changed }}"
-          echo "should_build=$SHOULD_BUILD" >> $GITHUB_OUTPUT
-          if [ "$SHOULD_BUILD" == "true" ]; then
-            echo "Build will proceed: ${{ steps.compare.outputs.reason }}"
+          if [ "${{ steps.compare.outputs.changed }}" == "true" ]; then
+            echo "Build proceeding: ${{ steps.compare.outputs.reason }}..."
           else
-            echo "Build will be skipped: ${{ steps.compare.outputs.reason }}"
+            echo "::warning::Build skipped - no changes detected"
+            echo "## ⚠️ Build Skipped" >> $GITHUB_STEP_SUMMARY
+            echo "**Reason:** ${{ steps.compare.outputs.reason }}" >> $GITHUB_STEP_SUMMARY
+            echo "**Current digest:** \`${{ steps.metadata.outputs.digest }}\`" >> $GITHUB_STEP_SUMMARY
+            exit 0
           fi
-
-  build_push:
-    name: Build and push image
-    needs: check_upstream_digest
-    if: needs.check_upstream_digest.outputs.should_build == 'true'
-    runs-on: ubuntu-24.04
-    strategy:
-      matrix:
-        # variant: ["", "-deck"]
-        variant: [""]
-        include:
-          - variant: ""
-            containerfile: "Containerfile"
-            image_suffix: ""
-          # - variant: "-deck"
-          #   containerfile: "Containerfile.deck"
-          #   image_suffix: "-deck"
-
-    permissions:
-      contents: read
-      packages: write
-      id-token: write
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set timestamps
-        id: date
-        run: |
-          echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_OUTPUT
-          echo "short_date=$(date -u +%Y%m%d)" >> $GITHUB_OUTPUT
-
-      - name: Extract parent version
-        id: parent_tag
-        run: |
-          BASE=$(grep '^FROM ' ${{ matrix.containerfile }} \
-            | grep -v ' AS ' \
-            | grep -v '^FROM scratch' \
-            | head -n1 \
-            | awk '{print $2}')
-          if [ -z "$BASE" ]; then
-            echo "::error::No valid FROM found in ${{ matrix.containerfile }}" && exit 1
-          fi
-          if [ "$BASE" = "scratch" ]; then
-            echo "parent_version=${{ env.DEFAULT_TAG }}" >> $GITHUB_OUTPUT && exit 0
-          fi
-          # Verify the base image matches our upstream tracking
-          if [ "$BASE" != "${{ env.UPSTREAM_IMAGE }}" ]; then
-            echo "::warning::Containerfile base ($BASE) differs from tracked upstream (${{ env.UPSTREAM_IMAGE }})"
-          fi
-          skopeo inspect docker://$BASE \
-            | jq -r '.Labels["org.opencontainers.image.version"]' \
-            > version.txt
-          VER=$(cat version.txt)
-          if [[ -z "$VER" || "$VER" == "latest" ]]; then
-            echo "::error::Invalid upstream version label: $VER" && exit 1
-          fi
-          echo "parent_version=$VER" >> $GITHUB_OUTPUT
 
       - name: Login for Skopeo
         run: echo "${{ secrets.GITHUB_TOKEN }}" \
@@ -246,7 +223,7 @@ jobs:
         id: lowercase
         run: |
           REGISTRY_LOWER=$(echo "${{ env.IMAGE_REGISTRY }}" | tr '[:upper:]' '[:lower:]')
-          IMAGE_LOWER=$(echo "${{ env.IMAGE_NAME }}${{ matrix.image_suffix }}" | tr '[:upper:]' '[:lower:]')
+          IMAGE_LOWER=$(echo "${{ env.IMAGE_NAME }}${{ matrix.variant }}" | tr '[:upper:]' '[:lower:]')
           echo "registry_lower=${REGISTRY_LOWER}" >> $GITHUB_OUTPUT
           echo "image_lower=${IMAGE_LOWER}" >> $GITHUB_OUTPUT
 
@@ -263,7 +240,7 @@ jobs:
           org.opencontainers.image.title=${{ steps.lowercase.outputs.image_lower }}
           org.opencontainers.image.url=https://github.com/${{ github.repository_owner }}/${{ github.event.repository.name }}
           org.opencontainers.image.vendor=${{ github.repository_owner }}
-          org.opencontainers.image.version=${{ steps.parent_tag.outputs.parent_version }}
+          org.opencontainers.image.version=${{ steps.metadata.outputs.parent_version }}
           io.artifacthub.package.logo-url=${{ env.ARTIFACTHUB_LOGO_URL }}
           containers.bootc=1
           EOF
@@ -289,9 +266,9 @@ jobs:
       - name: Build image
         id: build_image
         run: |
-          if [ "${{ github.event.inputs.skip_rechunk }}" == "true" ]; then
+          if [ "${{ github.event.inputs.skip_rechunk }}" == true ]; then
             # Build with labels when not using rechunk
-            sudo buildah build --tag localhost/raw-img ${{ steps.labels.outputs.buildah_args }} --file ./${{ matrix.containerfile }} &&
+            sudo buildah build --tag localhost/raw-img ${{ steps.labels.outputs.buildah_args }} --file ./${{ matrix.containerfile }} && \
               echo "skopeo_ref=containers-storage:localhost/raw-img" >> $GITHUB_OUTPUT
           else
             # Build without labels when using rechunk (rechunk will add them)
@@ -300,7 +277,7 @@ jobs:
 
       - name: Run Rechunker
         id: rechunk
-        if: github.event.inputs.skip_rechunk != 'true'
+        if: github.event.inputs.skip_rechunk == false
         uses: hhd-dev/rechunk@ded27feba22df48134eece2c66ba0fca1289ff40 # v1.2.3
         with:
           rechunk: "ghcr.io/hhd-dev/rechunk:v1.2.3"
@@ -309,18 +286,18 @@ jobs:
           max-layers: 100
           labels: ${{ steps.labels.outputs.rechunk_labels }}
 
-      - name: Get Digest
-        id: digest
+      - name: Get build digest
+        id: build_digest
         run: |
           if [ "${{ github.event.inputs.skip_rechunk }}" == "true" ]; then
             IMAGE_REF="${{ steps.build_image.outputs.skopeo_ref }}"
           else
             IMAGE_REF="${{ steps.rechunk.outputs.ref }}"
           fi
-          FULL_DIGEST=$(sudo skopeo inspect --format '{{.Digest}}' ${IMAGE_REF})
-          DIGEST=$(echo "$FULL_DIGEST" | sed 's/sha256://')
-          echo "full_digest=${FULL_DIGEST}" >> $GITHUB_OUTPUT
-          echo "digest=${DIGEST}" >> $GITHUB_OUTPUT
+          FULL_BUILD_DIGEST=$(sudo skopeo inspect --format '{{.Digest}}' ${IMAGE_REF})
+          BUILD_DIGEST=$(echo "$FULL_BUILD_DIGEST" | sed 's/sha256://')
+          echo "full_build_digest=${FULL_BUILD_DIGEST}" >> $GITHUB_OUTPUT
+          echo "build_digest=${BUILD_DIGEST}" >> $GITHUB_OUTPUT
 
       - name: Push To GHCR
         uses: Wandalen/wretry.action@e68c23e6309f2871ca8ae4763e7629b9c258e1ea # v3.8.0
@@ -331,8 +308,8 @@ jobs:
           command: |
             tags=(
               latest
-              ${{ steps.parent_tag.outputs.parent_version }}
-              ${{ steps.digest.outputs.digest }}
+              ${{ steps.metadata.outputs.parent_version }}
+              ${{ steps.build_digest.outputs.build_digest }}
             )
             echo "${{ secrets.GITHUB_TOKEN }}" | sudo podman login ghcr.io -u ${{ github.actor }} --password-stdin
 
@@ -355,9 +332,8 @@ jobs:
         uses: sigstore/cosign-installer@v3.9.2
 
       - name: Sign container image
-        if: needs.check_upstream_digest.outputs.should_build == 'true'
         run: |
-          IMAGE_DIGEST="${{ steps.digest.outputs.full_digest }}"
+          IMAGE_DIGEST="${{ steps.build_digest.outputs.full_build_digest }}"
           IMAGE_REGISTRY="${{ steps.lowercase.outputs.registry_lower }}"
           IMAGE_NAME="${{ steps.lowercase.outputs.image_lower }}"
           echo "Signing image: ${IMAGE_REGISTRY}/${IMAGE_NAME}@${IMAGE_DIGEST}"
