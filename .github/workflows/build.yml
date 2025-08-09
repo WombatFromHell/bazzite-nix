@@ -26,6 +26,8 @@ env:
   IMAGE_NAME: "${{ github.event.repository.name }}"
   IMAGE_DESC: "Bazzite Testing image with Nix mount support"
   IMAGE_REGISTRY: "ghcr.io/${{ github.repository_owner }}"
+  PULL_IMAGE_REGISTRY: "ghcr.io/ublue-os"
+  PULL_BASE_IMAGE: "bazzite:testing-42"
   ARTIFACTHUB_LOGO_URL: "https://avatars.githubusercontent.com/u/120078124?s=200&v=4"
 
 concurrency:
@@ -53,6 +55,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Mount BTRFS for podman storage
+        uses: ublue-os/container-storage-action@main
+        with:
+          target-dir: /var/lib/containers
 
       - name: Set timestamps
         id: date
@@ -246,6 +253,10 @@ jobs:
             # Build without labels when using rechunk (rechunk will add them)
             sudo buildah build --tag raw-img --file ./${{ matrix.containerfile }}
           fi
+
+      - name: Remove pulled auxiliary images
+        run: |
+          sudo podman image rm ${{ env.PULL_IMAGE_REGISTRY }}/${{ env.PULL_BASE_IMAGE }}
 
       - name: Run Rechunker
         id: rechunk
