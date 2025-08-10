@@ -15,8 +15,8 @@ RUN --mount=type=bind,from=ctx,source=/,target=/ctx \
   # pick up any outstanding updates since the last base image
   dnf5 up --refresh -y && \
   # ensure 'qtpaths' exists to fix issues with 'xdg-mime default ...'
-  # also install ghostty and alacritty
-  dnf5 install --enable-repo=terra -y qt5-qttools ghostty alacritty && \
+  # also install ghostty, alacritty, and kitty
+  dnf5 install --enable-repo=terra -y qt5-qttools ghostty alacritty kitty && \
   # prevent dnf from polluting the new layers
   dnf5 clean all && \
   rm -rf /var/cache/dnf /var/lib/dnf /var/lib/waydroid /var/lib/selinux /var/log/* && \
