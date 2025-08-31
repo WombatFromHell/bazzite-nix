@@ -14,9 +14,12 @@ RUN --mount=type=bind,from=ctx,source=/,target=/ctx \
   mkdir -p /nix && \
   # pick up any outstanding updates since the last base image
   dnf5 up --refresh -y && \
+  dnf5 install --enable-repo=terra --setopt=install_weak_deps=False -y \
   # ensure 'qtpaths' exists to fix issues with 'xdg-mime default ...'
   # also install ghostty, alacritty, and kitty
-  dnf5 install --enable-repo=terra -y qt5-qttools ghostty alacritty kitty && \
+  qt5-qttools ghostty alacritty kitty \
+  # include some additional deps for kAirPods integration support
+  gcc pkg-config dbus-devel bluez-libs-devel && \
   # prevent dnf from polluting the new layers
   dnf5 clean all && \
   rm -rf /var/cache/dnf /var/lib/dnf /var/lib/waydroid /var/lib/selinux /var/log/* && \
