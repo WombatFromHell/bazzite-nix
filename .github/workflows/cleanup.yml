@@ -13,7 +13,7 @@ jobs:
 
     strategy:
       matrix:
-        suffix: ["", "-deck"]
+        suffix: ["", "-stable", "-deck"]
 
     steps:
       - name: Clean up images for package ${{ github.event.repository.name }}${{ matrix.suffix }}

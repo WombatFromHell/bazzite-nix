@@ -27,7 +27,6 @@ env:
   IMAGE_DESC: "Bazzite Testing image with Nix mount support"
   IMAGE_REGISTRY: "ghcr.io/${{ github.repository_owner }}"
   PULL_IMAGE_REGISTRY: "ghcr.io/ublue-os"
-  PULL_BASE_IMAGE: "bazzite:testing-42"
   ARTIFACTHUB_LOGO_URL: "https://avatars.githubusercontent.com/u/120078124?s=200&v=4"
 
 concurrency:
@@ -44,8 +43,13 @@ jobs:
         include:
           - variant: ""
             containerfile: "Containerfile"
+            base_image: "bazzite:testing-42"
+          - variant: "-stable"
+            containerfile: "Containerfile.stable"
+            base_image: "bazzite:stable-42"
           # - variant: "-deck"
           #   containerfile: "Containerfile.deck"
+          #   base_image: "bazzite-deck:testing-42"
 
     permissions:
       contents: read
@@ -256,7 +260,7 @@ jobs:
 
       - name: Remove pulled auxiliary images
         run: |
-          sudo podman image rm ${{ env.PULL_IMAGE_REGISTRY }}/${{ env.PULL_BASE_IMAGE }}
+          sudo podman image rm ${{ env.PULL_IMAGE_REGISTRY }}/${{ matrix.base_image }}
 
       - name: Run Rechunker
         id: rechunk
