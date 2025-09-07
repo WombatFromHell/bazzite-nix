@@ -13,7 +13,13 @@ jobs:
 
     strategy:
       matrix:
-        suffix: ["", "-stable", "-deck"]
+        include:
+          - suffix: ""
+            keep_tagged: 24
+          - suffix: "-deck"
+            keep_tagged: 24
+          - suffix: "-stable"
+            keep_tagged: 3
 
     steps:
       - name: Clean up images for package ${{ github.event.repository.name }}${{ matrix.suffix }}
@@ -21,7 +27,7 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           package: ${{ github.event.repository.name }}${{ matrix.suffix }}
-          keep-n-tagged: 24 # keep only the last 2 months of images
+          keep-n-tagged: ${{ matrix.keep_tagged }}
           delete-untagged: true
           delete-partial-images: true
           dry-run: false
