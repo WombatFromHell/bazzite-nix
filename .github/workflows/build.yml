@@ -7,7 +7,7 @@ on:
   #   paths-ignore:
   #     - "**/README.md"
   schedule:
-    - cron: "1 6 * * 3,6" # 06:01 UTC (every Wednesday/Saturday)
+    - cron: "0 3 * * 0,2,4" # 03:00 UTC every Sun/Tues/Thurs
   workflow_dispatch:
     inputs:
       force_build:

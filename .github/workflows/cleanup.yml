@@ -2,7 +2,7 @@
 name: Cleanup Old Images
 on:
   schedule:
-    - cron: "0 1 * * 0" # 01:00 UTC every Sunday
+    - cron: "0 4 * * 0,3" # 04:00 UTC every Sun/Wed
   workflow_dispatch:
 
 jobs:
@@ -21,7 +21,7 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           package: ${{ github.event.repository.name }}${{ matrix.suffix }}
-          keep-n-tagged: 30 # keep only the last 2 months of images
+          keep-n-tagged: 24 # keep only the last 2 months of images
           delete-untagged: true
           delete-partial-images: true
           dry-run: false
