@@ -38,6 +38,7 @@ jobs:
     name: Build and push image
     runs-on: ubuntu-24.04
     strategy:
+      fail-fast: false # let each variant run
       matrix:
         include:
           - variant: ""
