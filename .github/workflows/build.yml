@@ -67,51 +67,47 @@ jobs:
         run: |
           echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_OUTPUT
 
+      - name: Lowercase Registry and Image
+        id: lowercase
+        run: |
+          REGISTRY_LOWER=$(echo "${{ env.IMAGE_REGISTRY }}" | tr '[:upper:]' '[:lower:]')
+          IMAGE_LOWER=$(echo "${{ env.IMAGE_NAME }}${{ matrix.variant }}" | tr '[:upper:]' '[:lower:]')
+          echo "registry_lower=${REGISTRY_LOWER}" >> $GITHUB_OUTPUT
+          echo "image_lower=${IMAGE_LOWER}" >> $GITHUB_OUTPUT
+
       - name: Generate cache keys
         id: cache_keys
         shell: bash
         run: |
+          # Hash the variant to get a consistent short identifier
+          VARIANT_HASH=$(echo "${{ matrix.variant }}" | sha256sum | cut -c1-8)
           REPO_HASH=$(echo "${{ github.repository }}" | sha256sum | cut -c1-8)
           BRANCH_HASH=$(echo "${{ github.ref_name }}" | sha256sum | cut -c1-8)
-          VARIANT_HASH=$(echo "${{ matrix.variant }}" | sha256sum | cut -c1-8)
-          BASE_KEY="digest-cache-${REPO_HASH}-${BRANCH_HASH}-${VARIANT_HASH}"
-          # force rebuild logic (unchanged)
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]] && \
-            [[ "${{ github.event.inputs.force_build }}" == "true" ]]; then
-            BASE_KEY="${BASE_KEY}-force-$(date +%Y%m%d%H%M)"
-            echo "Forcing a fresh cache key: $BASE_KEY"
+          # Handle empty variant case
+          if [ -z "${{ matrix.variant }}" ]; then
+            BASE_KEY="digest-${REPO_HASH}-${BRANCH_HASH}"
           else
-            echo "Using persistent cache key: $BASE_KEY"
+            BASE_KEY="digest-${REPO_HASH}-${BRANCH_HASH}-${VARIANT_HASH}"
           fi
-          # emit outputs with matrix-aware fallbacks
-          echo "primary_key=$BASE_KEY" >> $GITHUB_OUTPUT
-          echo "fallback_keys=digest-cache-${REPO_HASH}-${BRANCH_HASH}" >> $GITHUB_OUTPUT
+          # For restore: try to find any cache with this prefix
+          RESTORE_KEY="${BASE_KEY}-"
+          echo "restore_key=${RESTORE_KEY}" >> $GITHUB_OUTPUT
+          echo "base_key=${BASE_KEY}" >> $GITHUB_OUTPUT
 
-      - name: Check cache restoration
-        id: cache_status
+      - name: Restore digest cache
+        id: restore_cache
         uses: actions/cache/restore@v4
         with:
-          # The directory that holds the cached digest file
           path: .digest-cache
-          # Primary key – exactly what the original script computed
-          key: ${{ steps.cache_keys.outputs.primary_key }}
-          # Fallback keys (if the primary is missing)
+          # Use restore-keys to find the most recent cache for this variant
           restore-keys: |
-            ${{ steps.cache_keys.outputs.fallback_keys }}
+            ${{ steps.cache_keys.outputs.restore_key }}
+          # This key won't exist, but restore-keys will find the latest match
+          key: ${{ steps.cache_keys.outputs.base_key }}-never-matches
 
-      - name: Verify cached digest
-        id: verify_digest
-        run: |
-          # The cache action will have populated .digest-cache with whatever was saved.
-          if [ -f .digest-cache/last_digest ]; then
-            echo "Cached digest found: $(<.digest-cache/last_digest)"
-          else
-            # On a cache miss, create an empty placeholder so the later steps can still read it
-            echo "::warning::No cached digest was restored – creating empty file."
-            mkdir -p .digest-cache
-            touch .digest-cache/last_digest
-          fi
-          echo "cache_hit=${{ steps.cache_status.outputs.cache-hit }}" >> $GITHUB_OUTPUT
+      - name: Login for Skopeo
+        run: echo "${{ secrets.GITHUB_TOKEN }}" \
+          | skopeo login ghcr.io -u ${{ github.actor }} --password-stdin
 
       - name: Extract metadata from upstream image
         id: metadata
@@ -143,6 +139,7 @@ jobs:
                 exit 1
               else
                 echo "Got embedded digest: $DIGEST"
+                break
               fi
             else
               echo "Attempt $i failed, retrying in 10 seconds..."
@@ -157,30 +154,63 @@ jobs:
           echo "parent_version=$VER" >> $GITHUB_OUTPUT
           echo "digest=$DIGEST" >> $GITHUB_OUTPUT
 
-      - name: Compare digests
+      - name: Check if image already exists
+        id: check_exists
+        run: |
+          # Construct the full image reference
+          PREFIX="${{ steps.lowercase.outputs.registry_lower }}/${{ steps.lowercase.outputs.image_lower }}"
+          IMAGE_REF="${PREFIX}:${{ steps.metadata.outputs.parent_version }}"
+          # Check if the image exists
+          echo "Checking if the container exists: $IMAGE_REF"
+          if skopeo inspect docker://${IMAGE_REF} > /dev/null 2>&1; then
+            echo "::warning::Build skipped - container already exists"
+            echo "## ⚠️ Build Skipped" >> $GITHUB_STEP_SUMMARY
+          echo "**Reason:** Container already exists at ${IMAGE_REF}" >> $GITHUB_STEP_SUMMARY
+          exit 1
+          fi
+
+      - name: Generate final cache key and compare
         id: compare
         run: |
+          BASE_KEY="${{ steps.cache_keys.outputs.base_key }}"
           CURRENT_DIGEST="${{ steps.metadata.outputs.digest }}"
+          FINAL_KEY="${BASE_KEY}-${CURRENT_DIGEST}"
+          #
           if [ "${{ github.event.inputs.force_build }}" = "true" ]; then
             CHANGED=true
             REASON="Force build requested"
-          elif [[ ! -s .digest-cache/last_digest ]]; then
+          elif [ "${{ steps.restore_cache.outputs.cache-hit }}" != "true" ]; then
             CHANGED=true
-            REASON="No previous digest found (first run or cache evicted)"
+            REASON="No previous cache found"
           else
-            LAST_DIGEST=$(<.digest-cache/last_digest)
-            echo "Current digest: $CURRENT_DIGEST"
-            echo "Previous digest: $LAST_DIGEST"
-
-            if [ "$CURRENT_DIGEST" != "$LAST_DIGEST" ]; then
-              CHANGED=true
-              REASON="Digest changed from $LAST_DIGEST to $CURRENT_DIGEST"
+            # Check if we have a cache for this exact digest
+            if [ -f .digest-cache/last_digest ]; then
+              CACHED_DIGEST=$(<.digest-cache/last_digest)
+              if [ "$CURRENT_DIGEST" = "$CACHED_DIGEST" ]; then
+                CHANGED=false
+                REASON="Digest unchanged: $CURRENT_DIGEST"
+              else
+                CHANGED=true
+                REASON="Digest changed from $CACHED_DIGEST to $CURRENT_DIGEST"
+              fi
             else
-              REASON="Digest unchanged: $CURRENT_DIGEST"
+              CHANGED=true
+              REASON="Cache restored but no digest file found"
             fi
           fi
+
           echo "changed=$CHANGED" >> $GITHUB_OUTPUT
-          echo "reason=$REASON"   >> $GITHUB_OUTPUT
+          echo "reason=$REASON" >> $GITHUB_OUTPUT
+          echo "final_cache_key=${FINAL_KEY}" >> $GITHUB_OUTPUT
+
+      - name: Verify cache key format
+        id: verify_cache_key
+        run: |
+          echo "Generated cache key: ${{ steps.compare.outputs.final_cache_key }}"
+          echo "Restore key prefix: ${{ steps.cache_keys.outputs.restore_key }}"
+          if [[ "${{ steps.compare.outputs.final_cache_key }}" != "${{ steps.cache_keys.outputs.restore_key }}"* ]]; then
+            echo "::warning::Cache key format inconsistency detected"
+          fi
 
       - name: Build decision
         id: decide
@@ -194,14 +224,6 @@ jobs:
             echo "**Current digest:** \`${{ steps.metadata.outputs.digest }}\`" >> $GITHUB_STEP_SUMMARY
             exit 1
           fi
-
-      - name: Lowercase Registry and Image
-        id: lowercase
-        run: |
-          REGISTRY_LOWER=$(echo "${{ env.IMAGE_REGISTRY }}" | tr '[:upper:]' '[:lower:]')
-          IMAGE_LOWER=$(echo "${{ env.IMAGE_NAME }}${{ matrix.variant }}" | tr '[:upper:]' '[:lower:]')
-          echo "registry_lower=${REGISTRY_LOWER}" >> $GITHUB_OUTPUT
-          echo "image_lower=${IMAGE_LOWER}" >> $GITHUB_OUTPUT
 
       - name: Assemble image labels
         id: labels
@@ -250,10 +272,6 @@ jobs:
             # Build without labels when using rechunk (rechunk will add them)
             sudo buildah build --tag raw-img --file ./${{ matrix.containerfile }}
           fi
-
-      - name: Login for Skopeo
-        run: echo "${{ secrets.GITHUB_TOKEN }}" \
-          | skopeo login ghcr.io -u ${{ github.actor }} --password-stdin
 
       - name: Remove pulled auxiliary images
         run: |
@@ -312,16 +330,19 @@ jobs:
               sudo skopeo copy ${BASE_IMG}:${tags[0]} ${BASE_IMG}:${tag}
             done
 
-      - name: Update digest cache
+      - name: Save digest to cache key
+        if: steps.compare.outputs.changed == 'true'
         run: |
           mkdir -p .digest-cache
           echo "${{ steps.metadata.outputs.digest }}" > .digest-cache/last_digest
 
-      - name: Save digest cache
+      - name: Save new cache
+        if: steps.compare.outputs.changed == 'true'
         uses: actions/cache/save@v4
         with:
           path: .digest-cache
-          key: ${{ steps.cache_keys.outputs.primary_key }}
+          # This key includes the digest, so it will be unique each time
+          key: ${{ steps.compare.outputs.final_cache_key }}
 
       - name: Install Cosign
         uses: sigstore/cosign-installer@v3.9.2
