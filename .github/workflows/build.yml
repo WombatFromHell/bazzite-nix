@@ -83,9 +83,9 @@ jobs:
           VARIANT_HASH=$(echo "${{ matrix.variant }}" | sha256sum | cut -c1-8)
           REPO_HASH=$(echo "${{ github.repository }}" | sha256sum | cut -c1-8)
           BRANCH_HASH=$(echo "${{ github.ref_name }}" | sha256sum | cut -c1-8)
-          # Handle empty variant case
+          # Handle empty variant case - use 'default' instead of empty
           if [ -z "${{ matrix.variant }}" ]; then
-            BASE_KEY="digest-${REPO_HASH}-${BRANCH_HASH}"
+            BASE_KEY="digest-${REPO_HASH}-${BRANCH_HASH}-default"
           else
             BASE_KEY="digest-${REPO_HASH}-${BRANCH_HASH}-${VARIANT_HASH}"
           fi
@@ -181,7 +181,7 @@ jobs:
             REASON="Force build requested"
           elif [ "${{ steps.restore_cache.outputs.cache-hit }}" != "true" ]; then
             CHANGED=true
-            REASON="No previous cache found"
+            REASON="No previous cache found for this variant"
           else
             # Check if we have a cache for this exact digest
             if [ -f .digest-cache/last_digest ]; then
@@ -195,7 +195,7 @@ jobs:
               fi
             else
               CHANGED=true
-              REASON="Cache restored but no digest file found"
+              REASON="Cache restored but no digest file found for this variant"
             fi
           fi
 
