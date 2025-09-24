@@ -2,7 +2,7 @@
 name: Cleanup Old Images
 on:
   schedule:
-    - cron: "0 4 * * 0,3" # 04:00 UTC every Sun/Wed
+    - cron: "0 4 * * 0" # 04:00 UTC every Sun/Wed
   workflow_dispatch:
 
 jobs:
@@ -15,11 +15,11 @@ jobs:
       matrix:
         include:
           - suffix: ""
-            keep_tagged: 24
+            keep_tagged: 30
           - suffix: "-deck"
-            keep_tagged: 24
+            keep_tagged: 1
           - suffix: "-stable"
-            keep_tagged: 3
+            keep_tagged: 1
 
     steps:
       - name: Clean up images for package ${{ github.event.repository.name }}${{ matrix.suffix }}

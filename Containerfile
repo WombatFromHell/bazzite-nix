@@ -2,18 +2,15 @@
 FROM scratch AS ctx
 COPY build_files /
 
-# Base Image
-FROM ghcr.io/ublue-os/bazzite:testing-42
+# Base Image (default to 'stable')
+ARG BASE_IMAGE=ghcr.io/ublue-os/bazzite:stable
+FROM ${BASE_IMAGE}
 
 RUN --mount=type=bind,from=ctx,source=/,target=/ctx \
   --mount=type=cache,dst=/var/cache \
   --mount=type=cache,dst=/var/log \
   --mount=type=tmpfs,dst=/tmp \
   /ctx/build.sh && \
-  # nix installer enablement
-  mkdir -p /nix && \
-  dnf5 clean all && \
-  rm -rf /var/cache/dnf /var/lib/dnf /var/lib/waydroid /var/lib/selinux /var/log/* && \
   ostree container commit
 
 ### LINTING

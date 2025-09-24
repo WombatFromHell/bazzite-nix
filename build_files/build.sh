@@ -1,12 +1,12 @@
-#!/bin/bash
-
+#!/usr/bin/env bash
 set -ouex pipefail
 
-# extras installed:
-# qt5-qttools (to fix 'xdg-mime-update')
-# ghostty (for a sane modern terminal)
-# tmux
+# nix installer enablement
+mkdir -p /nix
+
+# install some extra tools
 dnf5 install --enable-repo=terra -y qt5-qttools ghostty tmux
 
-#### Example for enabling a System Unit File
-systemctl enable podman.socket
+# clean up after ourselves
+dnf5 clean all &&
+  rm -rf /var/cache/dnf /var/lib/dnf /var/lib/waydroid /var/lib/selinux /var/log/*
