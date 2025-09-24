@@ -255,8 +255,19 @@ jobs:
                 echo "skopeo_ref=containers-storage:raw-img" >> $GITHUB_OUTPUT
           fi
 
+      - name: Check if previous image exists
+        id: check_prev
+        run: |
+          PREV_REF="${{ steps.lowercase.outputs.registry_lower }}/${{ steps.lowercase.outputs.image_lower }}:${{ matrix.variant }}"
+          echo "Checking existence of previous image: $PREV_REF"
+          if skopeo inspect "docker://${PREV_REF}" > /dev/null 2>&1; then
+            echo "prev_ref_exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "prev_ref_exists=false" >> $GITHUB_OUTPUT
+          fi
+
       - name: Run Rechunker
-        if: github.event.inputs.skip_rechunk != true
+        if: github.event.inputs.skip_rechunk != true && steps.check_prev.outputs.prev_ref_exists == 'true'
         uses: hhd-dev/rechunk@ded27feba22df48134eece2c66ba0fca1289ff40
         with:
           rechunk: "ghcr.io/hhd-dev/rechunk:v1.2.3"
@@ -290,6 +301,7 @@ jobs:
           BUILD_DIGEST=$(echo "$FULL_BUILD_DIGEST" | sed 's/sha256://')
           echo "full_build_digest=${FULL_BUILD_DIGEST}" >> $GITHUB_OUTPUT
           echo "build_digest=${BUILD_DIGEST}" >> $GITHUB_OUTPUT
+          echo "source_ref=${IMAGE_REF}" >> $GITHUB_OUTPUT
 
       - name: Push To GHCR
         uses: Wandalen/wretry.action@e68c23e6309f2871ca8ae4763e7629b9c258e1ea
@@ -297,14 +309,10 @@ jobs:
           attempt_limit: 3
           attempt_delay: 15000
           command: |
+            SOURCE_REF="${{ steps.build_digest.outputs.source_ref }}"
+
             IFS=',' read -r -a tags <<< "${{ steps.compute_tags.outputs.tags }}"
             echo "Pushing tags: ${tags[*]}"
-
-            if [ "${{ github.event.inputs.skip_rechunk }}" == "true" ]; then
-              SOURCE_REF="${{ steps.build_image.outputs.skopeo_ref }}"
-            else
-              SOURCE_REF="${{ steps.rechunk.outputs.ref }}"
-            fi
 
             BASE_IMG="docker://${{ steps.lowercase.outputs.registry_lower }}/${{ steps.lowercase.outputs.image_lower }}"
             PRIMARY_TAG="${tags[0]}"
