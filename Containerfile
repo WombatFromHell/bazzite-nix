@@ -1,9 +1,10 @@
+# Base Image (default to 'stable')
+ARG BASE_IMAGE=ghcr.io/ublue-os/bazzite:stable
+
 # Allow build scripts to be referenced without being copied into the final image
 FROM scratch AS ctx
 COPY build_files /
 
-# Base Image (default to 'stable')
-ARG BASE_IMAGE=ghcr.io/ublue-os/bazzite:stable
 FROM ${BASE_IMAGE}
 
 RUN --mount=type=bind,from=ctx,source=/,target=/ctx \

@@ -38,7 +38,7 @@ jobs:
           - variant: "testing"
             base_image: "ghcr.io/ublue-os/bazzite:testing"
           # - variant: "deck"
-          #   base_image: "ghcr.io/ublue-os/bazzite-deck:latest"
+          #   base_image: "ghcr.io/ublue-os/bazzite-deck:stable"
 
     permissions:
       contents: read
@@ -135,26 +135,36 @@ jobs:
         run: |
           PARENT_VERSION="${{ steps.metadata.outputs.parent_version }}"
           case "${{ matrix.variant }}" in
-            "stable") TAGS="stable,stable-${PARENT_VERSION},${PARENT_VERSION}" ;;
-            # assume 'testing' is always the most cutting-edge by tagging it 'latest'
-            "testing") TAGS="testing,latest,${PARENT_VERSION}" ;;
-            "deck") TAGS="deck,deck-${PARENT_VERSION}" ;;
+            "stable")
+              TAGS="stable,stable-${PARENT_VERSION},${PARENT_VERSION}"
+              CANONICAL="stable-${PARENT_VERSION}"
+              ;;
+            "testing")
+              # assume 'testing' is always the most cutting-edge by tagging it 'latest'
+              TAGS="testing,latest,${PARENT_VERSION}"
+              CANONICAL="${PARENT_VERSION}"
+              ;;
+            "deck")
+              TAGS="deck,deck-${PARENT_VERSION}"
+              CANONICAL="deck-${PARENT_VERSION}"
+              ;;
             *) echo "Unknown variant"; exit 1 ;;
           esac
           echo "tags=$TAGS" >> $GITHUB_OUTPUT
+          echo "canonical_tag=$CANONICAL" >> $GITHUB_OUTPUT
 
-      - name: Check if primary tag already exists
+      - name: Check if canonical tag already exists
         if: github.event.inputs.force_build != 'true'
         id: check_exists
         run: |
           PREFIX="${{ steps.lowercase.outputs.registry_lower }}/${{ steps.lowercase.outputs.image_lower }}"
-          IFS=',' read -r PRIMARY_TAG _ <<< "${{ steps.compute_tags.outputs.tags }}"
-          IMAGE_REF="${PREFIX}:${PRIMARY_TAG}"
-          echo "Checking existence of: $IMAGE_REF"
+          CANONICAL_TAG="${{ steps.compute_tags.outputs.canonical_tag }}"
+          IMAGE_REF="${PREFIX}:${CANONICAL_TAG}"
+          echo "Checking existence of canonical tag: $IMAGE_REF"
           if skopeo inspect "docker://${IMAGE_REF}" > /dev/null 2>&1; then
-            echo "::warning::Build skipped — image already exists"
+            echo "::warning::Build skipped — canonical image already exists"
             echo "## ⚠️ Build Skipped" >> $GITHUB_STEP_SUMMARY
-            echo "**Reason:** Image already exists at ${IMAGE_REF}" >> $GITHUB_STEP_SUMMARY
+            echo "**Reason:** Canonical image already exists at ${IMAGE_REF}" >> $GITHUB_STEP_SUMMARY
             exit 1
           fi
 
@@ -245,19 +255,8 @@ jobs:
                 echo "skopeo_ref=containers-storage:raw-img" >> $GITHUB_OUTPUT
           fi
 
-      - name: Check if previous image exists for rechunk
-        id: check_prev
-        if: github.event.inputs.skip_rechunk != true
-        run: |
-          PREV_REF="${{ steps.lowercase.outputs.registry_lower }}/${{ steps.lowercase.outputs.image_lower }}:${{ matrix.variant }}"
-          if skopeo inspect "docker://$PREV_REF" >/dev/null 2>&1; then
-            echo "prev_exists=true" >> $GITHUB_OUTPUT
-          else
-            echo "prev_exists=false" >> $GITHUB_OUTPUT
-          fi
-
       - name: Run Rechunker
-        if: github.event.inputs.skip_rechunk != true && steps.check_prev.outputs.prev_exists == 'true'
+        if: github.event.inputs.skip_rechunk != true
         uses: hhd-dev/rechunk@ded27feba22df48134eece2c66ba0fca1289ff40
         with:
           rechunk: "ghcr.io/hhd-dev/rechunk:v1.2.3"
@@ -269,12 +268,25 @@ jobs:
       - name: Get build digest
         id: build_digest
         run: |
-          if [ "${{ github.event.inputs.skip_rechunk }}" == "true" ]; then
+          SKIP_RECHUNK="${{ github.event.inputs.skip_rechunk }}"
+          RECHUNK_REF="${{ steps.rechunk.outputs.ref }}"
+
+          if [ "$SKIP_RECHUNK" == "true" ]; then
             IMAGE_REF="${{ steps.build_image.outputs.skopeo_ref }}"
+          elif [ -n "$RECHUNK_REF" ]; then
+            IMAGE_REF="$RECHUNK_REF"
           else
-            IMAGE_REF="${{ steps.rechunk.outputs.ref }}"
+            # Rechunk was skipped (e.g., no previous image), use raw build
+            IMAGE_REF="${{ steps.build_image.outputs.skopeo_ref }}"
           fi
-          FULL_BUILD_DIGEST=$(sudo skopeo inspect --format '{{.Digest}}' ${IMAGE_REF})
+
+          if [ -z "$IMAGE_REF" ]; then
+            echo "::error::No valid image reference found to inspect"
+            exit 1
+          fi
+
+          echo "Using image ref: $IMAGE_REF"
+          FULL_BUILD_DIGEST=$(sudo skopeo inspect --format='{{.Digest}}' "$IMAGE_REF")
           BUILD_DIGEST=$(echo "$FULL_BUILD_DIGEST" | sed 's/sha256://')
           echo "full_build_digest=${FULL_BUILD_DIGEST}" >> $GITHUB_OUTPUT
           echo "build_digest=${BUILD_DIGEST}" >> $GITHUB_OUTPUT
