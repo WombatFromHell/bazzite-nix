@@ -2,7 +2,7 @@
 name: Build Custom Image
 on:
   schedule:
-    - cron: "0 3 * * *" # 03:00 UTC every day
+    - cron: "1 6 * * *" # 06:01 UTC every day
   workflow_dispatch:
     inputs:
       force_build:

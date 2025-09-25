@@ -2,7 +2,7 @@
 name: Cleanup Old Images
 on:
   schedule:
-    - cron: "0 4 * * 0" # 04:00 UTC every Sun/Wed
+    - cron: "1 7 * * 0" # 07:01 UTC every Sunday
   workflow_dispatch:
 
 jobs:
@@ -11,23 +11,13 @@ jobs:
     permissions:
       packages: write
 
-    strategy:
-      matrix:
-        include:
-          - suffix: ""
-            keep_tagged: 30
-          - suffix: "-deck"
-            keep_tagged: 1
-          - suffix: "-stable"
-            keep_tagged: 1
-
     steps:
-      - name: Clean up images for package ${{ github.event.repository.name }}${{ matrix.suffix }}
+      - name: Clean up images for package ${{ github.event.repository.name }}
         uses: dataaxiom/ghcr-cleanup-action@v1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          package: ${{ github.event.repository.name }}${{ matrix.suffix }}
-          keep-n-tagged: ${{ matrix.keep_tagged }}
+          package: ${{ github.event.repository.name }}
+          keep-n-tagged: 60 # 2 months worth
           delete-untagged: true
           delete-partial-images: true
           dry-run: false
