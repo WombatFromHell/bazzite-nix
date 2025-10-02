@@ -242,18 +242,12 @@ jobs:
       - name: Build image
         id: build_image
         run: |
-          if [ "${{ github.event.inputs.skip_rechunk }}" != "true" ]; then
-            sudo buildah build \
-              --tag localhost/raw-img ${{ steps.labels.outputs.buildah_args }} \
+          SKOPEO_TAG="localhost/raw-img"
+          sudo buildah bud \
+              --tag "${SKOPEO_TAG}" ${{ steps.labels.outputs.buildah_args }} \
               --build-arg BASE_IMAGE="${{ matrix.base_image }}" \
               --file ./Containerfile && \
-                echo "skopeo_ref=containers-storage:localhost/raw-img" >> $GITHUB_OUTPUT
-          else
-            sudo buildah build \
-              --tag raw-img --build-arg BASE_IMAGE="${{ matrix.base_image }}" \
-              --file ./Containerfile && \
-                echo "skopeo_ref=containers-storage:raw-img" >> $GITHUB_OUTPUT
-          fi
+              echo "skopeo_ref=containers-storage:${SKOPEO_TAG}" >> $GITHUB_OUTPUT
 
       - name: Check if previous image exists
         id: check_prev
@@ -268,6 +262,7 @@ jobs:
 
       - name: Run Rechunker
         if: github.event.inputs.skip_rechunk != true && steps.check_prev.outputs.prev_ref_exists == 'true'
+        id: rechunk
         uses: hhd-dev/rechunk@ded27feba22df48134eece2c66ba0fca1289ff40
         with:
           rechunk: "ghcr.io/hhd-dev/rechunk:v1.2.3"
@@ -281,14 +276,15 @@ jobs:
         run: |
           SKIP_RECHUNK="${{ github.event.inputs.skip_rechunk }}"
           RECHUNK_REF="${{ steps.rechunk.outputs.ref }}"
+          SKOPEO_REF="${{ steps.build_image.outputs.skopeo_ref }}"
 
           if [ "$SKIP_RECHUNK" == "true" ]; then
-            IMAGE_REF="${{ steps.build_image.outputs.skopeo_ref }}"
+            IMAGE_REF="${SKOPEO_REF}"
           elif [ -n "$RECHUNK_REF" ]; then
-            IMAGE_REF="$RECHUNK_REF"
+            IMAGE_REF="${RECHUNK_REF}"
           else
             # Rechunk was skipped (e.g., no previous image), use raw build
-            IMAGE_REF="${{ steps.build_image.outputs.skopeo_ref }}"
+            IMAGE_REF="${SKOPEO_REF}"
           fi
 
           if [ -z "$IMAGE_REF" ]; then
@@ -297,7 +293,7 @@ jobs:
           fi
 
           echo "Using image ref: $IMAGE_REF"
-          FULL_BUILD_DIGEST=$(sudo skopeo inspect --format='{{.Digest}}' "$IMAGE_REF")
+          FULL_BUILD_DIGEST=$(sudo skopeo inspect --format='{{.Digest}}' "${IMAGE_REF}")
           BUILD_DIGEST=$(echo "$FULL_BUILD_DIGEST" | sed 's/sha256://')
           echo "full_build_digest=${FULL_BUILD_DIGEST}" >> $GITHUB_OUTPUT
           echo "build_digest=${BUILD_DIGEST}" >> $GITHUB_OUTPUT
