@@ -299,24 +299,33 @@ jobs:
           echo "build_digest=${BUILD_DIGEST}" >> $GITHUB_OUTPUT
           echo "source_ref=${IMAGE_REF}" >> $GITHUB_OUTPUT
 
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
+
       - name: Push To GHCR
-        uses: Wandalen/wretry.action@e68c23e6309f2871ca8ae4763e7629b9c258e1ea
-        with:
-          attempt_limit: 3
-          attempt_delay: 15000
-          command: |
-            SOURCE_REF="${{ steps.build_digest.outputs.source_ref }}"
+        id: push_and_sign
+        run: |
+          SOURCE_REF="${{ steps.build_digest.outputs.source_ref }}"
+          IMAGE_DIGEST="${{ steps.build_digest.outputs.full_build_digest }}"
+          IMAGE_REGISTRY="${{ steps.lowercase.outputs.registry_lower }}"
+          IMAGE_NAME="${{ steps.lowercase.outputs.image_lower }}"
+          OUTPUT_REF="${IMAGE_REGISTRY}/${IMAGE_NAME}@${IMAGE_DIGEST}"
+          IFS=',' read -r -a tags <<< "${{ steps.compute_tags.outputs.tags }}"
+          BASE_IMG="docker://${{ steps.lowercase.outputs.registry_lower }}/${{ steps.lowercase.outputs.image_lower }}"
 
-            IFS=',' read -r -a tags <<< "${{ steps.compute_tags.outputs.tags }}"
-            echo "Pushing tags: ${tags[*]}"
+          DIGEST_REF="${BASE_IMG}@${IMAGE_DIGEST}"
+          echo "Pushing primary image: ${DIGEST_REF}"
+          sudo skopeo copy "$SOURCE_REF" "$DIGEST_REF"
 
-            BASE_IMG="docker://${{ steps.lowercase.outputs.registry_lower }}/${{ steps.lowercase.outputs.image_lower }}"
-            PRIMARY_TAG="${tags[0]}"
-            sudo skopeo copy ${SOURCE_REF} ${BASE_IMG}:${PRIMARY_TAG}
+          echo "Signing image: ${OUTPUT_REF}"
+          cosign sign -y --key env://SIGNING_SECRET "$DIGEST_REF"
 
-            for tag in "${tags[@]:1}"; do
-              sudo skopeo copy ${BASE_IMG}:${PRIMARY_TAG} ${BASE_IMG}:${tag}
-            done
+          for tag in "${tags[@]}"; do
+            echo "Pushing tag: ${tag}"
+            sudo skopeo copy "$DIGEST_REF" "${BASE_IMG}:${tag}"
+          done
+        env:
+          SIGNING_SECRET: ${{ secrets.SIGNING_SECRET }}
 
       - name: Save digest to cache
         if: steps.compare.outputs.changed == 'true'
@@ -330,18 +339,3 @@ jobs:
         with:
           path: .digest-cache
           key: ${{ steps.compare.outputs.final_cache_key }}
-
-      - name: Install Cosign
-        uses: sigstore/cosign-installer@v3.10.0
-
-      - name: Sign container image
-        run: |
-          IMAGE_DIGEST="${{ steps.build_digest.outputs.full_build_digest }}"
-          IMAGE_REGISTRY="${{ steps.lowercase.outputs.registry_lower }}"
-          IMAGE_NAME="${{ steps.lowercase.outputs.image_lower }}"
-          echo "Signing image: ${IMAGE_REGISTRY}/${IMAGE_NAME}@${IMAGE_DIGEST}"
-          echo "${{ secrets.GITHUB_TOKEN }}" | cosign login ghcr.io -u ${{ github.actor }} --password-stdin
-          cosign sign -y --key env://COSIGN_PRIVATE_KEY ${IMAGE_REGISTRY}/${IMAGE_NAME}@${IMAGE_DIGEST}
-        env:
-          COSIGN_EXPERIMENTAL: false
-          COSIGN_PRIVATE_KEY: ${{ secrets.SIGNING_SECRET }}
