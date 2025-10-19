@@ -318,6 +318,8 @@ jobs:
           sudo skopeo copy "$SOURCE_REF" "docker://$DIGEST_REF"
 
           echo "Signing image: ${OUTPUT_REF}"
+          # a redundant login is required for cosign to function here
+          echo "${{ secrets.GITHUB_TOKEN }}" | cosign login ghcr.io -u ${{ github.actor }} --password-stdin
           cosign sign -y --key env://SIGNING_SECRET "$DIGEST_REF"
 
           for tag in "${tags[@]}"; do
