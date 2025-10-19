@@ -302,11 +302,11 @@ jobs:
       - name: Install Cosign
         uses: sigstore/cosign-installer@7e8b541eb2e61bf99390e1afd4be13a184e9ebc5 # v3.10.1
 
-      - name: Push To GHCR
-        id: push_and_sign
+      - name: Sign and Push to GHCR
+        id: sign_and_push
         run: |
           SOURCE_REF="${{ steps.build_digest.outputs.source_ref }}"
-          IMAGE_DIGEST="${{ steps.build_digest.outputs.full_build_digest }}"
+          IMAGE_DIGEST="${{ steps.build_digest.outputs.build_digest }}" # use stripped hash
           IMAGE_REGISTRY="${{ steps.lowercase.outputs.registry_lower }}"
           IMAGE_NAME="${{ steps.lowercase.outputs.image_lower }}"
           OUTPUT_REF="${IMAGE_REGISTRY}/${IMAGE_NAME}@${IMAGE_DIGEST}"
