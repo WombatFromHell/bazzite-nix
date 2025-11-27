@@ -13,6 +13,13 @@ dnf5 install --enable-repo=terra -y \
   kitty kitty-shell-integration kitty-terminfo \
   ghostty ghostty-bat-syntax ghostty-shell-integration ghostty-terminfo
 
+# include 'niri', 'dms', and 'quickshell' from a verified repo
+dnf5 -y copr enable avengemedia/dms &&
+  dnf5 -y install quickshell niri dms
+# include 'noctalia-shell' from third-party (unverified) repo
+dnf5 -y copr enable zhangyi6324/noctalia-shell &&
+  dnf5 -y install noctalia-shell
+
 # include faugus-launcher
 dnf5 -y copr enable faugus/faugus-launcher &&
   dnf5 -y install faugus-launcher
