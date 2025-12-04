@@ -5,15 +5,24 @@ set -ouex pipefail
 mkdir -p /nix
 
 # use cachyos kernel for fedora instead of bazzite kernel
+export TMPDIR=/var/tmp
+mkdir -p $TMPDIR
+#
 setsebool -P domain_kernel_load_modules on
+#
 dnf5 -y copr enable bieszczaders/kernel-cachyos &&
   dnf5 -y remove \
-    kernel \
-    kernel-core \
+    kernel kernel-core \
+    kernel-devel-matched kernel-devel \
     kernel-modules \
+    kernel-modules-akmods \
     kernel-modules-core \
     kernel-modules-extra &&
-  dnf5 -y install kernel-cachyos
+  dnf5 -y install --setopt=tsflags=noscripts kernel-cachyos
+#
+KERNEL_VERSION=$(rpm -qa --queryformat '%{VERSION}-%{RELEASE}.%{ARCH}' kernel-cachyos-core)
+depmod -a "${KERNEL_VERSION}" &&
+  kernel-install add "${KERNEL_VERSION}" "/lib/modules/${KERNEL_VERSION}/vmlinuz"
 
 # install some extra tools
 dnf5 -y install --enable-repo=terra \
@@ -37,4 +46,4 @@ dnf5 -y copr enable faugus/faugus-launcher &&
 
 # clean up after ourselves
 dnf5 clean all &&
-  rm -rf /var/cache/dnf /var/lib/dnf /var/lib/waydroid /var/lib/selinux /var/log/*
+  rm -rf /var/cache/dnf /var/lib/dnf /var/lib/waydroid /var/lib/selinux /var/log/* /var/tmp
