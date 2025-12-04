@@ -139,22 +139,67 @@ jobs:
         id: compute_tags
         run: |
           PARENT_VERSION="${{ steps.metadata.outputs.parent_version }}"
-          case "${{ matrix.variant }}" in
+          PREFIX="${{ steps.lowercase.outputs.registry_lower }}/${{ steps.lowercase.outputs.image_lower }}"
+          VARIANT="${{ matrix.variant }}"
+
+          # 1. Start with the upstream version as our candidate
+          CANONICAL="${PARENT_VERSION}"
+
+          # 2. Only perform collision resolution if Force Build is enabled
+          if [ "${{ github.event.inputs.force_build }}" = "true" ]; then
+            # Check if this exact tag already exists in YOUR registry
+            if skopeo inspect "docker://${PREFIX}:${CANONICAL}" > /dev/null 2>&1; then
+              echo "Collision detected: ${CANONICAL} exists. Calculating next version..."
+
+              # 3. Analyze the version structure
+              # Regex: Capture (Everything up to last dot) and (The last number)
+              if [[ "$CANONICAL" =~ ^(.*)\.([0-9]+)$ ]]; then
+                STEM="${BASH_REMATCH[1]}"
+                LAST_NUM="${BASH_REMATCH[2]}"
+                # HEURISTIC: Distinguish between a Date (e.g., 20251202) and a Counter (e.g., 1, 2)
+                # Dates are usually 8 chars. Counters are usually 1-2 chars.
+                # If the last segment is 4 or more digits, treat it as a base/date.
+                if [ ${#LAST_NUM} -ge 4 ]; then
+                   # Case: 40.20251202 -> Becomes 40.20251202.1
+                   SEARCH_BASE="${CANONICAL}"
+                   NEXT_NUM=1
+                else
+                   # Case: 40.20251202.1 -> Becomes 40.20251202.2 (Increment)
+                   SEARCH_BASE="${STEM}"
+                   NEXT_NUM=$((LAST_NUM + 1))
+                fi
+              else
+                # Case: "latest" or "stable" (no dots/numbers) -> Becomes stable.1
+                SEARCH_BASE="${CANONICAL}"
+                NEXT_NUM=1
+              fi
+
+              # 4. Find the next available slot
+              # Keep incrementing until we find a tag that DOES NOT exist
+              while skopeo inspect "docker://${PREFIX}:${SEARCH_BASE}.${NEXT_NUM}" > /dev/null 2>&1; do
+                echo "${SEARCH_BASE}.${NEXT_NUM} also exists, checking next..."
+                ((NEXT_NUM++))
+              done
+
+              CANONICAL="${SEARCH_BASE}.${NEXT_NUM}"
+              echo "New computed tag: ${CANONICAL}"
+            fi
+          fi
+
+          # Set appropriate tags for each variant
+          case "${VARIANT}" in
             "stable")
-              TAGS="stable,stable-${PARENT_VERSION},${PARENT_VERSION}"
-              CANONICAL="stable-${PARENT_VERSION}"
+              TAGS="stable,stable-${CANONICAL},${CANONICAL}"
               ;;
             "testing")
-              # assume 'testing' is always the most cutting-edge by tagging it 'latest'
-              TAGS="testing,latest,${PARENT_VERSION}"
-              CANONICAL="${PARENT_VERSION}"
+              TAGS="testing,latest,${CANONICAL}"
               ;;
             "deck")
-              TAGS="deck,deck-${PARENT_VERSION}"
-              CANONICAL="deck-${PARENT_VERSION}"
+              TAGS="deck,deck-${CANONICAL},${CANONICAL}"
               ;;
             *) echo "Unknown variant"; exit 1 ;;
           esac
+
           echo "tags=$TAGS" >> $GITHUB_OUTPUT
           echo "canonical_tag=$CANONICAL" >> $GITHUB_OUTPUT
 
