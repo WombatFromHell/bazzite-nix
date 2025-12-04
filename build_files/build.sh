@@ -4,6 +4,10 @@ set -ouex pipefail
 # nix installer enablement
 mkdir -p /nix
 
+# use cachyos kernel for fedora instead of bazzite kernel
+dnf5 -y copr enable bieszczaders/kernel-cachyos &&
+  dnf5 install kernel-cachyos
+
 # install some extra tools
 dnf5 install --enable-repo=terra -y \
   qt5-qttools \
