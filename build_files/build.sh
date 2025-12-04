@@ -5,11 +5,18 @@ set -ouex pipefail
 mkdir -p /nix
 
 # use cachyos kernel for fedora instead of bazzite kernel
+setsebool -P domain_kernel_load_modules on
 dnf5 -y copr enable bieszczaders/kernel-cachyos &&
-  dnf5 install kernel-cachyos
+  dnf5 -y remove \
+    kernel \
+    kernel-core \
+    kernel-modules \
+    kernel-modules-core \
+    kernel-modules-extra &&
+  dnf5 -y install kernel-cachyos
 
 # install some extra tools
-dnf5 install --enable-repo=terra -y \
+dnf5 -y install --enable-repo=terra \
   qt5-qttools \
   qt6-qttools \
   tmux \
