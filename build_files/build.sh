@@ -5,31 +5,29 @@ set -ouex pipefail
 mkdir -p /nix
 
 # use cachyos kernel for fedora instead of bazzite kernel
-export TMPDIR=/var/tmp
-mkdir -p $TMPDIR
+# export TMPDIR=/var/tmp
+# mkdir -p $TMPDIR
 #
-setsebool -P domain_kernel_load_modules on
+# setsebool -P domain_kernel_load_modules on
 #
-dnf5 -y copr enable bieszczaders/kernel-cachyos &&
-  dnf5 -y remove \
-    kernel kernel-core \
-    kernel-devel-matched kernel-devel \
-    kernel-modules \
-    kernel-modules-akmods \
-    kernel-modules-core \
-    kernel-modules-extra &&
-  dnf5 -y install --setopt=tsflags=noscripts kernel-cachyos
+# dnf5 -y copr enable bieszczaders/kernel-cachyos &&
+#   dnf5 -y remove \
+#     kernel kernel-core \
+#     kernel-devel-matched kernel-devel \
+#     kernel-modules \
+#     kernel-modules-akmods \
+#     kernel-modules-core \
+#     kernel-modules-extra &&
+#   dnf5 -y install --setopt=tsflags=noscripts kernel-cachyos
 #
-KERNEL_VERSION=$(rpm -qa --queryformat '%{VERSION}-%{RELEASE}.%{ARCH}' kernel-cachyos-core)
-depmod -a "${KERNEL_VERSION}" &&
-  kernel-install add "${KERNEL_VERSION}" "/lib/modules/${KERNEL_VERSION}/vmlinuz"
+# KERNEL_VERSION=$(rpm -qa --queryformat '%{VERSION}-%{RELEASE}.%{ARCH}' kernel-cachyos-core)
+# depmod -a "${KERNEL_VERSION}" &&
+#   kernel-install add "${KERNEL_VERSION}" "/lib/modules/${KERNEL_VERSION}/vmlinuz"
 
 # install some extra tools
 dnf5 -y install --enable-repo=terra \
-  qt5-qttools \
-  qt6-qttools \
+  qt5-qttools qt6-qttools \
   tmux \
-  alacritty \
   kitty kitty-shell-integration kitty-terminfo \
   ghostty ghostty-bat-syntax ghostty-shell-integration ghostty-terminfo
 
@@ -41,8 +39,8 @@ dnf5 -y copr enable zhangyi6324/noctalia-shell &&
   dnf5 -y install noctalia-shell cliphist
 
 # include faugus-launcher
-dnf5 -y copr enable faugus/faugus-launcher &&
-  dnf5 -y install faugus-launcher
+# dnf5 -y copr enable faugus/faugus-launcher &&
+#   dnf5 -y install faugus-launcher
 
 # clean up after ourselves
 dnf5 clean all &&
