@@ -39,8 +39,8 @@ dnf5 -y copr enable zhangyi6324/noctalia-shell &&
   dnf5 -y install noctalia-shell cliphist
 
 # include faugus-launcher
-# dnf5 -y copr enable faugus/faugus-launcher &&
-#   dnf5 -y install faugus-launcher
+dnf5 -y copr enable faugus/faugus-launcher &&
+  dnf5 -y install faugus-launcher
 
 # clean up after ourselves
 dnf5 clean all &&
