@@ -86,7 +86,7 @@ jobs:
 
       - name: Restore digest cache
         id: restore_cache
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: .digest-cache
           restore-keys: |
@@ -393,7 +393,7 @@ jobs:
 
       - name: Save new cache
         if: steps.compare.outputs.changed == 'true'
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: .digest-cache
           key: ${{ steps.compare.outputs.final_cache_key }}
