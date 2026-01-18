@@ -189,27 +189,36 @@ jobs:
           fi
 
           # Set appropriate tags for each variant
-          case "${VARIANT}" in
+          # Parse base image to determine proper naming
+          BASE_IMAGE_NAME=$(echo "${{ matrix.base_image }}" | sed 's|.*/||' | sed 's|:.*||')
+          BASE_IMAGE_TAG=$(echo "${{ matrix.base_image }}" | sed 's|.*:||')
+
+          # Determine the output image name based on base image
+          # All variants get the -nix suffix
+          OUTPUT_IMAGE="${BASE_IMAGE_NAME}-nix"
+
+          # Generate tags based on the base image tag
+          case "${BASE_IMAGE_TAG}" in
             "stable")
-              TAGS="stable,stable-${CANONICAL},${CANONICAL}"
+              TAGS="${OUTPUT_IMAGE}:stable,${OUTPUT_IMAGE}:stable-${CANONICAL},${OUTPUT_IMAGE}:${CANONICAL}"
               ;;
             "testing")
-              TAGS="testing,latest,${CANONICAL}"
+              TAGS="${OUTPUT_IMAGE}:testing,${OUTPUT_IMAGE}:latest,${OUTPUT_IMAGE}:${CANONICAL}"
               ;;
-            "deck")
-              TAGS="deck,deck-${CANONICAL},${CANONICAL}"
+            *)
+              TAGS="${OUTPUT_IMAGE}:${BASE_IMAGE_TAG},${OUTPUT_IMAGE}:${BASE_IMAGE_TAG}-${CANONICAL},${OUTPUT_IMAGE}:${CANONICAL}"
               ;;
-            *) echo "Unknown variant"; exit 1 ;;
           esac
 
           echo "tags=$TAGS" >> $GITHUB_OUTPUT
           echo "canonical_tag=$CANONICAL" >> $GITHUB_OUTPUT
+          echo "output_image=$OUTPUT_IMAGE" >> $GITHUB_OUTPUT
 
       - name: Check if canonical tag already exists
         if: github.event.inputs.force_build != 'true'
         id: check_exists
         run: |
-          PREFIX="${{ steps.lowercase.outputs.registry_lower }}/${{ steps.lowercase.outputs.image_lower }}"
+          PREFIX="${{ steps.lowercase.outputs.registry_lower }}/${{ steps.compute_tags.outputs.output_image }}"
           CANONICAL_TAG="${{ steps.compute_tags.outputs.canonical_tag }}"
           IMAGE_REF="${PREFIX}:${CANONICAL_TAG}"
           echo "Checking existence of canonical tag: $IMAGE_REF"
@@ -272,7 +281,7 @@ jobs:
           org.opencontainers.image.description=${{ env.IMAGE_DESC }}
           org.opencontainers.image.documentation=https://raw.githubusercontent.com/${{ github.repository_owner }}/${{ github.event.repository.name }}/refs/heads/main/README.md
           org.opencontainers.image.source=https://github.com/${{ github.repository_owner }}/${{ github.event.repository.name }}/blob/main/Containerfile
-          org.opencontainers.image.title=${{ steps.lowercase.outputs.image_lower }}
+          org.opencontainers.image.title=${{ steps.compute_tags.outputs.output_image }}
           org.opencontainers.image.url=https://github.com/${{ github.repository_owner }}/${{ github.event.repository.name }}
           org.opencontainers.image.vendor=${{ github.repository_owner }}
           org.opencontainers.image.version=${{ steps.metadata.outputs.parent_version }}
@@ -304,7 +313,7 @@ jobs:
       - name: Check if previous image exists
         id: check_prev
         run: |
-          PREV_REF="${{ steps.lowercase.outputs.registry_lower }}/${{ steps.lowercase.outputs.image_lower }}:${{ matrix.variant }}"
+          PREV_REF="${{ steps.lowercase.outputs.registry_lower }}/${{ steps.compute_tags.outputs.output_image }}:${{ matrix.variant }}"
           echo "Checking existence of previous image: $PREV_REF"
           if skopeo inspect "docker://${PREV_REF}" > /dev/null 2>&1; then
             echo "prev_ref_exists=true" >> $GITHUB_OUTPUT
@@ -319,7 +328,7 @@ jobs:
         with:
           rechunk: "ghcr.io/ublue-os/legacy-rechunk:v1.0.0-x86_64"
           ref: "raw-img"
-          prev-ref: "${{ steps.lowercase.outputs.registry_lower }}/${{ steps.lowercase.outputs.image_lower }}:${{ matrix.variant }}"
+          prev-ref: "${{ steps.lowercase.outputs.registry_lower }}/${{ steps.compute_tags.outputs.output_image }}:${{ matrix.variant }}"
           labels: ${{ steps.labels.outputs.rechunk_labels }}
 
       - name: Get build digest
@@ -364,10 +373,10 @@ jobs:
             IMAGE_DIGEST="${{ steps.build_digest.outputs.full_build_digest }}"
             SHORT_DIGEST="${{ steps.build_digest.outputs.build_digest }}"
             IMAGE_REGISTRY="${{ steps.lowercase.outputs.registry_lower }}"
-            IMAGE_NAME="${{ steps.lowercase.outputs.image_lower }}"
+            IMAGE_NAME="${{ steps.compute_tags.outputs.output_image }}"
             OUTPUT_REF="${IMAGE_REGISTRY}/${IMAGE_NAME}@${IMAGE_DIGEST}"
             IFS=',' read -r -a tags <<< "${{ steps.compute_tags.outputs.tags }}"
-            BASE_IMG="${{ steps.lowercase.outputs.registry_lower }}/${{ steps.lowercase.outputs.image_lower }}"
+            BASE_IMG="${{ steps.lowercase.outputs.registry_lower }}/${{ steps.compute_tags.outputs.output_image }}"
 
             DIGEST_REF="${BASE_IMG}@${IMAGE_DIGEST}"
             echo "Pushing primary image: ${DIGEST_REF}"
