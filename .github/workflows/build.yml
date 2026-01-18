@@ -37,6 +37,8 @@ jobs:
             base_image: "ghcr.io/ublue-os/bazzite:stable"
           - variant: "testing"
             base_image: "ghcr.io/ublue-os/bazzite:testing"
+          - variant: "nvidia-open"
+            base_image: "ghcr.io/ublue-os/bazzite-nvidia-open:stable"
           # - variant: "deck"
           #   base_image: "ghcr.io/ublue-os/bazzite-deck:stable"
 

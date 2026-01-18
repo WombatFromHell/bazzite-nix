@@ -10,13 +10,16 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       packages: write
+    strategy:
+      matrix:
+        variant: ["bazzite", "bazzite-nvidia-open"]
 
     steps:
       - name: Clean up images for package ${{ github.event.repository.name }}
         uses: dataaxiom/ghcr-cleanup-action@v1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          package: ${{ github.event.repository.name }}
+          package: ${{ matrix.variant }}
           keep-n-tagged: 60 # 2 months worth
           delete-untagged: true
           delete-partial-images: true
