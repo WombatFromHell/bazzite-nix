@@ -198,15 +198,16 @@ jobs:
           OUTPUT_IMAGE="${BASE_IMAGE_NAME}-nix"
 
           # Generate tags based on the base image tag
+          # Store just the tag names (without registry) for simplicity
           case "${BASE_IMAGE_TAG}" in
             "stable")
-              TAGS="${OUTPUT_IMAGE}:stable,${OUTPUT_IMAGE}:stable-${CANONICAL},${OUTPUT_IMAGE}:${CANONICAL}"
+              TAGS="stable,stable-${CANONICAL},${CANONICAL}"
               ;;
             "testing")
-              TAGS="${OUTPUT_IMAGE}:testing,${OUTPUT_IMAGE}:latest,${OUTPUT_IMAGE}:${CANONICAL}"
+              TAGS="testing,latest,${CANONICAL}"
               ;;
             *)
-              TAGS="${OUTPUT_IMAGE}:${BASE_IMAGE_TAG},${OUTPUT_IMAGE}:${BASE_IMAGE_TAG}-${CANONICAL},${OUTPUT_IMAGE}:${CANONICAL}"
+              TAGS="${BASE_IMAGE_TAG},${BASE_IMAGE_TAG}-${CANONICAL},${CANONICAL}"
               ;;
           esac
 
@@ -390,8 +391,9 @@ jobs:
             # add our latest build digest to the tags to be pushed
             tags+=("$SHORT_DIGEST")
             for tag in "${tags[@]}"; do
-              echo "Pushing tag: ${tag}"
-              sudo skopeo copy "docker://$DIGEST_REF" "docker://${BASE_IMG}:${tag}"
+              FULL_TAG="${IMAGE_REGISTRY}/${IMAGE_NAME}:${tag}"
+              echo "Pushing tag: ${FULL_TAG}"
+              sudo skopeo copy "docker://$DIGEST_REF" "docker://${FULL_TAG}"
             done
         env:
           SIGNING_SECRET: ${{ secrets.SIGNING_SECRET }}
