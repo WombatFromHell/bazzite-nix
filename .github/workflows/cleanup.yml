@@ -12,7 +12,7 @@ jobs:
       packages: write
     strategy:
       matrix:
-        variant: ["bazzite-nix", "bazzite-nix-nvidia-open"]
+        variant: ["bazzite-nix"]
 
     steps:
       - name: Clean up images for package ${{ github.event.repository.name }}

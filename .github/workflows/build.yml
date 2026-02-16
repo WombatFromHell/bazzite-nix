@@ -35,12 +35,20 @@ jobs:
         include:
           - variant: "stable"
             base_image: "ghcr.io/ublue-os/bazzite:stable"
+            image_suffix: ""
           - variant: "testing"
             base_image: "ghcr.io/ublue-os/bazzite:testing"
-          - variant: "nvidia-open"
-            base_image: "ghcr.io/ublue-os/bazzite-nvidia-open:stable"
+            image_suffix: ""
+          - variant: "testing-cachyos"
+            base_image: "ghcr.io/ublue-os/bazzite:testing"
+            build_script: "build-cachyos.sh"
+            image_suffix: "-cachyos"
+          # - variant: "nvidia-open"
+          #   base_image: "ghcr.io/ublue-os/bazzite:stable"
+          #   image_suffix: "-nvidia-open"
           # - variant: "deck"
           #   base_image: "ghcr.io/ublue-os/bazzite-deck:stable"
+          #   image_suffix: "-deck"
 
     permissions:
       contents: read
@@ -141,8 +149,18 @@ jobs:
         id: compute_tags
         run: |
           PARENT_VERSION="${{ steps.metadata.outputs.parent_version }}"
-          PREFIX="${{ steps.lowercase.outputs.registry_lower }}/${{ steps.lowercase.outputs.image_lower }}"
-          VARIANT="${{ matrix.variant }}"
+
+          # Parse base image to determine proper naming (needed for collision detection)
+          BASE_IMAGE_NAME=$(echo "${{ matrix.base_image }}" | sed 's|.*/||' | sed 's|:.*||')
+          BASE_IMAGE_TAG=$(echo "${{ matrix.base_image }}" | sed 's|.*:||')
+          IMAGE_SUFFIX="${{ matrix.image_suffix }}"
+
+          # Determine the output image name based on base image
+          # All variants get the -nix suffix, with optional variant suffix (e.g., -cachyos, -deck)
+          OUTPUT_IMAGE="${BASE_IMAGE_NAME}-nix${IMAGE_SUFFIX}"
+
+          # Build the full prefix for collision detection
+          PREFIX="${{ steps.lowercase.outputs.registry_lower }}/${OUTPUT_IMAGE}"
 
           # 1. Start with the upstream version as our candidate
           CANONICAL="${PARENT_VERSION}"
@@ -187,15 +205,6 @@ jobs:
               echo "New computed tag: ${CANONICAL}"
             fi
           fi
-
-          # Set appropriate tags for each variant
-          # Parse base image to determine proper naming
-          BASE_IMAGE_NAME=$(echo "${{ matrix.base_image }}" | sed 's|.*/||' | sed 's|:.*||')
-          BASE_IMAGE_TAG=$(echo "${{ matrix.base_image }}" | sed 's|.*:||')
-
-          # Determine the output image name based on base image
-          # All variants get the -nix suffix
-          OUTPUT_IMAGE="${BASE_IMAGE_NAME}-nix"
 
           # Generate tags based on the base image tag
           # Store just the tag names (without registry) for simplicity
@@ -308,19 +317,22 @@ jobs:
           sudo buildah bud \
               --tag "${SKOPEO_TAG}" ${{ steps.labels.outputs.buildah_args }} \
               --build-arg BASE_IMAGE="${{ matrix.base_image }}" \
+              --build-arg BUILD_SCRIPT="${{ matrix.build_script }}" \
               --file ./Containerfile && \
               echo "skopeo_ref=containers-storage:${SKOPEO_TAG}" >> $GITHUB_OUTPUT
 
       - name: Check if previous image exists
         id: check_prev
         run: |
-          PREV_REF="${{ steps.lowercase.outputs.registry_lower }}/${{ steps.compute_tags.outputs.output_image }}:${{ matrix.variant }}"
+          BASE_IMAGE_TAG=$(echo "${{ matrix.base_image }}" | sed 's|.*:||')
+          PREV_REF="${{ steps.lowercase.outputs.registry_lower }}/${{ steps.compute_tags.outputs.output_image }}:${BASE_IMAGE_TAG}"
           echo "Checking existence of previous image: $PREV_REF"
           if skopeo inspect "docker://${PREV_REF}" > /dev/null 2>&1; then
             echo "prev_ref_exists=true" >> $GITHUB_OUTPUT
           else
             echo "prev_ref_exists=false" >> $GITHUB_OUTPUT
           fi
+          echo "base_image_tag=${BASE_IMAGE_TAG}" >> $GITHUB_OUTPUT
 
       - name: Run Rechunker
         if: github.event.inputs.skip_rechunk != true && steps.check_prev.outputs.prev_ref_exists == 'true'
@@ -329,7 +341,7 @@ jobs:
         with:
           rechunk: "ghcr.io/ublue-os/legacy-rechunk:v1.0.0-x86_64"
           ref: "raw-img"
-          prev-ref: "${{ steps.lowercase.outputs.registry_lower }}/${{ steps.compute_tags.outputs.output_image }}:${{ matrix.variant }}"
+          prev-ref: "${{ steps.lowercase.outputs.registry_lower }}/${{ steps.compute_tags.outputs.output_image }}:${{ steps.check_prev.outputs.base_image_tag }}"
           labels: ${{ steps.labels.outputs.rechunk_labels }}
 
       - name: Get build digest
