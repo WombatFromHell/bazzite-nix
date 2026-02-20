@@ -1,22 +1,40 @@
----
-name: Cleanup Old Images
+name: Clean Old Images
+
 on:
   schedule:
     - cron: "1 7 * * 0" # 07:01 UTC every Sunday
   workflow_dispatch:
 
 jobs:
+  # Generate matrix of enabled variants from variants.json
+  generate-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      variants: ${{ steps.read-variants.outputs.variants }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Read enabled variants
+        id: read-variants
+        run: |
+          # Read variants.json and filter out disabled variants
+          # Output format: ["bazzite-nix", "bazzite-nix-cachyos", ...]
+          # Use repository name as base, append image_suffix if present, then deduplicate
+          variants=$(jq -c --arg repo "${{ github.event.repository.name }}" '[.variants[] | select(.disabled != true) | ($repo + (.image_suffix // ""))] | unique' .github/variants.json)
+          echo "variants=${variants}" >> $GITHUB_OUTPUT
+
   cleanup-images:
+    needs: generate-matrix
     runs-on: ubuntu-latest
     permissions:
       packages: write
     strategy:
       matrix:
-        variant:
-          ["bazzite-nix", "bazzite-nix-cachyos", "bazzite-nix-nvidia-open"]
+        variant: ${{ fromJson(needs.generate-matrix.outputs.variants) }}
 
     steps:
-      - name: Clean up images for package ${{ github.event.repository.name }}
+      - name: Clean up images for package ${{ matrix.variant }}
         uses: dataaxiom/ghcr-cleanup-action@v1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}

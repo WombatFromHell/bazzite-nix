@@ -4,6 +4,7 @@ export centos_version := env("CENTOS_VERSION", "stream10")
 export fedora_version := env("CENTOS_VERSION", "43")
 export default_tag := env("DEFAULT_TAG", "testing")
 export bib_image := env("BIB_IMAGE", "quay.io/centos-bootc/bootc-image-builder:latest")
+export base_image := env("BASE_IMAGE", "ghcr.io/ublue-os/bazzite:stable")
 
 alias build-vm := build-qcow2
 alias rebuild-vm := rebuild-qcow2
@@ -102,7 +103,7 @@ sudoif command *args:
 #
 
 # Build the image using the specified parameters
-build $target_image=image_name $tag=default_tag $dx="0" $hwe="0" $gdx="0":
+build $target_image=image_name $tag=default_tag $build_script="build.sh" $base_image=base_image $dx="0" $hwe="0" $gdx="0":
     #!/usr/bin/env bash
 
     # Get Version
@@ -115,7 +116,8 @@ build $target_image=image_name $tag=default_tag $dx="0" $hwe="0" $gdx="0":
     BUILD_ARGS+=("--build-arg" "ENABLE_DX=${dx}")
     BUILD_ARGS+=("--build-arg" "ENABLE_HWE=${hwe}")
     BUILD_ARGS+=("--build-arg" "ENABLE_GDX=${gdx}")
-    BUILD_ARGS+=("--build-arg" "BASE_IMAGE=ghcr.io/ublue-os/bazzite:${tag}")
+    BUILD_ARGS+=("--build-arg" "BASE_IMAGE=${base_image}")
+    BUILD_ARGS+=("--build-arg" "BUILD_SCRIPT=${build_script}")
     if [[ -z "$(git status -s)" ]]; then
         BUILD_ARGS+=("--build-arg" "SHA_HEAD_SHORT=$(git rev-parse --short HEAD)")
     fi

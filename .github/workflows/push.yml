@@ -1,0 +1,211 @@
+on:
+  workflow_call:
+    inputs:
+      variants_to_build:
+        description: "JSON array of variant data to build"
+        required: true
+        type: string
+      date:
+        description: "ISO 8601 timestamp"
+        required: true
+        type: string
+      registry_lower:
+        description: "Lowercase registry name"
+        required: true
+        type: string
+      image_desc:
+        description: "Image description for OCI labels"
+        required: true
+        type: string
+      skip_rechunk:
+        description: "Skip rechunk step (faster build, larger layers)"
+        required: false
+        default: false
+        type: boolean
+    secrets:
+      signing_secret:
+        description: "Cosign signing secret"
+        required: true
+
+jobs:
+  build_push:
+    name: Build ${{ matrix.variant_data.variant }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        variant_data: ${{ fromJson(inputs.variants_to_build) }}
+
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@faadad0cce49287aee09b3a48701e75088a2c6ad # v4.0
+
+      - name: Login for Skopeo (for push operations)
+        id: skopeo_login
+        uses: Wandalen/wretry.action@e68c23e6309f2871ca8ae4763e7629b9c258e1ea # v3.8.0
+        with:
+          attempt_limit: 3
+          attempt_delay: 30000
+          command: |
+            echo "${{ secrets.GITHUB_TOKEN }}" | skopeo login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Generate cache key
+        id: cache_key
+        shell: bash
+        run: |
+          REPO_HASH=$(echo "${{ github.repository }}" | sha256sum | cut -c1-8)
+          BRANCH_HASH=$(echo "${{ github.ref_name }}" | sha256sum | cut -c1-8)
+          VARIANT_HASH=$(echo "${{ matrix.variant_data.variant }}" | sha256sum | cut -c1-8)
+          BASE_KEY="digest-${REPO_HASH}-${BRANCH_HASH}"
+          echo "variant_cache_key=${BASE_KEY}-${variant_hash}" >> $GITHUB_OUTPUT
+          echo "variant_hash=${VARIANT_HASH}" >> $GITHUB_OUTPUT
+
+      - name: Restore variant digest cache
+        uses: actions/cache/restore@v5
+        with:
+          path: .digest-cache-${{ matrix.variant_data.variant }}
+          restore-keys: |
+            ${{ steps.cache_key.outputs.variant_cache_key }}-${{ matrix.variant_data.digest }}
+            ${{ steps.cache_key.outputs.variant_cache_key }}-
+          key: ${{ steps.cache_key.outputs.variant_cache_key }}-${{ matrix.variant_data.digest }}
+
+      - name: Assemble image labels
+        id: labels
+        run: |
+          LABELS=$(cat <<EOF
+          org.opencontainers.image.created=${{ inputs.date }}
+          org.opencontainers.image.description=${{ inputs.image_desc }}
+          org.opencontainers.image.documentation=https://raw.githubusercontent.com/${{ github.repository_owner }}/${{ github.event.repository.name }}/refs/heads/main/README.md
+          org.opencontainers.image.source=https://github.com/${{ github.repository_owner }}/${{ github.event.repository.name }}/blob/main/Containerfile
+          org.opencontainers.image.title=${{ matrix.variant_data.variant }}
+          org.opencontainers.image.url=https://github.com/${{ github.repository_owner }}/${{ github.event.repository.name }}
+          org.opencontainers.image.vendor=${{ github.repository_owner }}
+          org.opencontainers.image.version=${{ matrix.variant_data.parent_version }}
+          containers.bootc=1
+          EOF
+          )
+          echo "rechunk_labels<<EOF" >> $GITHUB_OUTPUT
+          echo "$LABELS" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+          BUILDAH_ARGS=""
+          while IFS= read -r line; do
+            [ -n "$line" ] && BUILDAH_ARGS="$BUILDAH_ARGS --label \"$line\""
+          done <<< "$LABELS"
+          echo "buildah_args<<EOF" >> $GITHUB_OUTPUT
+          echo "$BUILDAH_ARGS" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Build image
+        id: build_image
+        run: |
+          SKOPEO_TAG="localhost/raw-img"
+          sudo buildah bud \
+              --tag "${SKOPEO_TAG}" ${{ steps.labels.outputs.buildah_args }} \
+              --build-arg BASE_IMAGE="${{ matrix.variant_data.base_image }}" \
+              --build-arg BUILD_SCRIPT="${{ matrix.variant_data.build_script || 'build.sh' }}" \
+              --file ./Containerfile && \
+              echo "skopeo_ref=containers-storage:${SKOPEO_TAG}" >> $GITHUB_OUTPUT
+
+      - name: Check if previous image exists
+        id: check_prev
+        run: |
+          BASE_IMAGE_TAG=$(echo "${{ matrix.variant_data.base_image }}" | sed 's|.*:||')
+          OUTPUT_IMAGE="${{ github.event.repository.name }}${{ matrix.variant_data.image_suffix }}"
+          PREV_REF="${{ inputs.registry_lower }}/${OUTPUT_IMAGE}:${BASE_IMAGE_TAG}"
+          echo "Checking existence of previous image: $PREV_REF"
+          if skopeo inspect "docker://${PREV_REF}" > /dev/null 2>&1; then
+            echo "prev_ref_exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "prev_ref_exists=false" >> $GITHUB_OUTPUT
+          fi
+          echo "base_image_tag=${BASE_IMAGE_TAG}" >> $GITHUB_OUTPUT
+
+      - name: Run Rechunker
+        if: inputs.skip_rechunk != 'true' && steps.check_prev.outputs.prev_ref_exists == 'true'
+        id: rechunk
+        uses: ublue-os/legacy-rechunk@a925083d9af7cb04b3e2a6e8c01bfa495f38b710 # v1.0.0
+        with:
+          rechunk: "ghcr.io/ublue-os/legacy-rechunk:v1.0.0-x86_64"
+          ref: "raw-img"
+          prev-ref: "${{ inputs.registry_lower }}/${{ github.event.repository.name }}${{ matrix.variant_data.image_suffix }}:${{ steps.check_prev.outputs.base_image_tag }}"
+          labels: ${{ steps.labels.outputs.rechunk_labels }}
+
+      - name: Get build digest
+        id: build_digest
+        run: |
+          SKIP_RECHUNK="${{ inputs.skip_rechunk }}"
+          RECHUNK_REF="${{ steps.rechunk.outputs.ref }}"
+          SKOPEO_REF="${{ steps.build_image.outputs.skopeo_ref }}"
+
+          if [ "$SKIP_RECHUNK" == "true" ]; then
+            IMAGE_REF="${SKOPEO_REF}"
+          elif [ -n "$RECHUNK_REF" ]; then
+            IMAGE_REF="${RECHUNK_REF}"
+          else
+            IMAGE_REF="${SKOPEO_REF}"
+          fi
+
+          if [ -z "$IMAGE_REF" ]; then
+            echo "::error::No valid image reference found to inspect"
+            exit 1
+          fi
+
+          echo "Using image ref: $IMAGE_REF"
+          FULL_BUILD_DIGEST=$(sudo skopeo inspect --format='{{.Digest}}' "${IMAGE_REF}")
+          BUILD_DIGEST=$(echo "$FULL_BUILD_DIGEST" | sed 's/sha256://')
+          echo "full_build_digest=${FULL_BUILD_DIGEST}" >> $GITHUB_OUTPUT
+          echo "build_digest=${BUILD_DIGEST}" >> $GITHUB_OUTPUT
+          echo "source_ref=${IMAGE_REF}" >> $GITHUB_OUTPUT
+
+      - name: Sign and Push to GHCR
+        id: sign_and_push
+        uses: Wandalen/wretry.action@e68c23e6309f2871ca8ae4763e7629b9c258e1ea # v3.8.0
+        with:
+          attempt_limit: 3
+          attempt_delay: 15000
+          command: |
+            SOURCE_REF="${{ steps.build_digest.outputs.source_ref }}"
+            IMAGE_DIGEST="${{ steps.build_digest.outputs.full_build_digest }}"
+            SHORT_DIGEST="${{ steps.build_digest.outputs.build_digest }}"
+            IMAGE_REGISTRY="${{ inputs.registry_lower }}"
+            OUTPUT_IMAGE="${{ github.event.repository.name }}${{ matrix.variant_data.image_suffix }}"
+            OUTPUT_REF="${IMAGE_REGISTRY}/${OUTPUT_IMAGE}@${IMAGE_DIGEST}"
+            IFS=',' read -r -a tags <<< "${{ matrix.variant_data.tags }}"
+            BASE_IMG="${{ inputs.registry_lower }}/${OUTPUT_IMAGE}"
+
+            DIGEST_REF="${BASE_IMG}@${IMAGE_DIGEST}"
+            echo "Pushing primary image: ${DIGEST_REF}"
+            sudo skopeo copy "$SOURCE_REF" "docker://$DIGEST_REF"
+
+            echo "Signing image: ${OUTPUT_REF}"
+            echo "${{ secrets.GITHUB_TOKEN }}" | cosign login ghcr.io -u ${{ github.actor }} --password-stdin
+            cosign sign -y --key env://SIGNING_SECRET "$DIGEST_REF"
+
+            tags+=("$SHORT_DIGEST")
+            for tag in "${tags[@]}"; do
+              FULL_TAG="${IMAGE_REGISTRY}/${OUTPUT_IMAGE}:${tag}"
+              echo "Pushing tag: ${FULL_TAG}"
+              sudo skopeo copy "docker://$DIGEST_REF" "docker://${FULL_TAG}"
+            done
+        env:
+          SIGNING_SECRET: ${{ secrets.signing_secret }}
+
+      - name: Save digest to cache
+        run: |
+          mkdir -p .digest-cache-${{ matrix.variant_data.variant }}
+          echo "${{ matrix.variant_data.digest }}" > .digest-cache-${{ matrix.variant_data.variant }}/last_digest
+
+      - name: Save new cache
+        uses: actions/cache/save@v5
+        with:
+          path: .digest-cache-${{ matrix.variant_data.variant }}
+          key: ${{ steps.cache_key.outputs.variant_cache_key }}-${{ matrix.variant_data.digest }}

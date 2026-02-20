@@ -1,0 +1,42 @@
+{
+  "_comment": "Image variant definitions for bazzite-nix builds",
+  "_schema": {
+    "variants": [
+      {
+        "name": "string - variant identifier (must be unique)",
+        "base_image": "string - upstream image reference (registry:tag)",
+        "build_script": "string - optional build script in build_files/, defaults to 'build.sh'",
+        "image_suffix": "string - optional suffix for output image name",
+        "disabled": "boolean - optional, defaults to false. Set to true to skip this variant"
+      }
+    ]
+  },
+  "variants": [
+    {
+      "name": "stable",
+      "base_image": "ghcr.io/ublue-os/bazzite:stable"
+    },
+    {
+      "name": "testing",
+      "base_image": "ghcr.io/ublue-os/bazzite:testing"
+    },
+    {
+      "name": "cachyos",
+      "base_image": "ghcr.io/ublue-os/bazzite:testing",
+      "build_script": "build-cachyos.sh",
+      "image_suffix": "-cachyos"
+    },
+    {
+      "name": "nvidia-open",
+      "base_image": "ghcr.io/ublue-os/bazzite-nvidia-open:stable",
+      "image_suffix": "-nvidia-open",
+      "disabled": true
+    },
+    {
+      "name": "deck",
+      "base_image": "ghcr.io/ublue-os/bazzite-deck:stable",
+      "image_suffix": "-deck",
+      "disabled": true
+    }
+  ]
+}

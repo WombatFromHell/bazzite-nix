@@ -1,5 +1,5 @@
----
 name: Build Custom Image
+
 on:
   schedule:
     - cron: "1 6 * * 1,3,5" # 06:01 UTC (Mon/Wed/Fri)
@@ -16,45 +16,39 @@ on:
         default: false
         type: boolean
 
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+
 env:
+  # Image metadata
   IMAGE_NAME: "${{ github.event.repository.name }}"
-  IMAGE_DESC: "Bazzite Testing image with Nix mount support"
+  IMAGE_DESC: "Customized Bazzite image with Nix mount support and other sugar"
   IMAGE_REGISTRY: "ghcr.io/${{ github.repository_owner }}"
+
+  # Variant configuration file path
+  # Edit .github/variants.json to add, remove, or modify build variants
+  VARIANTS_CONFIG: ".github/variants.json"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  build_push:
-    name: Build and push image
+  # Check upstream images, determine which variants need rebuilding, and aggregate results
+  check_and_aggregate:
     runs-on: ubuntu-24.04
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - variant: "stable"
-            base_image: "ghcr.io/ublue-os/bazzite:stable"
-            image_suffix: ""
-          - variant: "testing"
-            base_image: "ghcr.io/ublue-os/bazzite:testing"
-            image_suffix: ""
-          - variant: "testing-cachyos"
-            base_image: "ghcr.io/ublue-os/bazzite:testing"
-            build_script: "build-cachyos.sh"
-            image_suffix: "-cachyos"
-          # - variant: "nvidia-open"
-          #   base_image: "ghcr.io/ublue-os/bazzite:stable"
-          #   image_suffix: "-nvidia-open"
-          # - variant: "deck"
-          #   base_image: "ghcr.io/ublue-os/bazzite-deck:stable"
-          #   image_suffix: "-deck"
-
+    outputs:
+      variants_to_build: ${{ steps.aggregate.outputs.variants_to_build }}
+      any_builds_needed: ${{ steps.aggregate.outputs.any_builds_needed }}
+      date: ${{ steps.date.outputs.date }}
+      registry_lower: ${{ steps.lowercase.outputs.registry_lower }}
+      image_desc: ${{ env.IMAGE_DESC }}
     permissions:
       contents: read
       packages: write
       id-token: write
-
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -64,34 +58,11 @@ jobs:
         run: |
           echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_OUTPUT
 
-      - name: Lowercase Registry and Image
+      - name: Lowercase Registry
         id: lowercase
         run: |
-          REGISTRY_LOWER=$(echo "${{ env.IMAGE_REGISTRY }}" | tr '[:upper:]' '[:lower:]')
-          IMAGE_LOWER=$(echo "${{ env.IMAGE_NAME }}" | tr '[:upper:]' '[:lower:]')
+          REGISTRY_LOWER=$(echo "ghcr.io/${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
           echo "registry_lower=${REGISTRY_LOWER}" >> $GITHUB_OUTPUT
-          echo "image_lower=${IMAGE_LOWER}" >> $GITHUB_OUTPUT
-
-      - name: Generate cache keys
-        id: cache_keys
-        shell: bash
-        run: |
-          VARIANT_HASH=$(echo "${{ matrix.variant }}" | sha256sum | cut -c1-8)
-          REPO_HASH=$(echo "${{ github.repository }}" | sha256sum | cut -c1-8)
-          BRANCH_HASH=$(echo "${{ github.ref_name }}" | sha256sum | cut -c1-8)
-          BASE_KEY="digest-${REPO_HASH}-${BRANCH_HASH}-${VARIANT_HASH}"
-          RESTORE_KEY="${BASE_KEY}-"
-          echo "restore_key=${RESTORE_KEY}" >> $GITHUB_OUTPUT
-          echo "base_key=${BASE_KEY}" >> $GITHUB_OUTPUT
-
-      - name: Restore digest cache
-        id: restore_cache
-        uses: actions/cache/restore@v5
-        with:
-          path: .digest-cache
-          restore-keys: |
-            ${{ steps.cache_keys.outputs.restore_key }}
-          key: ${{ steps.cache_keys.outputs.base_key }}-never-matches
 
       - name: Login for Skopeo
         id: skopeo_login
@@ -102,332 +73,114 @@ jobs:
           command: |
             echo "${{ secrets.GITHUB_TOKEN }}" | skopeo login ghcr.io -u ${{ github.actor }} --password-stdin
 
-      - name: Extract metadata from upstream image
-        id: metadata
+      - name: Generate base cache key
+        id: cache_key
+        shell: bash
         run: |
-          BASE_IMAGE="${{ matrix.base_image }}"
-          echo "Inspecting upstream base image: $BASE_IMAGE"
-          # Retry up to 3 times on failure
-          for i in {1..3}; do
-            if INSPECT_OUTPUT=$(skopeo inspect "docker://$BASE_IMAGE" 2>/dev/null); then
-              # Extract version label (required)
-              PARENT_VERSION=$(echo "$INSPECT_OUTPUT" | jq -r '.Labels["org.opencontainers.image.version"] // empty')
-              # Extract full digest
-              DIGEST=$(echo "$INSPECT_OUTPUT" | jq -r '.Digest // empty' | sed 's/sha256://')
-              # Validate version
-              if [ -z "$PARENT_VERSION" ] || [ "$PARENT_VERSION" = "null" ] || [ "$PARENT_VERSION" = "latest" ]; then
-                echo "::error::Upstream image missing or invalid 'org.opencontainers.image.version' label"
-                exit 1
-              fi
-              # Validate digest
-              if [ -z "$DIGEST" ] || [ "$DIGEST" = "null" ]; then
-                echo "::error::Failed to extract valid digest from upstream image"
-                exit 1
-              fi
+          REPO_HASH=$(echo "${{ github.repository }}" | sha256sum | cut -c1-8)
+          BRANCH_HASH=$(echo "${{ github.ref_name }}" | sha256sum | cut -c1-8)
+          BASE_KEY="digest-${REPO_HASH}-${BRANCH_HASH}"
+          echo "base_cache_key=${BASE_KEY}" >> $GITHUB_OUTPUT
 
-              echo "parent_version=$PARENT_VERSION" >> $GITHUB_OUTPUT
-              echo "digest=$DIGEST" >> $GITHUB_OUTPUT
-              echo "base_image=$BASE_IMAGE" >> $GITHUB_OUTPUT
-              echo "Successfully extracted metadata: version=$PARENT_VERSION, digest=$DIGEST"
-              exit 0
-            else
-              echo "Attempt $i: Failed to inspect $BASE_IMAGE"
-              if [ $i -lt 3 ]; then
-                sleep 10
-              else
-                echo "::error::Failed to inspect upstream image after 3 attempts"
-                exit 1
-              fi
-            fi
-          done
-
-      - name: Compute image tags
-        id: compute_tags
-        run: |
-          PARENT_VERSION="${{ steps.metadata.outputs.parent_version }}"
-
-          # Parse base image to determine proper naming (needed for collision detection)
-          BASE_IMAGE_NAME=$(echo "${{ matrix.base_image }}" | sed 's|.*/||' | sed 's|:.*||')
-          BASE_IMAGE_TAG=$(echo "${{ matrix.base_image }}" | sed 's|.*:||')
-          IMAGE_SUFFIX="${{ matrix.image_suffix }}"
-
-          # Determine the output image name based on base image
-          # All variants get the -nix suffix, with optional variant suffix (e.g., -cachyos, -deck)
-          OUTPUT_IMAGE="${BASE_IMAGE_NAME}-nix${IMAGE_SUFFIX}"
-
-          # Build the full prefix for collision detection
-          PREFIX="${{ steps.lowercase.outputs.registry_lower }}/${OUTPUT_IMAGE}"
-
-          # 1. Start with the upstream version as our candidate
-          CANONICAL="${PARENT_VERSION}"
-
-          # 2. Only perform collision resolution if Force Build is enabled
-          if [ "${{ github.event.inputs.force_build }}" = "true" ]; then
-            # Check if this exact tag already exists in YOUR registry
-            if skopeo inspect "docker://${PREFIX}:${CANONICAL}" > /dev/null 2>&1; then
-              echo "Collision detected: ${CANONICAL} exists. Calculating next version..."
-
-              # 3. Analyze the version structure
-              # Regex: Capture (Everything up to last dot) and (The last number)
-              if [[ "$CANONICAL" =~ ^(.*)\.([0-9]+)$ ]]; then
-                STEM="${BASH_REMATCH[1]}"
-                LAST_NUM="${BASH_REMATCH[2]}"
-                # HEURISTIC: Distinguish between a Date (e.g., 20251202) and a Counter (e.g., 1, 2)
-                # Dates are usually 8 chars. Counters are usually 1-2 chars.
-                # If the last segment is 4 or more digits, treat it as a base/date.
-                if [ ${#LAST_NUM} -ge 4 ]; then
-                   # Case: 40.20251202 -> Becomes 40.20251202.1
-                   SEARCH_BASE="${CANONICAL}"
-                   NEXT_NUM=1
-                else
-                   # Case: 40.20251202.1 -> Becomes 40.20251202.2 (Increment)
-                   SEARCH_BASE="${STEM}"
-                   NEXT_NUM=$((LAST_NUM + 1))
-                fi
-              else
-                # Case: "latest" or "stable" (no dots/numbers) -> Becomes stable.1
-                SEARCH_BASE="${CANONICAL}"
-                NEXT_NUM=1
-              fi
-
-              # 4. Find the next available slot
-              # Keep incrementing until we find a tag that DOES NOT exist
-              while skopeo inspect "docker://${PREFIX}:${SEARCH_BASE}.${NEXT_NUM}" > /dev/null 2>&1; do
-                echo "${SEARCH_BASE}.${NEXT_NUM} also exists, checking next..."
-                ((NEXT_NUM++))
-              done
-
-              CANONICAL="${SEARCH_BASE}.${NEXT_NUM}"
-              echo "New computed tag: ${CANONICAL}"
-            fi
-          fi
-
-          # Generate tags based on the base image tag
-          # Store just the tag names (without registry) for simplicity
-          case "${BASE_IMAGE_TAG}" in
-            "stable")
-              TAGS="stable,stable-${CANONICAL},${CANONICAL}"
-              ;;
-            "testing")
-              TAGS="testing,latest,${CANONICAL}"
-              ;;
-            *)
-              TAGS="${BASE_IMAGE_TAG},${BASE_IMAGE_TAG}-${CANONICAL},${CANONICAL}"
-              ;;
-          esac
-
-          echo "tags=$TAGS" >> $GITHUB_OUTPUT
-          echo "canonical_tag=$CANONICAL" >> $GITHUB_OUTPUT
-          echo "output_image=$OUTPUT_IMAGE" >> $GITHUB_OUTPUT
-
-      - name: Check if canonical tag already exists
-        if: github.event.inputs.force_build != 'true'
-        id: check_exists
-        run: |
-          PREFIX="${{ steps.lowercase.outputs.registry_lower }}/${{ steps.compute_tags.outputs.output_image }}"
-          CANONICAL_TAG="${{ steps.compute_tags.outputs.canonical_tag }}"
-          IMAGE_REF="${PREFIX}:${CANONICAL_TAG}"
-          echo "Checking existence of canonical tag: $IMAGE_REF"
-          if skopeo inspect "docker://${IMAGE_REF}" > /dev/null 2>&1; then
-            echo "::warning::Build skipped — canonical image already exists"
-            echo "## ⚠️ Build Skipped" >> $GITHUB_STEP_SUMMARY
-            echo "**Reason:** Canonical image already exists at ${IMAGE_REF}" >> $GITHUB_STEP_SUMMARY
-            exit 1
-          fi
-
-      - name: Generate final cache key and compare
-        id: compare
-        run: |
-          BASE_KEY="${{ steps.cache_keys.outputs.base_key }}"
-          CURRENT_DIGEST="${{ steps.metadata.outputs.digest }}"
-          FINAL_KEY="${BASE_KEY}-${CURRENT_DIGEST}"
-          if [ "${{ github.event.inputs.force_build }}" = "true" ]; then
-            CHANGED=true
-            REASON="Force build requested"
-          elif [ "${{ steps.restore_cache.outputs.cache-hit }}" != "true" ]; then
-            CHANGED=true
-            REASON="No previous cache found"
-          else
-            if [ -f .digest-cache/last_digest ]; then
-              CACHED_DIGEST=$(<.digest-cache/last_digest)
-              if [ "$CURRENT_DIGEST" = "$CACHED_DIGEST" ]; then
-                CHANGED=false
-                REASON="Digest unchanged: $CURRENT_DIGEST"
-              else
-                CHANGED=true
-                REASON="Digest changed from $CACHED_DIGEST to $CURRENT_DIGEST"
-              fi
-            else
-              CHANGED=true
-              REASON="Cache restored but no digest file"
-            fi
-          fi
-          echo "changed=$CHANGED" >> $GITHUB_OUTPUT
-          echo "reason=$REASON" >> $GITHUB_OUTPUT
-          echo "final_cache_key=${FINAL_KEY}" >> $GITHUB_OUTPUT
-
-      - name: Build decision
-        id: decide
-        run: |
-          if [ "${{ steps.compare.outputs.changed }}" == "true" ]; then
-            echo "Build proceeding: ${{ steps.compare.outputs.reason }}"
-          else
-            echo "::warning::Build skipped — no changes detected"
-            echo "## ⚠️ Build Skipped" >> $GITHUB_STEP_SUMMARY
-            echo "**Reason:** ${{ steps.compare.outputs.reason }}" >> $GITHUB_STEP_SUMMARY
-            echo "**Current digest:** \`${{ steps.metadata.outputs.digest }}\`" >> $GITHUB_STEP_SUMMARY
-            exit 1
-          fi
-
-      - name: Assemble image labels
-        id: labels
-        run: |
-          LABELS=$(cat <<EOF
-          org.opencontainers.image.created=${{ steps.date.outputs.date }}
-          org.opencontainers.image.description=${{ env.IMAGE_DESC }}
-          org.opencontainers.image.documentation=https://raw.githubusercontent.com/${{ github.repository_owner }}/${{ github.event.repository.name }}/refs/heads/main/README.md
-          org.opencontainers.image.source=https://github.com/${{ github.repository_owner }}/${{ github.event.repository.name }}/blob/main/Containerfile
-          org.opencontainers.image.title=${{ steps.compute_tags.outputs.output_image }}
-          org.opencontainers.image.url=https://github.com/${{ github.repository_owner }}/${{ github.event.repository.name }}
-          org.opencontainers.image.vendor=${{ github.repository_owner }}
-          org.opencontainers.image.version=${{ steps.metadata.outputs.parent_version }}
-          containers.bootc=1
-          EOF
-          )
-          echo "rechunk_labels<<EOF" >> $GITHUB_OUTPUT
-          echo "$LABELS" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-
-          BUILDAH_ARGS=""
-          while IFS= read -r line; do
-            [ -n "$line" ] && BUILDAH_ARGS="$BUILDAH_ARGS --label \"$line\""
-          done <<< "$LABELS"
-          echo "buildah_args<<EOF" >> $GITHUB_OUTPUT
-          echo "$BUILDAH_ARGS" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-
-      - name: Show disk space
-        run: sudo df -h
-
-      - name: Free Disk Space (Ubuntu)
-        id: free_unwanted_pkgs
-        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
-
-      - name: Mount BTRFS for podman storage
-        id: btrfs_remount_containers
-        uses: ublue-os/container-storage-action@main
-        with:
-          target-dir: /var/lib/containers
-
-      - name: Build image
-        id: build_image
-        run: |
-          SKOPEO_TAG="localhost/raw-img"
-          sudo buildah bud \
-              --tag "${SKOPEO_TAG}" ${{ steps.labels.outputs.buildah_args }} \
-              --build-arg BASE_IMAGE="${{ matrix.base_image }}" \
-              --build-arg BUILD_SCRIPT="${{ matrix.build_script }}" \
-              --file ./Containerfile && \
-              echo "skopeo_ref=containers-storage:${SKOPEO_TAG}" >> $GITHUB_OUTPUT
-
-      - name: Check if previous image exists
-        id: check_prev
-        run: |
-          BASE_IMAGE_TAG=$(echo "${{ matrix.base_image }}" | sed 's|.*:||')
-          PREV_REF="${{ steps.lowercase.outputs.registry_lower }}/${{ steps.compute_tags.outputs.output_image }}:${BASE_IMAGE_TAG}"
-          echo "Checking existence of previous image: $PREV_REF"
-          if skopeo inspect "docker://${PREV_REF}" > /dev/null 2>&1; then
-            echo "prev_ref_exists=true" >> $GITHUB_OUTPUT
-          else
-            echo "prev_ref_exists=false" >> $GITHUB_OUTPUT
-          fi
-          echo "base_image_tag=${BASE_IMAGE_TAG}" >> $GITHUB_OUTPUT
-
-      - name: Run Rechunker
-        if: github.event.inputs.skip_rechunk != true && steps.check_prev.outputs.prev_ref_exists == 'true'
-        id: rechunk
-        uses: ublue-os/legacy-rechunk@a925083d9af7cb04b3e2a6e8c01bfa495f38b710 # v1.0.0
-        with:
-          rechunk: "ghcr.io/ublue-os/legacy-rechunk:v1.0.0-x86_64"
-          ref: "raw-img"
-          prev-ref: "${{ steps.lowercase.outputs.registry_lower }}/${{ steps.compute_tags.outputs.output_image }}:${{ steps.check_prev.outputs.base_image_tag }}"
-          labels: ${{ steps.labels.outputs.rechunk_labels }}
-
-      - name: Get build digest
-        id: build_digest
-        run: |
-          SKIP_RECHUNK="${{ github.event.inputs.skip_rechunk }}"
-          RECHUNK_REF="${{ steps.rechunk.outputs.ref }}"
-          SKOPEO_REF="${{ steps.build_image.outputs.skopeo_ref }}"
-
-          if [ "$SKIP_RECHUNK" == "true" ]; then
-            IMAGE_REF="${SKOPEO_REF}"
-          elif [ -n "$RECHUNK_REF" ]; then
-            IMAGE_REF="${RECHUNK_REF}"
-          else
-            # Rechunk was skipped (e.g., no previous image), use raw build
-            IMAGE_REF="${SKOPEO_REF}"
-          fi
-
-          if [ -z "$IMAGE_REF" ]; then
-            echo "::error::No valid image reference found to inspect"
-            exit 1
-          fi
-
-          echo "Using image ref: $IMAGE_REF"
-          FULL_BUILD_DIGEST=$(sudo skopeo inspect --format='{{.Digest}}' "${IMAGE_REF}")
-          BUILD_DIGEST=$(echo "$FULL_BUILD_DIGEST" | sed 's/sha256://')
-          echo "full_build_digest=${FULL_BUILD_DIGEST}" >> $GITHUB_OUTPUT
-          echo "build_digest=${BUILD_DIGEST}" >> $GITHUB_OUTPUT
-          echo "source_ref=${IMAGE_REF}" >> $GITHUB_OUTPUT
-
-      - name: Install Cosign
-        uses: sigstore/cosign-installer@faadad0cce49287aee09b3a48701e75088a2c6ad # v4.0
-
-      - name: Sign and Push to GHCR
-        id: sign_and_push
-        uses: Wandalen/wretry.action@e68c23e6309f2871ca8ae4763e7629b9c258e1ea # v3.8.0
-        with:
-          attempt_limit: 3
-          attempt_delay: 15000
-          command: |
-            SOURCE_REF="${{ steps.build_digest.outputs.source_ref }}"
-            IMAGE_DIGEST="${{ steps.build_digest.outputs.full_build_digest }}"
-            SHORT_DIGEST="${{ steps.build_digest.outputs.build_digest }}"
-            IMAGE_REGISTRY="${{ steps.lowercase.outputs.registry_lower }}"
-            IMAGE_NAME="${{ steps.compute_tags.outputs.output_image }}"
-            OUTPUT_REF="${IMAGE_REGISTRY}/${IMAGE_NAME}@${IMAGE_DIGEST}"
-            IFS=',' read -r -a tags <<< "${{ steps.compute_tags.outputs.tags }}"
-            BASE_IMG="${{ steps.lowercase.outputs.registry_lower }}/${{ steps.compute_tags.outputs.output_image }}"
-
-            DIGEST_REF="${BASE_IMG}@${IMAGE_DIGEST}"
-            echo "Pushing primary image: ${DIGEST_REF}"
-            sudo skopeo copy "$SOURCE_REF" "docker://$DIGEST_REF"
-
-            echo "Signing image: ${OUTPUT_REF}"
-            # a redundant login is required for cosign to function here
-            echo "${{ secrets.GITHUB_TOKEN }}" | cosign login ghcr.io -u ${{ github.actor }} --password-stdin
-            cosign sign -y --key env://SIGNING_SECRET "$DIGEST_REF"
-
-            # add our latest build digest to the tags to be pushed
-            tags+=("$SHORT_DIGEST")
-            for tag in "${tags[@]}"; do
-              FULL_TAG="${IMAGE_REGISTRY}/${IMAGE_NAME}:${tag}"
-              echo "Pushing tag: ${FULL_TAG}"
-              sudo skopeo copy "docker://$DIGEST_REF" "docker://${FULL_TAG}"
-            done
+      - name: Check all variants
+        id: check_all
+        if: always()
+        shell: bash
         env:
-          SIGNING_SECRET: ${{ secrets.SIGNING_SECRET }}
-
-      - name: Save digest to cache
-        if: steps.compare.outputs.changed == 'true'
+          REGISTRY_OWNER: ${{ github.repository_owner }}
+          IMAGE_NAME: ${{ github.event.repository.name }}
+          BASE_CACHE_KEY: ${{ steps.cache_key.outputs.base_cache_key }}
+          FORCE_BUILD: ${{ github.event.inputs.force_build == 'true' }}
+          VARIANTS_CONFIG: ${{ env.VARIANTS_CONFIG }}
         run: |
-          mkdir -p .digest-cache
-          echo "${{ steps.metadata.outputs.digest }}" > .digest-cache/last_digest
+          .github/workflows/check-variants.sh
 
-      - name: Save new cache
-        if: steps.compare.outputs.changed == 'true'
-        uses: actions/cache/save@v5
-        with:
-          path: .digest-cache
-          key: ${{ steps.compare.outputs.final_cache_key }}
+      - name: Aggregate results
+        id: aggregate
+        shell: bash
+        run: |
+          # Read results from script output
+          results_file="/tmp/variants_results.json"
+
+          # Validate results file exists and is valid JSON
+          if [ ! -f "$results_file" ]; then
+            echo "::error::Variant results file not found - check job may have failed"
+            exit 1
+          fi
+
+          if [ ! -s "$results_file" ]; then
+            echo "::error::Variant results file is empty - check job may have failed silently"
+            echo "::notice::Treating as no builds needed to allow workflow to continue"
+            echo "variants_to_build=[]" >> $GITHUB_OUTPUT
+            echo "any_builds_needed=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          results=$(cat "$results_file")
+
+          # Validate JSON
+          if ! echo "$results" | jq empty 2>/dev/null; then
+            echo "::error::Invalid JSON in results file - check job may have produced corrupt output"
+            exit 1
+          fi
+
+          any_builds_needed=false
+
+          # Filter variants needing build and remove needs_build field using jq
+          variants_to_build=$(echo "$results" | jq -c '[.[] | select(.needs_build == true) | del(.needs_build)]')
+
+          # Check if any variants need building
+          count=$(echo "$variants_to_build" | jq 'length')
+          if [ "$count" -gt 0 ]; then
+            any_builds_needed=true
+          fi
+
+          if [ "$any_builds_needed" = false ]; then
+            echo "::notice::No variants need building"
+            echo "## ⚠️ Build Skipped" >> $GITHUB_STEP_SUMMARY
+            echo "**Reason:** No variants have changes" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### 🚫 Skipped Variants" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "| Variant | Target Image | Tags |" >> $GITHUB_STEP_SUMMARY
+            echo "|---------|--------------|------|" >> $GITHUB_STEP_SUMMARY
+            echo "$results" | jq -c '.[]' | while read -r variant; do
+              name=$(echo "$variant" | jq -r '.variant')
+              suffix=$(echo "$variant" | jq -r '.image_suffix // ""')
+              tags=$(echo "$variant" | jq -r '.tags')
+              target_image="${{ steps.lowercase.outputs.registry_lower }}/${{ github.event.repository.name }}${suffix}"
+              echo "| \`${name}\` | \`${target_image}\` | \`${tags}\` |" >> $GITHUB_STEP_SUMMARY
+            done
+            echo "variants_to_build=[]" >> $GITHUB_OUTPUT
+          else
+            echo "variants_to_build=${variants_to_build}" >> $GITHUB_OUTPUT
+
+            # Write build summary to step summary
+            echo "## 📦 Variants to Build" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "| Variant | Target Image | Tags |" >> $GITHUB_STEP_SUMMARY
+            echo "|---------|--------------|------|" >> $GITHUB_STEP_SUMMARY
+            echo "$variants_to_build" | jq -c '.[]' | while read -r variant; do
+              name=$(echo "$variant" | jq -r '.variant')
+              suffix=$(echo "$variant" | jq -r '.image_suffix // ""')
+              tags=$(echo "$variant" | jq -r '.tags')
+              target_image="${{ steps.lowercase.outputs.registry_lower }}/${{ github.event.repository.name }}${suffix}"
+              echo "| \`${name}\` | \`${target_image}\` | \`${tags}\` |" >> $GITHUB_STEP_SUMMARY
+            done
+          fi
+
+          echo "any_builds_needed=${any_builds_needed}" >> $GITHUB_OUTPUT
+
+  # Build, sign, and push each variant that needs updating
+  build_push:
+    needs: check_and_aggregate
+    if: needs.check_and_aggregate.outputs.any_builds_needed == 'true'
+    uses: ./.github/workflows/push.yml
+    with:
+      variants_to_build: ${{ needs.check_and_aggregate.outputs.variants_to_build }}
+      date: ${{ needs.check_and_aggregate.outputs.date }}
+      registry_lower: ${{ needs.check_and_aggregate.outputs.registry_lower }}
+      image_desc: ${{ needs.check_and_aggregate.outputs.image_desc }}
+      skip_rechunk: ${{ github.event.inputs.skip_rechunk == 'true' }}
+    secrets:
+      signing_secret: ${{ secrets.SIGNING_SECRET }}
