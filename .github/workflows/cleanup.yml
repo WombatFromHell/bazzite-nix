@@ -4,9 +4,27 @@ on:
   schedule:
     - cron: "1 7 * * 0" # 07:01 UTC every Sunday
   workflow_dispatch:
+    inputs:
+      dry-run:
+        description: "Run in dry-run mode (no actual deletions)"
+        type: boolean
+        default: true
+        required: false
+      variant-filter:
+        description: "Optional: Comma-separated list of variants to process (empty = all)"
+        type: string
+        default: ""
+        required: false
+
+env:
+  # Centralize owner reference for portability
+  REGISTRY_OWNER: ${{ github.repository_owner }}
+  DRY_RUN_DEFAULT: ${{ github.event_name == 'schedule' && 'false' || 'true' }}
 
 jobs:
+  # ─────────────────────────────────────────────────────────────
   # Generate matrix of enabled variants from variants.json
+  # ─────────────────────────────────────────────────────────────
   generate-matrix:
     runs-on: ubuntu-24.04
     outputs:
@@ -19,28 +37,259 @@ jobs:
         id: read-variants
         run: |
           # Read variants.json and filter out disabled variants
-          # Output format: ["bazzite-nix", "bazzite-nix-cachyos", ...]
-          # Use repository name as base, append image_suffix if present, then deduplicate
-          variants=$(jq -c --arg repo "${{ github.event.repository.name }}" '[.variants[] | select(.disabled != true) | ($repo + (.image_suffix // ""))] | unique' .github/variants.json)
-          echo "variants=${variants}" >> $GITHUB_OUTPUT
+          variants=$(jq -c --arg repo "${{ github.event.repository.name }}" \
+            '[.variants[] | select(.disabled != true) | ($repo + (.image_suffix // ""))] | unique' \
+            .github/variants.json)
 
+          # Apply optional filter from workflow_dispatch
+          filter="${{ inputs.variant-filter }}"
+          if [ -n "$filter" ]; then
+            echo "🔍 Filtering variants by: $filter"
+            variants=$(echo "$variants" | jq --arg f "$filter" \
+              '[.[] | select(. as $v | ($f | split(",") | map(. | trim) | index($v) != null))]]')
+          fi
+
+          echo "variants=${variants}" >> $GITHUB_OUTPUT
+          echo "📦 Variants to process: $(echo "$variants" | jq -r '. | length')"
+
+  # ─────────────────────────────────────────────────────────────
+  # Main cleanup job: processes each variant in parallel
+  # ─────────────────────────────────────────────────────────────
   cleanup-images:
     needs: generate-matrix
     runs-on: ubuntu-24.04
     permissions:
       packages: write
+      contents: read
     strategy:
       matrix:
         variant: ${{ fromJson(needs.generate-matrix.outputs.variants) }}
+      fail-fast: false
 
     steps:
+      - name: Checkout (for variant context)
+        uses: actions/checkout@v6
+
+      # ─────────────────────────────────────────────────────────
+      # Step 1: Main image cleanup via ghcr-cleanup-action
+      # ─────────────────────────────────────────────────────────
       - name: Clean up images for package ${{ matrix.variant }}
+        id: clean_old_images
         uses: dataaxiom/ghcr-cleanup-action@v1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          owner: ${{ github.repository_owner }}
+          owner: ${{ env.REGISTRY_OWNER }}
           package: ${{ matrix.variant }}
-          keep-n-tagged: 60 # 2 months worth
+          keep-n-tagged: 60
           delete-untagged: true
           delete-partial-images: true
-          dry-run: true
+          delete-orphaned-images: true
+          dry-run: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.dry-run) || env.DRY_RUN_DEFAULT }}
+        continue-on-error: true
+
+      # Capture action output for summary
+      - name: Parse cleanup action results
+        id: parse_cleanup_results
+        if: always()
+        run: |
+          set -euo pipefail
+
+          LOG_FILE="${{ github.workspace }}/cleanup.log"
+
+          # Count tagged images (have tag names like stable-*, testing-*, etc.)
+          # In dry-run mode, count "Would delete" messages; in live mode, count "Deleted" messages
+          TAGGED_DELETED=$(grep -cE "✓ Deleted.*tagged|Would delete.*tagged" "$LOG_FILE" 2>/dev/null || echo "0")
+          TAGGED_KEPT=$(grep -c "✓ Kept.*tagged" "$LOG_FILE" 2>/dev/null || echo "0")
+
+          # Count untagged/dangling images (no tags, or partial images)
+          UNTAGGED_DELETED=$(grep -cE "✓ Deleted.*untagged|✓ Deleted.*partial|Would delete.*untagged|Would delete.*partial" "$LOG_FILE" 2>/dev/null || echo "0")
+
+          # Total from main action
+          TOTAL_DELETED=$((TAGGED_DELETED + UNTAGGED_DELETED))
+          TOTAL_KEPT=$TAGGED_KEPT
+
+          echo "tagged_deleted=${TAGGED_DELETED}" >> $GITHUB_OUTPUT
+          echo "tagged_kept=${TAGGED_KEPT}" >> $GITHUB_OUTPUT
+          echo "untagged_deleted=${UNTAGGED_DELETED}" >> $GITHUB_OUTPUT
+          echo "total_deleted=${TOTAL_DELETED}" >> $GITHUB_OUTPUT
+          echo "total_kept=${TOTAL_KEPT}" >> $GITHUB_OUTPUT
+          echo "📊 Cleanup: ${TOTAL_DELETED} deleted (${TAGGED_DELETED} tagged, ${UNTAGGED_DELETED} untagged), ${TOTAL_KEPT} kept"
+
+      # ─────────────────────────────────────────────────────────
+      # Step 2: Custom cleanup for dangling cosign signature tags
+      # ─────────────────────────────────────────────────────────
+      - name: Delete dangling cosign sig tags for ${{ matrix.variant }}
+        id: clean_dangling_sigs
+        timeout-minutes: 15
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PACKAGE: ${{ matrix.variant }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.dry-run) || env.DRY_RUN_DEFAULT }}
+        run: |
+          set -euo pipefail
+
+          # Initialize counters
+          SIG_DELETED=0
+          SIG_KEPT=0
+          SIG_ERROR=0
+
+          log() { 
+            local level="${1:-INFO}"
+            shift
+            echo "[$(date -u +%T)] [$level] $*" >&2
+          }
+
+          log "INFO" "Starting dangling sig cleanup for ${PACKAGE} (dry-run: ${DRY_RUN})"
+
+          # Fetch all package versions once with pagination
+          log "INFO" "Fetching package versions from GHCR..."
+          if ! versions=$(gh api \
+            "/users/${{ env.REGISTRY_OWNER }}/packages/container/${PACKAGE}/versions" \
+            --paginate \
+            --jq '[.[] | {id, tags: (.metadata.container.tags // [])}]' 2>/dev/null); then
+            log "ERROR" "Failed to fetch versions for ${PACKAGE}"
+            echo "sig_deleted=0" >> $GITHUB_OUTPUT
+            echo "sig_kept=0" >> $GITHUB_OUTPUT
+            echo "sig_error=1" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Build set of valid digests
+          # OCI 1.1 referrers tag schema: signatures use sha256-<hash>, images use raw <hash> tag
+          # Exclude signature artifacts (versions with sha256-<hash> tags) from valid image digests
+          valid_digests=$(echo "$versions" | jq -r '
+            [.[] | select(.tags | all(test("^sha256-[a-f0-9]{64}$") | not)) |
+             .tags[]? | select(test("^[a-f0-9]{64}$"))] | unique | .[]')
+
+          log "INFO" "Found $(echo "$valid_digests" | wc -l | tr -d ' ') valid image digests"
+
+          # Process each version that has OCI 1.1 signature tags (sha256-<hash> format)
+          # Note: Using process substitution to avoid subshell variable scope issues
+          while read -r version; do
+            version_id=$(echo "$version" | jq -r '.id')
+
+            while read -r sig_tag; do
+              if [[ "$sig_tag" =~ ^sha256-([a-f0-9]{64})$ ]]; then
+                ref_digest="${BASH_REMATCH[1]}"
+              else
+                log "WARN" "Skipping malformed signature tag: ${sig_tag}"
+                continue
+              fi
+
+              if echo "$valid_digests" | grep -qFx "$ref_digest"; then
+                log "INFO" "✓ Keeping active signature: ${sig_tag}"
+                ((SIG_KEPT++)) || true
+              else
+                log "WARN" "✗ Dangling signature detected: ${sig_tag} (refs missing: ${ref_digest})"
+                if [ "$DRY_RUN" = "true" ] || [ "$DRY_RUN" = "1" ]; then
+                  log "INFO" "[DRY-RUN] Would delete version ${version_id} (sig: ${sig_tag})"
+                  ((SIG_DELETED++)) || true
+                else
+                  log "INFO" "🗑️ Deleting version ${version_id}..."
+                  if gh api --method DELETE \
+                    "/users/${{ env.REGISTRY_OWNER }}/packages/container/${PACKAGE}/versions/${version_id}" \
+                    >/dev/null 2>&1; then
+                    log "INFO" "✅ Successfully deleted dangling signature: ${sig_tag}"
+                    ((SIG_DELETED++)) || true
+                  else
+                    log "ERROR" "❌ Failed to delete version ${version_id} for sig: ${sig_tag}"
+                    ((SIG_ERROR++)) || true
+                  fi
+                fi
+              fi
+            done < <(echo "$version" | jq -r '.tags[]? | select(test("^sha256-[a-f0-9]{64}$"))')
+          done < <(echo "$versions" | jq -c '.[] | select(.tags | any(test("^sha256-[a-f0-9]{64}$")))')
+
+          echo "sig_deleted=${SIG_DELETED}" >> $GITHUB_OUTPUT
+          echo "sig_kept=${SIG_KEPT}" >> $GITHUB_OUTPUT
+          echo "sig_error=${SIG_ERROR}" >> $GITHUB_OUTPUT
+          log "INFO" "Sig cleanup complete: ${SIG_DELETED} deleted, ${SIG_KEPT} kept, ${SIG_ERROR} errors"
+
+      # ─────────────────────────────────────────────────────────
+      # Step 3: Generate categorized summary for this variant
+      # ─────────────────────────────────────────────────────────
+      - name: Generate cleanup summary for ${{ matrix.variant }}
+        if: always()
+        run: |
+          set -euo pipefail
+
+          # Categorized counts from main cleanup action
+          TAGGED_DELETED="${{ steps.parse_cleanup_results.outputs.tagged_deleted || 0 }}"
+          TAGGED_KEPT="${{ steps.parse_cleanup_results.outputs.tagged_kept || 0 }}"
+          UNTAGGED_DELETED="${{ steps.parse_cleanup_results.outputs.untagged_deleted || 0 }}"
+
+          # Counts from cosign sig cleanup
+          SIG_DELETED="${{ steps.clean_dangling_sigs.outputs.sig_deleted || 0 }}"
+          SIG_KEPT="${{ steps.clean_dangling_sigs.outputs.sig_kept || 0 }}"
+          SIG_ERROR="${{ steps.clean_dangling_sigs.outputs.sig_error || 0 }}"
+
+          # Determine display mode based on actual dry-run value used
+          # Note: format() ensures boolean false doesn't fall through to default
+          DRY_RUN="${{ github.event_name == 'workflow_dispatch' && format('{0}', inputs.dry-run) || env.DRY_RUN_DEFAULT }}"
+          if [ "$DRY_RUN" = "true" ] || [ "$DRY_RUN" = "1" ]; then
+            MODE_BADGE="🧪"
+            MODE_TEXT="Dry-run mode"
+          else
+            MODE_BADGE="✅"
+            MODE_TEXT="Live deletion"
+          fi
+
+          TOTAL_ERRORS=$((SIG_ERROR))
+          if [ "$TOTAL_ERRORS" -gt 0 ]; then
+            STATUS_BADGE="⚠️"
+            STATUS_TEXT="Completed with warnings"
+          else
+            STATUS_BADGE="✅"
+            STATUS_TEXT="Completed successfully"
+          fi
+
+          # Calculate totals
+          IMAGE_DELETED=$((TAGGED_DELETED + UNTAGGED_DELETED))
+          TOTAL_DELETED=$((IMAGE_DELETED + SIG_DELETED))
+          TOTAL_KEPT=$((TAGGED_KEPT + SIG_KEPT))
+
+          # Set column headers based on dry-run mode
+          if [ "$DRY_RUN" = "true" ] || [ "$DRY_RUN" = "1" ]; then
+            DELETED_HEADER="Would Delete"
+            KEPT_HEADER="Would Keep"
+          else
+            DELETED_HEADER="Deleted"
+            KEPT_HEADER="Kept"
+          fi
+
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          ## ${MODE_BADGE} Cleanup Summary: \`${{ matrix.variant }}\`
+
+          ### ${STATUS_BADGE} Status: ${STATUS_TEXT}
+          **Mode**: \`${MODE_TEXT}\`  •  **Time**: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+          | Category | ${DELETED_HEADER} | ${KEPT_HEADER} | Errors |
+          |----------|---------|------|--------|
+          | 🏷️ Tagged images (old versions) | ${TAGGED_DELETED} | ${TAGGED_KEPT} | 0 |
+          | 🗑️ Untagged/dangling images | ${UNTAGGED_DELETED} | — | 0 |
+          | 🔐 Dangling cosign sigs | ${SIG_DELETED} | ${SIG_KEPT} | ${SIG_ERROR} |
+
+          **Totals**: ${TOTAL_DELETED} ${DELETED_HEADER,,} • ${TOTAL_KEPT} ${KEPT_HEADER,,} • ${TOTAL_ERRORS} errors
+
+          > 💡 **Package**: \`${{ env.REGISTRY_OWNER }}/${{ matrix.variant }}\`
+          > 📋 [View raw workflow logs](https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }})
+
+          <details><summary>🔍 Technical Details</summary>
+
+          \`\`\`yaml
+          # Configuration used:
+          keep-n-tagged: 60
+          delete-untagged: true
+          delete-partial-images: true
+          delete-orphaned-images: true
+          dry-run: ${DRY_RUN}
+          \`\`\`
+          </details>
+          EOF
+
+          echo "📊 [${{ matrix.variant }}] ${STATUS_TEXT}"
+          echo "   ├─ Tagged images: ${TAGGED_DELETED} ${DELETED_HEADER,,}, ${TAGGED_KEPT} ${KEPT_HEADER,,}"
+          echo "   ├─ Untagged/dangling: ${UNTAGGED_DELETED} ${DELETED_HEADER,,}"
+          echo "   ├─ Cosign sigs: ${SIG_DELETED} ${DELETED_HEADER,,}, ${SIG_KEPT} ${KEPT_HEADER,,}, ${SIG_ERROR} errors"
+          echo "   └─ Mode: ${MODE_TEXT}"
