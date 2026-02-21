@@ -59,7 +59,11 @@ jobs:
           attempt_limit: 3
           attempt_delay: 15000
           command: |
-            echo "${{ secrets.GITHUB_TOKEN }}" | skopeo login ghcr.io -u ${{ github.actor }} --password-stdin
+            mkdir -p /tmp/skopeo-auth
+            echo "${{ secrets.GITHUB_TOKEN }}" | skopeo login ghcr.io \
+              -u ${{ github.actor }} \
+              --password-stdin \
+              --authfile /tmp/skopeo-auth/auth.json
 
       - name: Generate cache key
         id: cache_key
@@ -203,8 +207,11 @@ jobs:
               "$SOURCE_REF" "docker://$DIGEST_REF"
 
             echo "Signing image: ${DIGEST_REF}"
-            echo "${{ secrets.GITHUB_TOKEN }}" | cosign login ghcr.io -u ${{ github.actor }} --password-stdin
-            cosign sign -y --key env://SIGNING_SECRET "$DIGEST_REF"
+            cosign sign -y \
+              --key env://SIGNING_SECRET \
+              --registry-username "${{ github.actor }}" \
+              --registry-password "${{ secrets.GITHUB_TOKEN }}" \
+              "$DIGEST_REF"
 
             tags+=("$SHORT_DIGEST")
             for tag in "${tags[@]}"; do
