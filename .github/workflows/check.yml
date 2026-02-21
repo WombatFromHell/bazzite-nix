@@ -61,7 +61,7 @@ jobs:
       - name: Compute image references
         id: image_refs
         run: |
-          echo "registry=ghcr.io/${{ github.repository_owner }}" >> $GITHUB_OUTPUT
+          echo "registry=ghcr.io/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
           echo "repo=${{ github.event.repository.name }}" >> $GITHUB_OUTPUT
 
       - name: Generate base cache key

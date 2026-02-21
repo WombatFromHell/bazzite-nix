@@ -1,5 +1,7 @@
 export repo_organization := env("GITHUB_REPOSITORY_OWNER", "wombatfromhell")
 export image_name := env("IMAGE_NAME", "bazzite-nix")
+export image_tag := env("IMAGE_TAG", "latest")
+export image_build_script := env("IMAGE_BUILD_SCRIPT", "build.sh")
 export centos_version := env("CENTOS_VERSION", "stream10")
 export fedora_version := env("CENTOS_VERSION", "43")
 export default_tag := env("DEFAULT_TAG", "testing")
@@ -101,10 +103,31 @@ sudoif command *args:
 #
 # This will build an image 'aurora:lts' with DX and GDX enabled.
 #
-
 # Build the image using the specified parameters
-build $target_image=image_name $tag=default_tag $build_script="build.sh" $base_image=base_image $dx="0" $hwe="0" $gdx="0":
+# Usage: just build [image:tag] (e.g., just build bazzite-nix-cachyos:latest)
+#
+# Defaults can be overridden via environment variables: IMAGE_NAME, IMAGE_TAG, IMAGE_BUILD_SCRIPT
+
+build $image_spec="{{ image_name }}:{{ image_tag }}" $build_script=image_build_script $base_image=base_image $dx="0" $hwe="0" $gdx="0":
     #!/usr/bin/env bash
+    set -euo pipefail
+
+    # Parse image_spec into target_image and tag
+    image_spec_val="{{ image_spec }}"
+    default_target_val="{{ image_name }}"
+    default_tag_val="{{ image_tag }}"
+    if [[ -n "$image_spec_val" ]]; then
+        if [[ "$image_spec_val" == *":"* ]]; then
+            target_image="${image_spec_val%:*}"
+            tag="${image_spec_val#*:}"
+        else
+            target_image="${image_spec_val}"
+            tag="${default_tag_val}"
+        fi
+    else
+        target_image="${default_target_val}"
+        tag="${default_tag_val}"
+    fi
 
     # Get Version
     ver="${tag}-${centos_version}.$(date +%Y%m%d)"
@@ -125,6 +148,39 @@ build $target_image=image_name $tag=default_tag $build_script="build.sh" $base_i
     podman build \
         "${BUILD_ARGS[@]}" \
         --pull=newer \
+        --security-opt label=disable \
+        --tag "${target_image}:${tag}" \
+        .
+
+# Build a container image directly in rootful podman storage.
+# This avoids the need to copy images from user to rootful storage.
+# Used by build-qcow2, build-raw, build-iso for BIB compatibility.
+#
+# Parameters:
+#   $target_image - The name of the target image (ex. localhost/bazzite-nix)
+#   $tag - The tag of the image (ex. testing)
+
+_build-rootful $target_image $tag:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    BUILD_ARGS=()
+    BUILD_ARGS+=("--build-arg" "MAJOR_VERSION={{ centos_version }}")
+    BUILD_ARGS+=("--build-arg" "IMAGE_NAME={{ image_name }}")
+    BUILD_ARGS+=("--build-arg" "IMAGE_VENDOR={{ repo_organization }}")
+    BUILD_ARGS+=("--build-arg" "ENABLE_DX=0")
+    BUILD_ARGS+=("--build-arg" "ENABLE_HWE=0")
+    BUILD_ARGS+=("--build-arg" "ENABLE_GDX=0")
+    BUILD_ARGS+=("--build-arg" "BASE_IMAGE={{ base_image }}")
+    BUILD_ARGS+=("--build-arg" "BUILD_SCRIPT=build.sh")
+    if [[ -z "$(git status -s)" ]]; then
+        BUILD_ARGS+=("--build-arg" "SHA_HEAD_SHORT=$(git rev-parse --short HEAD)")
+    fi
+
+    sudo podman build \
+        "${BUILD_ARGS[@]}" \
+        --pull=newer \
+        --security-opt label=disable \
         --tag "${target_image}:${tag}" \
         .
 
@@ -155,26 +211,32 @@ _rootful_load_image $target_image=image_name $tag=default_tag:
         exit 0
     fi
 
-    # Try to resolve the image tag using podman inspect
-    set +e
-    resolved_tag=$(podman inspect -t image "${target_image}:${tag}" | jq -r '.[].RepoTags.[0]')
-    return_code=$?
-    set -e
+    # Get user image ID
+    USER_IMG_ID=$(podman images --filter reference="${target_image}:${tag}" --format json | jq -r '.[0].Id')
 
-    USER_IMG_ID=$(podman images --filter reference="${target_image}:${tag}" --format "'{{ '{{.ID}}' }}'")
-
-    if [[ $return_code -eq 0 ]]; then
-        # If the image is found, load it into rootful podman
-        ID=$(just sudoif podman images --filter reference="${target_image}:${tag}" --format "'{{ '{{.ID}}' }}'")
-        if [[ "$ID" != "$USER_IMG_ID" ]]; then
-            # If the image ID is not found or different from user, copy the image from user podman to root podman
-            COPYTMP=$(mktemp -p "${PWD}" -d -t _build_podman_scp.XXXXXXXXXX)
-            just sudoif TMPDIR=${COPYTMP} podman image scp ${UID}@localhost::"${target_image}:${tag}" root@localhost::"${target_image}:${tag}"
-            rm -rf "${COPYTMP}"
-        fi
-    else
-        # If the image is not found, pull it from the repository
+    # Check if user image exists
+    if [[ -z "$USER_IMG_ID" ]]; then
+        echo "Image ${target_image}:${tag} not found in user podman, pulling into rootful podman"
         just sudoif podman pull "${target_image}:${tag}"
+        exit 0
+    fi
+
+    # Get rootful image ID (may be empty if not present)
+    ROOT_IMG_ID=$(just sudoif podman images --filter reference="${target_image}:${tag}" --format json | jq -r '.[0].Id' || echo "")
+
+    # Only copy if rootful image is missing or different from user image
+    if [[ -z "$ROOT_IMG_ID" ]]; then
+        echo "Image ${target_image}:${tag} not found in rootful podman, copying from user"
+        COPYTMP=$(mktemp -p "${PWD}" -d -t _build_podman_scp.XXXXXXXXXX)
+        just sudoif TMPDIR=${COPYTMP} podman image scp ${UID}@localhost::"${target_image}:${tag}" root@localhost::"${target_image}:${tag}"
+        rm -rf "${COPYTMP}"
+    elif [[ "$ROOT_IMG_ID" != "$USER_IMG_ID" ]]; then
+        echo "Image ${target_image}:${tag} differs between user and rootful podman, copying from user"
+        COPYTMP=$(mktemp -p "${PWD}" -d -t _build_podman_scp.XXXXXXXXXX)
+        just sudoif TMPDIR=${COPYTMP} podman image scp ${UID}@localhost::"${target_image}:${tag}" root@localhost::"${target_image}:${tag}"
+        rm -rf "${COPYTMP}"
+    else
+        echo "Image ${target_image}:${tag} already exists in rootful podman with matching ID, skipping copy"
     fi
 
 # Build a bootc bootable image using Bootc Image Builder (BIB)
@@ -186,17 +248,13 @@ _rootful_load_image $target_image=image_name $tag=default_tag:
 #   config: The configuration file to use for the build (default: image.toml)
 
 # Example: just _rebuild-bib localhost/fedora latest qcow2 image.toml
-_build-bib $target_image $tag $type $config: (_rootful_load_image target_image tag)
+_build-bib $target_image $tag $type $config:
     #!/usr/bin/env bash
     set -euo pipefail
 
     args="--type ${type} "
     args+="--use-librepo=True "
     args+="--rootfs=btrfs"
-
-    if [[ $target_image == localhost/* ]]; then
-        args+=" --local"
-    fi
 
     BUILDTMP=$(mktemp -p "${PWD}" -d -t _build-bib.XXXXXXXXXX)
 
@@ -227,31 +285,203 @@ _build-bib $target_image $tag $type $config: (_rootful_load_image target_image t
 #   config: The configuration file to use for the build (deafult: image.toml)
 
 # Example: just _rebuild-bib localhost/fedora latest qcow2 image.toml
-_rebuild-bib $target_image $tag $type $config: (build target_image tag) && (_build-bib target_image tag type config)
+_rebuild-bib $target_image $tag $type $config:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    just _build-rootful "{{ target_image }}" "{{ tag }}"
+    just _build-bib "{{ target_image }}" "{{ tag }}" "{{ type }}" "{{ config }}"
 
 # Build a QCOW2 virtual machine image
+
+# Usage: just build-qcow2 [image:tag] (e.g., just build-qcow2 bazzite-nix-cachyos:latest)
 [group('Build Virtual Machine Image')]
-build-qcow2 $target_image=("localhost/" + image_name) $tag=default_tag: && (_build-bib target_image tag "qcow2" "image.toml")
+build-qcow2 $image_spec="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    # Parse image_spec into target_image and tag
+    image_spec_val="{{ image_spec }}"
+    default_target_val="localhost/{{ image_name }}"
+    default_tag_val="{{ default_tag }}"
+    if [[ -n "$image_spec_val" ]]; then
+        if [[ "$image_spec_val" == *":"* ]]; then
+            target_image="${image_spec_val%:*}"
+            tag="${image_spec_val#*:}"
+        else
+            target_image="${image_spec_val}"
+            tag="${default_tag_val}"
+        fi
+        # Prepend localhost/ if no registry specified
+        if [[ "$target_image" != *"/"* ]]; then
+            target_image="localhost/${target_image}"
+        fi
+    else
+        target_image="${default_target_val}"
+        tag="${default_tag_val}"
+    fi
+
+    just _build-rootful "$target_image" "$tag"
+    just _build-bib "$target_image" "$tag" "qcow2" "image.toml"
 
 # Build a RAW virtual machine image
+
+# Usage: just build-raw [image:tag] (e.g., just build-raw bazzite-nix-cachyos:latest)
 [group('Build Virtual Machine Image')]
-build-raw $target_image=("localhost/" + image_name) $tag=default_tag: && (_build-bib target_image tag "raw" "image.toml")
+build-raw $image_spec="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    # Parse image_spec into target_image and tag
+    image_spec_val="{{ image_spec }}"
+    default_target_val="localhost/{{ image_name }}"
+    default_tag_val="{{ default_tag }}"
+    if [[ -n "$image_spec_val" ]]; then
+        if [[ "$image_spec_val" == *":"* ]]; then
+            target_image="${image_spec_val%:*}"
+            tag="${image_spec_val#*:}"
+        else
+            target_image="${image_spec_val}"
+            tag="${default_tag_val}"
+        fi
+        # Prepend localhost/ if no registry specified
+        if [[ "$target_image" != *"/"* ]]; then
+            target_image="localhost/${target_image}"
+        fi
+    else
+        target_image="${default_target_val}"
+        tag="${default_tag_val}"
+    fi
+
+    just _build-rootful "$target_image" "$tag"
+    just _build-bib "$target_image" "$tag" "raw" "image.toml"
 
 # Build an ISO virtual machine image
+
+# Usage: just build-iso [image:tag] (e.g., just build-iso bazzite-nix-cachyos:latest)
 [group('Build Virtual Machine Image')]
-build-iso $target_image=("localhost/" + image_name) $tag=default_tag: && (_build-bib target_image tag "iso" "iso.toml")
+build-iso $image_spec="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    # Parse image_spec into target_image and tag
+    image_spec_val="{{ image_spec }}"
+    default_target_val="localhost/{{ image_name }}"
+    default_tag_val="{{ default_tag }}"
+    if [[ -n "$image_spec_val" ]]; then
+        if [[ "$image_spec_val" == *":"* ]]; then
+            target_image="${image_spec_val%:*}"
+            tag="${image_spec_val#*:}"
+        else
+            target_image="${image_spec_val}"
+            tag="${default_tag_val}"
+        fi
+        # Prepend localhost/ if no registry specified
+        if [[ "$target_image" != *"/"* ]]; then
+            target_image="localhost/${target_image}"
+        fi
+    else
+        target_image="${default_target_val}"
+        tag="${default_tag_val}"
+    fi
+
+    just _build-rootful "$target_image" "$tag"
+    just _build-bib "$target_image" "$tag" "iso" "iso.toml"
 
 # Rebuild a QCOW2 virtual machine image
+
+# Usage: just rebuild-qcow2 [image:tag] (e.g., just rebuild-qcow2 bazzite-nix-cachyos:latest)
 [group('Build Virtual Machine Image')]
-rebuild-qcow2 $target_image=("localhost/" + image_name) $tag=default_tag: && (_rebuild-bib target_image tag "qcow2" "image.toml")
+rebuild-qcow2 $image_spec="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    # Parse image_spec into target_image and tag
+    image_spec_val="{{ image_spec }}"
+    default_target_val="localhost/{{ image_name }}"
+    default_tag_val="{{ default_tag }}"
+    if [[ -n "$image_spec_val" ]]; then
+        if [[ "$image_spec_val" == *":"* ]]; then
+            target_image="${image_spec_val%:*}"
+            tag="${image_spec_val#*:}"
+        else
+            target_image="${image_spec_val}"
+            tag="${default_tag_val}"
+        fi
+        # Prepend localhost/ if no registry specified
+        if [[ "$target_image" != *"/"* ]]; then
+            target_image="localhost/${target_image}"
+        fi
+    else
+        target_image="${default_target_val}"
+        tag="${default_tag_val}"
+    fi
+
+    just _build-rootful "$target_image" "$tag"
+    just _build-bib "$target_image" "$tag" "qcow2" "image.toml"
 
 # Rebuild a RAW virtual machine image
+
+# Usage: just rebuild-raw [image:tag] (e.g., just rebuild-raw bazzite-nix-cachyos:latest)
 [group('Build Virtual Machine Image')]
-rebuild-raw $target_image=("localhost/" + image_name) $tag=default_tag: && (_rebuild-bib target_image tag "raw" "image.toml")
+rebuild-raw $image_spec="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    # Parse image_spec into target_image and tag
+    image_spec_val="{{ image_spec }}"
+    default_target_val="localhost/{{ image_name }}"
+    default_tag_val="{{ default_tag }}"
+    if [[ -n "$image_spec_val" ]]; then
+        if [[ "$image_spec_val" == *":"* ]]; then
+            target_image="${image_spec_val%:*}"
+            tag="${image_spec_val#*:}"
+        else
+            target_image="${image_spec_val}"
+            tag="${default_tag_val}"
+        fi
+        # Prepend localhost/ if no registry specified
+        if [[ "$target_image" != *"/"* ]]; then
+            target_image="localhost/${target_image}"
+        fi
+    else
+        target_image="${default_target_val}"
+        tag="${default_tag_val}"
+    fi
+
+    just _build-rootful "$target_image" "$tag"
+    just _build-bib "$target_image" "$tag" "raw" "image.toml"
 
 # Rebuild an ISO virtual machine image
+
+# Usage: just rebuild-iso [image:tag] (e.g., just rebuild-iso bazzite-nix-cachyos:latest)
 [group('Build Virtual Machine Image')]
-rebuild-iso $target_image=("localhost/" + image_name) $tag=default_tag: && (_rebuild-bib target_image tag "iso" "iso.toml")
+rebuild-iso $image_spec="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    # Parse image_spec into target_image and tag
+    image_spec_val="{{ image_spec }}"
+    default_target_val="localhost/{{ image_name }}"
+    default_tag_val="{{ default_tag }}"
+    if [[ -n "$image_spec_val" ]]; then
+        if [[ "$image_spec_val" == *":"* ]]; then
+            target_image="${image_spec_val%:*}"
+            tag="${image_spec_val#*:}"
+        else
+            target_image="${image_spec_val}"
+            tag="${default_tag_val}"
+        fi
+        # Prepend localhost/ if no registry specified
+        if [[ "$target_image" != *"/"* ]]; then
+            target_image="localhost/${target_image}"
+        fi
+    else
+        target_image="${default_target_val}"
+        tag="${default_tag_val}"
+    fi
+
+    just _build-rootful "$target_image" "$tag"
+    just _build-bib "$target_image" "$tag" "iso" "iso.toml"
 
 # Run a virtual machine with the specified image type and configuration
 _run-vm $target_image $tag $type $config:
@@ -266,7 +496,7 @@ _run-vm $target_image $tag $type $config:
 
     # Build the image if it does not exist
     if [[ ! -f "${image_file}" ]]; then
-        just "build-${type}" "$target_image" "$tag"
+        env just "build-${type}" "${target_image}:${tag}"
     fi
 
     # Determine an available port to use
@@ -288,42 +518,107 @@ _run-vm $target_image $tag $type $config:
     run_args+=(--env "TPM=Y")
     run_args+=(--env "GPU=Y")
     run_args+=(--device=/dev/kvm)
-    run_args+=(--volume "${PWD}/${image_file}":"/boot.${type}")
-    run_args+=(docker.io/qemux/qemu-docker)
+    run_args+=(--device=/dev/net/tun)
+    run_args+=(--cap-add NET_ADMIN)
+    run_args+=(--volume "${PWD}/${image_file}:/storage/boot.qcow2")
+    run_args+=(docker.io/qemux/qemu)
 
     # Run the VM and open the browser to connect
     (sleep 30 && xdg-open http://localhost:"$port") &
     podman run "${run_args[@]}"
 
 # Run a virtual machine from a QCOW2 image
-[group('Run Virtual Machine')]
-run-vm-qcow2 $target_image=("localhost/" + image_name) $tag=default_tag: && (_run-vm target_image tag "qcow2" "image.toml")
 
-# Run a virtual machine from a RAW image
+# Usage: just run-vm-qcow2 [image:tag] (e.g., just run-vm-qcow2 bazzite-nix-cachyos:latest)
 [group('Run Virtual Machine')]
-run-vm-raw $target_image=("localhost/" + image_name) $tag=default_tag: && (_run-vm target_image tag "raw" "image.toml")
-
-# Run a virtual machine from an ISO
-[group('Run Virtual Machine')]
-run-vm-iso $target_image=("localhost/" + image_name) $tag=default_tag: && (_run-vm target_image tag "iso" "iso.toml")
-
-# Run a virtual machine using systemd-vmspawn
-[group('Run Virtual Machine')]
-spawn-vm rebuild="0" type="qcow2" ram="6G":
+run-vm-qcow2 $image_spec="":
     #!/usr/bin/env bash
-
     set -euo pipefail
 
-    [ "{{ rebuild }}" -eq 1 ] && echo "Rebuilding the ISO" && just build-vm {{ rebuild }} {{ type }}
+    # Parse image_spec into target_image and tag
+    image_spec_val="{{ image_spec }}"
+    default_target_val="localhost/{{ image_name }}"
+    default_tag_val="{{ default_tag }}"
+    if [[ -n "$image_spec_val" ]]; then
+        if [[ "$image_spec_val" == *":"* ]]; then
+            target_image="${image_spec_val%:*}"
+            tag="${image_spec_val#*:}"
+        else
+            target_image="${image_spec_val}"
+            tag="${default_tag_val}"
+        fi
+        # Prepend localhost/ if no registry specified
+        if [[ "$target_image" != *"/"* ]]; then
+            target_image="localhost/${target_image}"
+        fi
+    else
+        target_image="${default_target_val}"
+        tag="${default_tag_val}"
+    fi
 
-    systemd-vmspawn \
-      -M "bootc-image" \
-      --console=gui \
-      --cpus=2 \
-      --ram=$(echo {{ ram }}| /usr/bin/numfmt --from=iec) \
-      --network-user-mode \
-      --vsock=false --pass-ssh-key=false \
-      -i ./output/**/*.{{ type }}
+    just _run-vm "$target_image" "$tag" "qcow2" "image.toml"
+
+# Run a virtual machine from a RAW image
+
+# Usage: just run-vm-raw [image:tag] (e.g., just run-vm-raw bazzite-nix-cachyos:latest)
+[group('Run Virtual Machine')]
+run-vm-raw $image_spec="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    # Parse image_spec into target_image and tag
+    image_spec_val="{{ image_spec }}"
+    default_target_val="localhost/{{ image_name }}"
+    default_tag_val="{{ default_tag }}"
+    if [[ -n "$image_spec_val" ]]; then
+        if [[ "$image_spec_val" == *":"* ]]; then
+            target_image="${image_spec_val%:*}"
+            tag="${image_spec_val#*:}"
+        else
+            target_image="${image_spec_val}"
+            tag="${default_tag_val}"
+        fi
+        # Prepend localhost/ if no registry specified
+        if [[ "$target_image" != *"/"* ]]; then
+            target_image="localhost/${target_image}"
+        fi
+    else
+        target_image="${default_target_val}"
+        tag="${default_tag_val}"
+    fi
+
+    just _run-vm "$target_image" "$tag" "raw" "image.toml"
+
+# Run a virtual machine from an ISO
+
+# Usage: just run-vm-iso [image:tag] (e.g., just run-vm-iso bazzite-nix-cachyos:latest)
+[group('Run Virtual Machine')]
+run-vm-iso $image_spec="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    # Parse image_spec into target_image and tag
+    image_spec_val="{{ image_spec }}"
+    default_target_val="localhost/{{ image_name }}"
+    default_tag_val="{{ default_tag }}"
+    if [[ -n "$image_spec_val" ]]; then
+        if [[ "$image_spec_val" == *":"* ]]; then
+            target_image="${image_spec_val%:*}"
+            tag="${image_spec_val#*:}"
+        else
+            target_image="${image_spec_val}"
+            tag="${default_tag_val}"
+        fi
+        # Prepend localhost/ if no registry specified
+        if [[ "$target_image" != *"/"* ]]; then
+            target_image="localhost/${target_image}"
+        fi
+    else
+        target_image="${default_target_val}"
+        tag="${default_tag_val}"
+    fi
+
+    just _run-vm "$target_image" "$tag" "iso" "iso.toml"
 
 # Runs shell check on all Bash scripts
 lint:

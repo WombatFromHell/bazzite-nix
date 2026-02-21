@@ -240,7 +240,7 @@ for ((i = 0; i < variant_count; i++)); do
   digest=$(echo "$metadata_output" | awk '{print $2}')
 
   # Parse base image for output naming
-  base_image_tag=$(echo "$base_image" | sed 's|.*:||')
+  base_image_tag="${base_image##*:}"
 
   # Standardized image reference components (matching workflow convention)
   output_image="${IMAGE_NAME}${image_suffix}"
