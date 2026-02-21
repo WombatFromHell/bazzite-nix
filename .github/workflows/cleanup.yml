@@ -8,7 +8,7 @@ on:
 jobs:
   # Generate matrix of enabled variants from variants.json
   generate-matrix:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       variants: ${{ steps.read-variants.outputs.variants }}
     steps:
@@ -26,7 +26,7 @@ jobs:
 
   cleanup-images:
     needs: generate-matrix
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       packages: write
     strategy:
@@ -38,8 +38,9 @@ jobs:
         uses: dataaxiom/ghcr-cleanup-action@v1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          owner: ${{ github.repository_owner }}
           package: ${{ matrix.variant }}
           keep-n-tagged: 60 # 2 months worth
           delete-untagged: true
           delete-partial-images: true
-          dry-run: false
+          dry-run: true
