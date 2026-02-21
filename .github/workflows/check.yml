@@ -1,0 +1,156 @@
+name: Check and Aggregate
+
+on:
+  workflow_call:
+    inputs:
+      force_build:
+        description: "Force build even if digest unchanged"
+        required: false
+        default: false
+        type: boolean
+      variants_config:
+        description: "Path to variants.json config file"
+        required: true
+        type: string
+    outputs:
+      variants_to_build:
+        description: "JSON array of variants that need building"
+        value: ${{ jobs.check_and_aggregate.outputs.variants_to_build }}
+      any_builds_needed:
+        description: "Whether any variants need building"
+        value: ${{ jobs.check_and_aggregate.outputs.any_builds_needed }}
+      date:
+        description: "Build date timestamp"
+        value: ${{ jobs.check_and_aggregate.outputs.date }}
+      registry:
+        description: "Image registry"
+        value: ${{ jobs.check_and_aggregate.outputs.registry }}
+      repo:
+        description: "Image repository name"
+        value: ${{ jobs.check_and_aggregate.outputs.repo }}
+      image_desc:
+        description: "Image description"
+        value: ${{ jobs.check_and_aggregate.outputs.image_desc }}
+
+jobs:
+  check_and_aggregate:
+    runs-on: ubuntu-24.04
+    outputs:
+      variants_to_build: ${{ steps.aggregate.outputs.variants_to_build }}
+      any_builds_needed: ${{ steps.aggregate.outputs.any_builds_needed }}
+      date: ${{ steps.date.outputs.date }}
+      registry: ${{ steps.image_refs.outputs.registry }}
+      repo: ${{ steps.image_refs.outputs.repo }}
+      image_desc: ${{ env.IMAGE_DESC }}
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    env:
+      IMAGE_NAME: "${{ github.event.repository.name }}"
+      IMAGE_DESC: "Customized Bazzite image with Nix mount support and other sugar"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set timestamps
+        id: date
+        run: |
+          echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_OUTPUT
+
+      - name: Compute image references
+        id: image_refs
+        run: |
+          echo "registry=ghcr.io/${{ github.repository_owner }}" >> $GITHUB_OUTPUT
+          echo "repo=${{ github.event.repository.name }}" >> $GITHUB_OUTPUT
+
+      - name: Generate base cache key
+        id: cache_key
+        shell: bash
+        run: |
+          REPO_HASH=$(echo "${{ github.repository }}" | sha256sum | cut -c1-8)
+          BRANCH_HASH=$(echo "${{ github.ref_name }}" | sha256sum | cut -c1-8)
+          BASE_KEY="digest-${REPO_HASH}-${BRANCH_HASH}"
+          echo "base_cache_key=${BASE_KEY}" >> $GITHUB_OUTPUT
+
+      - name: Check all variants
+        id: check_all
+        if: always()
+        shell: bash
+        env:
+          REGISTRY_OWNER: ${{ github.repository_owner }}
+          IMAGE_NAME: ${{ github.event.repository.name }}
+          BASE_CACHE_KEY: ${{ steps.cache_key.outputs.base_cache_key }}
+          FORCE_BUILD: ${{ inputs.force_build }}
+          VARIANTS_CONFIG: ${{ inputs.variants_config }}
+        run: |
+          .github/workflows/check-variants.sh
+
+      - name: Aggregate results
+        id: aggregate
+        shell: bash
+        run: |
+          results_file="/tmp/variants_results.json"
+
+          if [ ! -f "$results_file" ]; then
+            echo "::error::Variant results file not found - check job may have failed"
+            exit 1
+          fi
+
+          if [ ! -s "$results_file" ]; then
+            echo "::error::Variant results file is empty - check job may have failed silently"
+            echo "::notice::Treating as no builds needed to allow workflow to continue"
+            echo "variants_to_build=[]" >> $GITHUB_OUTPUT
+            echo "any_builds_needed=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          results=$(cat "$results_file")
+
+          if ! echo "$results" | jq empty 2>/dev/null; then
+            echo "::error::Invalid JSON in results file - check job may have produced corrupt output"
+            exit 1
+          fi
+
+          any_builds_needed=false
+          variants_to_build=$(echo "$results" | jq -c '[.[] | select(.needs_build == true) | del(.needs_build)]')
+
+          count=$(echo "$variants_to_build" | jq 'length')
+          if [ "$count" -gt 0 ]; then
+            any_builds_needed=true
+          fi
+
+          if [ "$any_builds_needed" = false ]; then
+            echo "::notice::No variants need building"
+            echo "## ⚠️ Build Skipped" >> $GITHUB_STEP_SUMMARY
+            echo "**Reason:** No variants have changes" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "### 🚫 Skipped Variants" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "| Variant | Target Image | Tags |" >> $GITHUB_STEP_SUMMARY
+            echo "|---------|--------------|------|" >> $GITHUB_STEP_SUMMARY
+            echo "$results" | jq -c '.[]' | while read -r variant; do
+              name=$(echo "$variant" | jq -r '.variant')
+              suffix=$(echo "$variant" | jq -r '.image_suffix // ""')
+              tags=$(echo "$variant" | jq -r '.tags')
+              target_image="${{ steps.image_refs.outputs.registry }}/${{ steps.image_refs.outputs.repo }}${suffix}"
+              echo "| \`${name}\` | \`${target_image}\` | \`${tags}\` |" >> $GITHUB_STEP_SUMMARY
+            done
+            echo "variants_to_build=[]" >> $GITHUB_OUTPUT
+          else
+            echo "variants_to_build=${variants_to_build}" >> $GITHUB_OUTPUT
+
+            echo "## 📦 Variants to Build" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "| Variant | Target Image | Tags |" >> $GITHUB_STEP_SUMMARY
+            echo "|---------|--------------|------|" >> $GITHUB_STEP_SUMMARY
+            echo "$variants_to_build" | jq -c '.[]' | while read -r variant; do
+              name=$(echo "$variant" | jq -r '.variant')
+              suffix=$(echo "$variant" | jq -r '.image_suffix // ""')
+              tags=$(echo "$variant" | jq -r '.tags')
+              target_image="${{ steps.image_refs.outputs.registry }}/${{ steps.image_refs.outputs.repo }}${suffix}"
+              echo "| \`${name}\` | \`${target_image}\` | \`${tags}\` |" >> $GITHUB_STEP_SUMMARY
+            done
+          fi
+
+          echo "any_builds_needed=${any_builds_needed}" >> $GITHUB_OUTPUT

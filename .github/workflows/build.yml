@@ -38,138 +38,10 @@ concurrency:
 jobs:
   # Check upstream images, determine which variants need rebuilding, and aggregate results
   check_and_aggregate:
-    runs-on: ubuntu-24.04
-    outputs:
-      variants_to_build: ${{ steps.aggregate.outputs.variants_to_build }}
-      any_builds_needed: ${{ steps.aggregate.outputs.any_builds_needed }}
-      date: ${{ steps.date.outputs.date }}
-      registry_lower: ${{ steps.lowercase.outputs.registry_lower }}
-      image_desc: ${{ env.IMAGE_DESC }}
-    permissions:
-      contents: read
-      packages: write
-      id-token: write
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Set timestamps
-        id: date
-        run: |
-          echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> $GITHUB_OUTPUT
-
-      - name: Lowercase Registry
-        id: lowercase
-        run: |
-          REGISTRY_LOWER=$(echo "ghcr.io/${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-          echo "registry_lower=${REGISTRY_LOWER}" >> $GITHUB_OUTPUT
-
-      - name: Login for Skopeo
-        id: skopeo_login
-        uses: Wandalen/wretry.action@e68c23e6309f2871ca8ae4763e7629b9c258e1ea # v3.8.0
-        with:
-          attempt_limit: 3
-          attempt_delay: 30000
-          command: |
-            echo "${{ secrets.GITHUB_TOKEN }}" | skopeo login ghcr.io -u ${{ github.actor }} --password-stdin
-
-      - name: Generate base cache key
-        id: cache_key
-        shell: bash
-        run: |
-          REPO_HASH=$(echo "${{ github.repository }}" | sha256sum | cut -c1-8)
-          BRANCH_HASH=$(echo "${{ github.ref_name }}" | sha256sum | cut -c1-8)
-          BASE_KEY="digest-${REPO_HASH}-${BRANCH_HASH}"
-          echo "base_cache_key=${BASE_KEY}" >> $GITHUB_OUTPUT
-
-      - name: Check all variants
-        id: check_all
-        if: always()
-        shell: bash
-        env:
-          REGISTRY_OWNER: ${{ github.repository_owner }}
-          IMAGE_NAME: ${{ github.event.repository.name }}
-          BASE_CACHE_KEY: ${{ steps.cache_key.outputs.base_cache_key }}
-          FORCE_BUILD: ${{ github.event.inputs.force_build == 'true' }}
-          VARIANTS_CONFIG: ${{ env.VARIANTS_CONFIG }}
-        run: |
-          .github/workflows/check-variants.sh
-
-      - name: Aggregate results
-        id: aggregate
-        shell: bash
-        run: |
-          # Read results from script output
-          results_file="/tmp/variants_results.json"
-
-          # Validate results file exists and is valid JSON
-          if [ ! -f "$results_file" ]; then
-            echo "::error::Variant results file not found - check job may have failed"
-            exit 1
-          fi
-
-          if [ ! -s "$results_file" ]; then
-            echo "::error::Variant results file is empty - check job may have failed silently"
-            echo "::notice::Treating as no builds needed to allow workflow to continue"
-            echo "variants_to_build=[]" >> $GITHUB_OUTPUT
-            echo "any_builds_needed=false" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-
-          results=$(cat "$results_file")
-
-          # Validate JSON
-          if ! echo "$results" | jq empty 2>/dev/null; then
-            echo "::error::Invalid JSON in results file - check job may have produced corrupt output"
-            exit 1
-          fi
-
-          any_builds_needed=false
-
-          # Filter variants needing build and remove needs_build field using jq
-          variants_to_build=$(echo "$results" | jq -c '[.[] | select(.needs_build == true) | del(.needs_build)]')
-
-          # Check if any variants need building
-          count=$(echo "$variants_to_build" | jq 'length')
-          if [ "$count" -gt 0 ]; then
-            any_builds_needed=true
-          fi
-
-          if [ "$any_builds_needed" = false ]; then
-            echo "::notice::No variants need building"
-            echo "## ⚠️ Build Skipped" >> $GITHUB_STEP_SUMMARY
-            echo "**Reason:** No variants have changes" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "### 🚫 Skipped Variants" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "| Variant | Target Image | Tags |" >> $GITHUB_STEP_SUMMARY
-            echo "|---------|--------------|------|" >> $GITHUB_STEP_SUMMARY
-            echo "$results" | jq -c '.[]' | while read -r variant; do
-              name=$(echo "$variant" | jq -r '.variant')
-              suffix=$(echo "$variant" | jq -r '.image_suffix // ""')
-              tags=$(echo "$variant" | jq -r '.tags')
-              target_image="${{ steps.lowercase.outputs.registry_lower }}/${{ github.event.repository.name }}${suffix}"
-              echo "| \`${name}\` | \`${target_image}\` | \`${tags}\` |" >> $GITHUB_STEP_SUMMARY
-            done
-            echo "variants_to_build=[]" >> $GITHUB_OUTPUT
-          else
-            echo "variants_to_build=${variants_to_build}" >> $GITHUB_OUTPUT
-
-            # Write build summary to step summary
-            echo "## 📦 Variants to Build" >> $GITHUB_STEP_SUMMARY
-            echo "" >> $GITHUB_STEP_SUMMARY
-            echo "| Variant | Target Image | Tags |" >> $GITHUB_STEP_SUMMARY
-            echo "|---------|--------------|------|" >> $GITHUB_STEP_SUMMARY
-            echo "$variants_to_build" | jq -c '.[]' | while read -r variant; do
-              name=$(echo "$variant" | jq -r '.variant')
-              suffix=$(echo "$variant" | jq -r '.image_suffix // ""')
-              tags=$(echo "$variant" | jq -r '.tags')
-              target_image="${{ steps.lowercase.outputs.registry_lower }}/${{ github.event.repository.name }}${suffix}"
-              echo "| \`${name}\` | \`${target_image}\` | \`${tags}\` |" >> $GITHUB_STEP_SUMMARY
-            done
-          fi
-
-          echo "any_builds_needed=${any_builds_needed}" >> $GITHUB_OUTPUT
+    uses: ./.github/workflows/check.yml
+    with:
+      force_build: ${{ github.event.inputs.force_build == 'true' }}
+      variants_config: ".github/variants.json"
 
   # Build, sign, and push each variant that needs updating
   build_push:
@@ -179,7 +51,8 @@ jobs:
     with:
       variants_to_build: ${{ needs.check_and_aggregate.outputs.variants_to_build }}
       date: ${{ needs.check_and_aggregate.outputs.date }}
-      registry_lower: ${{ needs.check_and_aggregate.outputs.registry_lower }}
+      registry_lower: ${{ needs.check_and_aggregate.outputs.registry }}
+      repo: ${{ needs.check_and_aggregate.outputs.repo }}
       image_desc: ${{ needs.check_and_aggregate.outputs.image_desc }}
       skip_rechunk: ${{ github.event.inputs.skip_rechunk == 'true' }}
     secrets:

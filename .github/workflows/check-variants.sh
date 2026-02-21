@@ -6,9 +6,16 @@
 #
 # Environment Variables:
 #   REGISTRY_OWNER     - GitHub repository owner (e.g., "ublue-os")
+#   IMAGE_NAME         - Repository name (e.g., "bazzite-nix")
 #   BASE_CACHE_KEY     - Base cache key for digest caching
 #   FORCE_BUILD        - "true" to force rebuild regardless of digest
 #   VARIANTS_CONFIG    - Path to variants.json config file
+#
+# Standardized Variable Naming (matching workflow convention):
+#   registry           - Full registry URL (e.g., "ghcr.io/ublue-os")
+#   output_image       - Image name with suffix (e.g., "bazzite-nix-cachyos")
+#   prefix             - Full image path (e.g., "ghcr.io/ublue-os/bazzite-nix-cachyos")
+#   base_image_tag     - Tag from base image (e.g., "stable" from "ghcr.io/...:stable")
 #
 # Output:
 #   Writes variant check results to /tmp/variants_results.json
@@ -235,8 +242,10 @@ for ((i = 0; i < variant_count; i++)); do
   # Parse base image for output naming
   base_image_tag=$(echo "$base_image" | sed 's|.*:||')
 
+  # Standardized image reference components (matching workflow convention)
   output_image="${IMAGE_NAME}${image_suffix}"
-  prefix="ghcr.io/${REGISTRY_OWNER}/${output_image}"
+  registry="ghcr.io/${REGISTRY_OWNER}"
+  prefix="${registry}/${output_image}"
 
   # Compute canonical tag
   canonical=$(compute_canonical_tag "$parent_version" "$prefix")
