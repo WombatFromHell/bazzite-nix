@@ -120,11 +120,16 @@ jobs:
       - name: Check if previous image exists
         id: check_prev
         run: |
-          PREV_REF="${{ steps.image_refs.outputs.registry }}/${{ steps.image_refs.outputs.output_image }}:${{ steps.image_refs.outputs.base_image_tag }}"
-          echo "Checking existence of previous image: $PREV_REF"
-          if skopeo inspect "docker://${PREV_REF}" > /dev/null 2>&1; then
-            echo "prev_ref_exists=true" >> $GITHUB_OUTPUT
+          if [ -n "${{ matrix.variant_data.prev_ref }}" ]; then
+            PREV_REF="${{ matrix.variant_data.prev_ref }}"
+            echo "Checking existence of previous image: $PREV_REF"
+            if skopeo inspect "docker://${PREV_REF}" > /dev/null 2>&1; then
+              echo "prev_ref_exists=true" >> $GITHUB_OUTPUT
+            else
+              echo "prev_ref_exists=false" >> $GITHUB_OUTPUT
+            fi
           else
+            echo "No previous build reference available"
             echo "prev_ref_exists=false" >> $GITHUB_OUTPUT
           fi
 
@@ -135,7 +140,7 @@ jobs:
         with:
           rechunk: "ghcr.io/ublue-os/legacy-rechunk:v1.0.0-x86_64"
           ref: "raw-img"
-          prev-ref: "${{ steps.image_refs.outputs.registry }}/${{ steps.image_refs.outputs.output_image }}:${{ steps.image_refs.outputs.base_image_tag }}"
+          prev-ref: "${{ matrix.variant_data.prev_ref }}"
           labels: ${{ steps.labels.outputs.rechunk_labels }}
           skip_compression: true
           max-layers: 45

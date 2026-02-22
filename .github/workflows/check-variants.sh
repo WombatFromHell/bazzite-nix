@@ -279,8 +279,8 @@ check_build_needed() {
   echo "::notice::Could not fetch parent_version from ${primary_ref} (may not exist), checking canonical tag"
   echo "::debug::Failed to get parent_version from primary tag ${primary_ref}, falling back to canonical tag check"
 
-  # Primary tag doesn't exist, check canonical tag
-  local target_ref="docker://${prefix}:${canonical}"
+  # Primary tag doesn't exist, check canonical tag ({branch}-{canonical} format)
+  local target_ref="docker://${prefix}:${base_image_tag}-${canonical}"
   echo "::debug::Primary tag not found, checking canonical: ${target_ref}"
   if skopeo inspect "${target_ref}" >/dev/null 2>&1; then
     echo "::debug::Target image exists: ${target_ref}"
@@ -294,6 +294,119 @@ check_build_needed() {
   REASON="Target image does not exist"
   return 0
 }
+
+# Find the previous build reference for rechunk using canonical tag format
+# Arguments: $1 = prefix (registry/image), $2 = base_image_tag, $3 = canonical_tag, $4 = tags_json
+# Outputs: Echoes the full image ref (registry/image:tag) of the previous build, returns 0 on success, 1 on failure
+find_prev_ref() {
+  local prefix="$1"
+  local base_image_tag="$2"
+  local canonical_tag="$3"
+  local tags_json="$4"
+  local available_tags
+
+  # Fetch available tags from registry
+  available_tags=$(skopeo list-tags "docker://${prefix}" 2>/dev/null | jq -r '.Tags[]' 2>/dev/null) || {
+    echo "::debug::Failed to list tags for ${prefix}"
+    return 1
+  }
+
+  # Build expected canonical tag format: {branch}-{canonical}
+  local canonical_format_tag="${base_image_tag}-${canonical_tag}"
+
+  # Extract the version number from canonical_tag for finding previous builds
+  local current_version="$canonical_tag"
+
+  # If tags config exists and has versioned patterns, check what format we expect
+  if [ -n "$tags_json" ] && [ "$tags_json" != "null" ] && [ "$tags_json" != "{}" ]; then
+    local versioned_patterns
+    versioned_patterns=$(echo "$tags_json" | jq -r '.versioned[]?' 2>/dev/null)
+    local best_match=""
+    local best_version=""
+
+    # First pass: look for previous versions in patterns containing {canonical} (most specific)
+    while IFS= read -r pattern; do
+      if [ -n "$pattern" ] && [[ "$pattern" == *"{canonical}"* ]]; then
+        local resolved_pattern="${pattern//\{branch\}/$base_image_tag}"
+        # Extract prefix and suffix around {canonical}
+        local prefix_part="${resolved_pattern%%\{*}"
+        local suffix_part="${resolved_pattern##*\}}"
+
+        while IFS= read -r tag; do
+          # Check if tag matches the pattern structure
+          if [[ "$tag" == "${prefix_part}"* ]] && [[ "$tag" == *"${suffix_part}" ]]; then
+            # Extract version from tag
+            local extracted_version="${tag#${prefix_part}}"
+            extracted_version="${extracted_version%${suffix_part}}"
+            # Only consider tags with version less than current
+            if [ -n "$extracted_version" ] && [[ "$extracted_version" < "$current_version" ]]; then
+              if [ -z "$best_version" ] || [[ "$extracted_version" > "$best_version" ]]; then
+                best_version="$extracted_version"
+                best_match="$tag"
+              fi
+            fi
+          fi
+        done <<<"$available_tags"
+      fi
+    done <<<"$versioned_patterns"
+
+    if [ -n "$best_match" ]; then
+      echo "${prefix}:${best_match}"
+      return 0
+    fi
+
+    # Second pass: other patterns (without canonical) - exact match only
+    while IFS= read -r pattern; do
+      if [ -n "$pattern" ] && [[ "$pattern" != *"{canonical}"* ]]; then
+        local resolved_pattern="${pattern//\{branch\}/$base_image_tag}"
+        while IFS= read -r tag; do
+          if [ "$tag" = "$resolved_pattern" ]; then
+            echo "${prefix}:${tag}"
+            return 0
+          fi
+        done <<<"$available_tags"
+      fi
+    done <<<"$versioned_patterns"
+  fi
+
+  # Fallback for variants without explicit tags config
+  # Search order: most specific ({branch}-{version} where version < current) -> branch only
+
+  # First: look for {branch}-{version} tags where version < current_version
+  local best_prev_tag=""
+  local best_prev_version=""
+
+  while IFS= read -r tag; do
+    # Match tags in format: {base_image_tag}-{version}
+    if [[ "$tag" == "${base_image_tag}-"* ]]; then
+      local tag_version="${tag#${base_image_tag}-}"
+      # Only consider tags with version less than current
+      if [[ "$tag_version" < "$current_version" ]]; then
+        if [ -z "$best_prev_version" ] || [[ "$tag_version" > "$best_prev_version" ]]; then
+          best_prev_version="$tag_version"
+          best_prev_tag="$tag"
+        fi
+      fi
+    fi
+  done <<<"$available_tags"
+
+  if [ -n "$best_prev_tag" ]; then
+    echo "${prefix}:${best_prev_tag}"
+    return 0
+  fi
+
+  # Last fallback: check branch tag (least specific)
+  while IFS= read -r tag; do
+    if [ "$tag" = "$base_image_tag" ]; then
+      echo "${prefix}:${tag}"
+      return 0
+    fi
+  done <<<"$available_tags"
+
+  # No matching canonical tag found
+  return 1
+}
+
 for ((i = 0; i < variant_count; i++)); do
   # Read variant from JSON config
   variant=$(jq -r ".variants[$i].name" "$VARIANTS_CONFIG")
@@ -339,11 +452,19 @@ for ((i = 0; i < variant_count; i++)); do
   # Strip branch prefix from canonical if already present (e.g., "testing-43.20260221.2" → "43.20260221.2")
   # This prevents double-prefixing when using templates like "{branch}-{canonical}"
   if [[ "$canonical" == "${base_image_tag}-"* ]]; then
-    canonical="${canonical#${base_image_tag}-}"
+    canonical="${canonical#"${base_image_tag}"-}"
   fi
 
   # Generate tags
   tags=$(generate_tags "$base_image_tag" "$canonical" "$variant" "$suffix" "$latest" "$tags_json")
+
+  # Find previous build reference for rechunk (using canonical format)
+  prev_ref=""
+  if prev_ref=$(find_prev_ref "$prefix" "$base_image_tag" "$canonical" "$tags_json"); then
+    echo "::debug::Found previous build: ${prev_ref}"
+  else
+    echo "::debug::No previous build found for ${prefix} in canonical format ${base_image_tag}-${canonical}"
+  fi
 
   # Check if build is needed
   if ! check_build_needed "$prefix" "$canonical" "$variant" "$base_image_tag" "$parent_version"; then
@@ -365,18 +486,20 @@ for ((i = 0; i < variant_count; i++)); do
     --arg digest "$digest" \
     --arg canonical_tag "$canonical" \
     --arg tags "$tags" \
+    --arg prev_ref "$prev_ref" \
     --argjson needs_build "$needs_build" \
     '{
-                variant: $variant,
-                base_image: $base_image,
-                build_script: $build_script,
-                suffix: $suffix,
-                parent_version: $parent_version,
-                digest: $digest,
-                canonical_tag: $canonical_tag,
-                tags: $tags,
-                needs_build: $needs_build
-            }')
+        variant: $variant,
+        base_image: $base_image,
+        build_script: $build_script,
+        suffix: $suffix,
+        parent_version: $parent_version,
+        digest: $digest,
+        canonical_tag: $canonical_tag,
+        tags: $tags,
+        prev_ref: $prev_ref,
+        needs_build: $needs_build
+    }')
 
   # Collect result
   if [ -n "$result" ] && [ "$result" != "null" ] && [ "$result" != "{}" ]; then
