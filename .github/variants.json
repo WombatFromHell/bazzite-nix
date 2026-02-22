@@ -7,7 +7,9 @@
         "description": "string - optional variant description",
         "base_image": "string - upstream image reference (registry:tag)",
         "build_script": "string - optional build script in build_files/, defaults to 'build.sh'",
-        "image_suffix": "string - optional suffix for output image name",
+        "suffix": "string - optional. If present, appends to repo name (e.g., '-cachyos'). If absent, uses base repo name.",
+        "latest": "boolean - optional, defaults to false. Set to true to tag with 'latest'",
+        "tags": "object - optional. Contains: branch (string), versioned (array of strings with {canonical} and {branch} placeholders)",
         "disabled": "boolean - optional, defaults to false. Set to true to skip this variant"
       }
     ]
@@ -19,33 +21,41 @@
     },
     {
       "name": "testing",
-      "base_image": "ghcr.io/ublue-os/bazzite:testing"
+      "base_image": "ghcr.io/ublue-os/bazzite:testing",
+      "latest": true,
+      "tags": {
+        "versioned": ["{branch}", "{branch}-{canonical}"]
+      }
     },
     {
       "name": "upstream",
+      "suffix": "-upstream",
       "base_image": "ghcr.io/ublue-os/bazzite:testing",
       "description": "Builds the bazzite image with kernel from testing-updates",
       "build_script": "build-upstream.sh",
-      "image_suffix": "-upstream",
+      "latest": true,
       "disabled": true
     },
     {
       "name": "cachyos",
+      "suffix": "-cachyos",
       "base_image": "ghcr.io/ublue-os/bazzite:testing",
       "description": "Builds the bazzite image with kernel from cachyos copr",
       "build_script": "build-cachyos.sh",
-      "image_suffix": "-cachyos"
+      "latest": true
     },
     {
       "name": "nvidia-open",
+      "suffix": "-nvidia-open",
       "base_image": "ghcr.io/ublue-os/bazzite-nvidia-open:stable",
-      "image_suffix": "-nvidia-open",
+      "latest": true,
       "disabled": true
     },
     {
       "name": "deck",
+      "suffix": "-deck",
       "base_image": "ghcr.io/ublue-os/bazzite-deck:stable",
-      "image_suffix": "-deck",
+      "latest": true,
       "disabled": true
     }
   ]

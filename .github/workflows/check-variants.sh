@@ -136,18 +136,61 @@ compute_canonical_tag() {
   echo "$canonical"
 }
 
-# Generate tags based on base image tag
-# Arguments: $1 = base_image_tag, $2 = canonical
+# Generate tags based on base image tag and variant configuration
+# Arguments: $1 = base_image_tag, $2 = canonical, $3 = variant_name, $4 = suffix, $5 = latest, $6 = tags_json
 # Outputs: Comma-separated tags string
 generate_tags() {
   local base_image_tag="$1"
   local canonical="$2"
+  local variant_name="$3"
+  local suffix="$4"
+  local latest="${5:-false}"
+  local tags_json="${6:-}"
 
-  case "${base_image_tag}" in
-  "stable") echo "stable,stable-${canonical},${canonical}" ;;
-  "testing") echo "testing,latest,${canonical}" ;;
-  *) echo "${base_image_tag},${base_image_tag}-${canonical},${canonical}" ;;
-  esac
+  local tags_array=()
+
+  # Add "latest" tag if latest=true
+  if [ "$latest" = "true" ]; then
+    tags_array+=("latest")
+  fi
+
+  # If tags object is provided, use explicit template for versioned only
+  if [ -n "$tags_json" ] && [ "$tags_json" != "null" ]; then
+    local tags_branch tags_versioned
+    tags_branch=$(echo "$tags_json" | jq -r '.branch // empty')
+    tags_versioned=$(echo "$tags_json" | jq -r '.versioned // [] | .[]' 2>/dev/null)
+
+    # Use branch from config or fall back to base_image_tag
+    local branch="${tags_branch:-$base_image_tag}"
+
+    # Add versioned tags with placeholder substitution
+    # Note: versioned array is the single source of truth (includes branch tag if desired)
+    while IFS= read -r versioned_tag; do
+      if [ -n "$versioned_tag" ]; then
+        # Substitute placeholders
+        versioned_tag="${versioned_tag//\{canonical\}/$canonical}"
+        versioned_tag="${versioned_tag//\{branch\}/$branch}"
+        tags_array+=("$versioned_tag")
+      fi
+    done <<< "$tags_versioned"
+
+    # Output as comma-separated string
+    (IFS=,; echo "${tags_array[*]}")
+    return 0
+  fi
+
+  # No explicit tags config - use default logic
+  # Suffixed variants without explicit tags is an error
+  if [ -n "$suffix" ]; then
+    echo "::error::Variant '${variant_name}' has suffix but no 'tags' configuration. Suffixed variants must explicitly declare tags." >&2
+    return 1
+  fi
+
+  # Primary variant default logic - add branch and versioned tags
+  tags_array+=("${base_image_tag}" "${base_image_tag}-${canonical}" "${canonical}")
+
+  # Output as comma-separated string
+  (IFS=,; echo "${tags_array[*]}")
 }
 
 # Get variant count from config
@@ -256,7 +299,9 @@ for ((i = 0; i < variant_count; i++)); do
   variant=$(jq -r ".variants[$i].name" "$VARIANTS_CONFIG")
   base_image=$(jq -r ".variants[$i].base_image" "$VARIANTS_CONFIG")
   build_script=$(jq -r ".variants[$i].build_script // empty" "$VARIANTS_CONFIG")
-  image_suffix=$(jq -r ".variants[$i].image_suffix // empty" "$VARIANTS_CONFIG")
+  suffix=$(jq -r ".variants[$i].suffix // empty" "$VARIANTS_CONFIG")
+  latest=$(jq -r ".variants[$i].latest // false" "$VARIANTS_CONFIG")
+  tags_json=$(jq -c ".variants[$i].tags // empty" "$VARIANTS_CONFIG")
   disabled=$(jq -r ".variants[$i].disabled // false" "$VARIANTS_CONFIG")
 
   # Default to build.sh if build_script is empty
@@ -284,15 +329,21 @@ for ((i = 0; i < variant_count; i++)); do
 
   # Standardized image reference components (matching workflow convention)
   # Note: GHCR normalizes owner names to lowercase
-  output_image="${IMAGE_NAME}${image_suffix}"
+  output_image="${IMAGE_NAME}${suffix}"
   registry="ghcr.io/$(echo "${REGISTRY_OWNER}" | tr '[:upper:]' '[:lower:]')"
   prefix="${registry}/${output_image}"
 
   # Compute canonical tag
   canonical=$(compute_canonical_tag "$parent_version" "$prefix")
 
+  # Strip branch prefix from canonical if already present (e.g., "testing-43.20260221.2" → "43.20260221.2")
+  # This prevents double-prefixing when using templates like "{branch}-{canonical}"
+  if [[ "$canonical" == "${base_image_tag}-"* ]]; then
+    canonical="${canonical#${base_image_tag}-}"
+  fi
+
   # Generate tags
-  tags=$(generate_tags "$base_image_tag" "$canonical")
+  tags=$(generate_tags "$base_image_tag" "$canonical" "$variant" "$suffix" "$latest" "$tags_json")
 
   # Check if build is needed
   if ! check_build_needed "$prefix" "$canonical" "$variant" "$base_image_tag" "$parent_version"; then
@@ -309,7 +360,7 @@ for ((i = 0; i < variant_count; i++)); do
     --arg variant "$variant" \
     --arg base_image "$base_image" \
     --arg build_script "$build_script" \
-    --arg image_suffix "$image_suffix" \
+    --arg suffix "$suffix" \
     --arg parent_version "$parent_version" \
     --arg digest "$digest" \
     --arg canonical_tag "$canonical" \
@@ -319,7 +370,7 @@ for ((i = 0; i < variant_count; i++)); do
                 variant: $variant,
                 base_image: $base_image,
                 build_script: $build_script,
-                image_suffix: $image_suffix,
+                suffix: $suffix,
                 parent_version: $parent_version,
                 digest: $digest,
                 canonical_tag: $canonical_tag,

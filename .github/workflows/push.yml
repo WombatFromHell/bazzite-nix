@@ -74,8 +74,8 @@ jobs:
           # All downstream steps should use these outputs instead of inline interpolation
           echo "registry=${{ inputs.registry_lower }}" >> $GITHUB_OUTPUT
           echo "repo=${{ inputs.repo }}" >> $GITHUB_OUTPUT
-          echo "suffix=${{ matrix.variant_data.image_suffix }}" >> $GITHUB_OUTPUT
-          echo "output_image=${{ inputs.repo }}${{ matrix.variant_data.image_suffix }}" >> $GITHUB_OUTPUT
+          echo "suffix=${{ matrix.variant_data.suffix }}" >> $GITHUB_OUTPUT
+          echo "output_image=${{ inputs.repo }}${{ matrix.variant_data.suffix }}" >> $GITHUB_OUTPUT
           echo "base_image_tag=$(echo '${{ matrix.variant_data.base_image }}' | sed 's|.*:||')" >> $GITHUB_OUTPUT
 
       - name: Assemble image labels

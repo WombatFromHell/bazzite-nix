@@ -119,7 +119,7 @@ jobs:
             echo "|---------|--------------|------|" >> $GITHUB_STEP_SUMMARY
             echo "$results" | jq -c '.[]' | while read -r variant; do
               name=$(echo "$variant" | jq -r '.variant')
-              suffix=$(echo "$variant" | jq -r '.image_suffix // ""')
+              suffix=$(echo "$variant" | jq -r '.suffix // ""')
               tags=$(echo "$variant" | jq -r '.tags')
               target_image="${{ steps.image_refs.outputs.registry }}/${{ steps.image_refs.outputs.repo }}${suffix}"
               echo "| \`${name}\` | \`${target_image}\` | \`${tags}\` |" >> $GITHUB_STEP_SUMMARY
@@ -134,7 +134,7 @@ jobs:
             echo "|---------|--------------|------|" >> $GITHUB_STEP_SUMMARY
             echo "$variants_to_build" | jq -c '.[]' | while read -r variant; do
               name=$(echo "$variant" | jq -r '.variant')
-              suffix=$(echo "$variant" | jq -r '.image_suffix // ""')
+              suffix=$(echo "$variant" | jq -r '.suffix // ""')
               tags=$(echo "$variant" | jq -r '.tags')
               target_image="${{ steps.image_refs.outputs.registry }}/${{ steps.image_refs.outputs.repo }}${suffix}"
               echo "| \`${name}\` | \`${target_image}\` | \`${tags}\` |" >> $GITHUB_STEP_SUMMARY
