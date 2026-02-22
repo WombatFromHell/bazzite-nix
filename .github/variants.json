@@ -3,16 +3,32 @@
   "_schema": {
     "variants": [
       {
-        "name": "string - variant identifier (must be unique)",
-        "description": "string - optional variant description",
-        "base_image": "string - upstream image reference (registry:tag)",
-        "build_script": "string - optional build script in build_files/, defaults to 'build.sh'",
-        "suffix": "string - optional. If present, appends to repo name (e.g., '-cachyos'). If absent, uses base repo name.",
-        "latest": "boolean - optional, defaults to false. Set to true to tag with 'latest'",
-        "tags": "object - optional. Contains: branch (string), versioned (array of strings with {canonical} and {branch} placeholders)",
-        "disabled": "boolean - optional, defaults to false. Set to true to skip this variant"
+        "name": "string",
+        "base_image": "string",
+        "build_script": "string (optional, default: 'build.sh')",
+        "suffix": "string (optional)",
+        "latest": "boolean (optional, default: false)",
+        "tags": {
+          "branch": "string (optional, default: base_image_tag)",
+          "versioned": ["string (supports {canonical}, {branch} placeholders)"]
+        },
+        "tags_default": "If 'tags' is omitted, generates: [base_image_tag, base_image_tag-canonical, canonical]",
+        "disabled": "boolean (optional, default: false)"
       }
-    ]
+    ],
+    "_output": "Fields computed by check-variants.sh for each variant needing a build:",
+    "output_fields": {
+      "variant": "string - the variant name",
+      "base_image": "string - the base image reference",
+      "build_script": "string - the build script to use",
+      "suffix": "string - the suffix (may be empty)",
+      "parent_version": "string - version label from upstream base image",
+      "digest": "string - SHA256 digest of upstream base image (without sha256: prefix)",
+      "canonical_tag": "string - computed canonical version tag (with collision handling)",
+      "tags": "string - comma-separated list of tags to apply",
+      "prev_ref": "string - full image ref of previous build for rechunk (may be empty)",
+      "needs_build": "boolean - whether this variant needs rebuilding"
+    }
   },
   "variants": [
     {
