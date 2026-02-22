@@ -1,0 +1,4 @@
+docker:
+  ghcr.io/wombatfromhell:
+    use-sigstore-attachments: true
+

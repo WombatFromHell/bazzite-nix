@@ -1,0 +1,11 @@
+{
+  "ghcr.io/wombatfromhell": [
+    {
+      "type": "sigstoreSigned",
+      "keyPaths": ["/etc/pki/containers/cosign.pub"],
+      "signedIdentity": {
+        "type": "matchRepository"
+      }
+    }
+  ]
+}

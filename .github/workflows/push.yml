@@ -193,6 +193,8 @@ jobs:
           attempt_limit: 3
           attempt_delay: 15000
           command: |
+            set -euo pipefail
+
             SOURCE_REF="${{ steps.build_digest.outputs.source_ref }}"
             IMAGE_DIGEST="${{ steps.build_digest.outputs.full_build_digest }}"
             SHORT_DIGEST="${{ steps.build_digest.outputs.build_digest }}"
@@ -202,25 +204,57 @@ jobs:
             DIGEST_REF="${{ steps.image_refs.outputs.registry }}/${{ steps.image_refs.outputs.output_image }}@${IMAGE_DIGEST}"
             BASE_IMG="${{ steps.image_refs.outputs.registry }}/${{ steps.image_refs.outputs.output_image }}"
 
+            echo "::group::Push primary image"
+            echo "Source ref: ${SOURCE_REF}"
+            echo "Digest ref: ${DIGEST_REF}"
+            echo "Base image: ${BASE_IMG}"
             echo "Pushing primary image: ${DIGEST_REF}"
             sudo skopeo copy \
+              --authfile /tmp/skopeo-auth/auth.json \
               --dest-compress-format zstd:chunked \
               --dest-compress-level 3 \
               "$SOURCE_REF" "docker://$DIGEST_REF"
+            echo "::endgroup::"
 
-            echo "Signing image: ${DIGEST_REF}"
-            cosign sign -y \
-              --key env://SIGNING_SECRET \
-              --registry-username "${{ github.actor }}" \
-              --registry-password "${{ secrets.GITHUB_TOKEN }}" \
-              "$DIGEST_REF"
-
+            # Push all tags BEFORE signing so signature applies to all tag references
+            echo "::group::Push tags"
             tags+=("$SHORT_DIGEST")
+            echo "Tags to push: ${tags[*]}"
             for tag in "${tags[@]}"; do
               FULL_TAG="${BASE_IMG}:${tag}"
               echo "Pushing tag: ${FULL_TAG}"
-              sudo skopeo copy "docker://$DIGEST_REF" "docker://${FULL_TAG}"
+              sudo skopeo copy \
+                --authfile /tmp/skopeo-auth/auth.json \
+                --preserve-digests \
+                --all \
+                "docker://$DIGEST_REF" "docker://${FULL_TAG}"
             done
+            echo "::endgroup::"
+
+            # Sign after all tags exist - signature attaches to digest, all tags inherit
+            echo "::group::Sign image"
+            echo "Signing image: ${DIGEST_REF}"
+            cosign sign -y \
+              --key env://SIGNING_SECRET \
+              --registry-referrers-mode=legacy \
+              --new-bundle-format=false \
+              --registry-username "${{ github.actor }}" \
+              --registry-password "${{ secrets.GITHUB_TOKEN }}" \
+              "$DIGEST_REF"
+            echo "::endgroup::"
+
+            # Verify signature was created successfully (catches silent failures)
+            echo "::group::Verify signature"
+            echo "Verifying signature with cosign.pub..."
+            if cosign verify \
+              --key ./cosign.pub \
+              "$DIGEST_REF"; then
+              echo "Signature verification successful!"
+            else
+              echo "::error::Signature verification failed for ${DIGEST_REF}"
+              exit 1
+            fi
+            echo "::endgroup::"
         env:
           SIGNING_SECRET: ${{ secrets.signing_secret }}
 
