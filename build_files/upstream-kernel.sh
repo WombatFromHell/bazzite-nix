@@ -15,16 +15,17 @@ dnf5 -y remove --no-autoremove \
   kernel-modules-core \
   kernel-modules-extra || exit 1
 
-# use cachyos kernel for fedora instead of bazzite kernel
-dnf5 -y copr enable bieszczaders/kernel-cachyos &&
-  dnf5 -y install --setopt=tsflags=noscripts \
-    kernel-cachyos-core \
-    kernel-cachyos \
-    kernel-cachyos-modules \
-    kernel-cachyos-devel-matched \
-    kernel-cachyos-devel || exit 1
+# Install latest fedora kernel from updates-testing repository
+dnf5 -y install --enablerepo=updates-testing --setopt=tsflags=noscripts \
+  kernel \
+  kernel-core \
+  kernel-modules \
+  kernel-modules-core \
+  kernel-modules-extra \
+  kernel-devel \
+  kernel-devel-matched || exit 1
 
 export KERNEL_VERSION
-KERNEL_VERSION=$(rpm -qa --queryformat '%{VERSION}-%{RELEASE}.%{ARCH}' kernel-cachyos-core)
+KERNEL_VERSION="$(rpm -qa --queryformat '%{VERSION}-%{RELEASE}.%{ARCH}' kernel-core)"
 
 source ./dracut-kernel-fix.sh

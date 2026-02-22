@@ -21,6 +21,12 @@
       "base_image": "ghcr.io/ublue-os/bazzite:testing"
     },
     {
+      "name": "upstream",
+      "base_image": "ghcr.io/ublue-os/bazzite:testing",
+      "build_script": "build-upstream.sh",
+      "image_suffix": "-upstream"
+    },
+    {
       "name": "cachyos",
       "base_image": "ghcr.io/ublue-os/bazzite:testing",
       "build_script": "build-cachyos.sh",
