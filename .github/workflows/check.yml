@@ -64,15 +64,6 @@ jobs:
           echo "registry=ghcr.io/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
           echo "repo=${{ github.event.repository.name }}" >> $GITHUB_OUTPUT
 
-      - name: Generate base cache key
-        id: cache_key
-        shell: bash
-        run: |
-          REPO_HASH=$(echo "${{ github.repository }}" | sha256sum | cut -c1-8)
-          BRANCH_HASH=$(echo "${{ github.ref_name }}" | sha256sum | cut -c1-8)
-          BASE_KEY="digest-${REPO_HASH}-${BRANCH_HASH}"
-          echo "base_cache_key=${BASE_KEY}" >> $GITHUB_OUTPUT
-
       - name: Check all variants
         id: check_all
         if: always()
@@ -80,7 +71,6 @@ jobs:
         env:
           REGISTRY_OWNER: ${{ github.repository_owner }}
           IMAGE_NAME: ${{ github.event.repository.name }}
-          BASE_CACHE_KEY: ${{ steps.cache_key.outputs.base_cache_key }}
           FORCE_BUILD: ${{ inputs.force_build }}
           VARIANTS_CONFIG: ${{ inputs.variants_config }}
         run: |

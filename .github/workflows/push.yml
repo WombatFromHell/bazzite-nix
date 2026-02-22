@@ -67,26 +67,6 @@ jobs:
               --password-stdin \
               --authfile /tmp/skopeo-auth/auth.json
 
-      - name: Generate cache key
-        id: cache_key
-        shell: bash
-        run: |
-          REPO_HASH=$(echo "${{ github.repository }}" | sha256sum | cut -c1-8)
-          BRANCH_HASH=$(echo "${{ github.ref_name }}" | sha256sum | cut -c1-8)
-          VARIANT_HASH=$(echo "${{ matrix.variant_data.variant }}" | sha256sum | cut -c1-8)
-          BASE_KEY="digest-${REPO_HASH}-${BRANCH_HASH}"
-          echo "variant_cache_key=${BASE_KEY}-${variant_hash}" >> $GITHUB_OUTPUT
-          echo "variant_hash=${VARIANT_HASH}" >> $GITHUB_OUTPUT
-
-      - name: Restore variant digest cache
-        uses: actions/cache/restore@v5
-        with:
-          path: .digest-cache-${{ matrix.variant_data.variant }}
-          restore-keys: |
-            ${{ steps.cache_key.outputs.variant_cache_key }}-${{ matrix.variant_data.digest }}
-            ${{ steps.cache_key.outputs.variant_cache_key }}-
-          key: ${{ steps.cache_key.outputs.variant_cache_key }}-${{ matrix.variant_data.digest }}
-
       - name: Compute image references
         id: image_refs
         run: |
@@ -257,14 +237,3 @@ jobs:
             echo "::endgroup::"
         env:
           SIGNING_SECRET: ${{ secrets.signing_secret }}
-
-      - name: Save digest to cache
-        run: |
-          mkdir -p .digest-cache-${{ matrix.variant_data.variant }}
-          echo "${{ matrix.variant_data.digest }}" > .digest-cache-${{ matrix.variant_data.variant }}/last_digest
-
-      - name: Save new cache
-        uses: actions/cache/save@v5
-        with:
-          path: .digest-cache-${{ matrix.variant_data.variant }}
-          key: ${{ steps.cache_key.outputs.variant_cache_key }}-${{ matrix.variant_data.digest }}

@@ -7,7 +7,6 @@
 # Environment Variables:
 #   REGISTRY_OWNER     - GitHub repository owner (e.g., "ublue-os")
 #   IMAGE_NAME         - Repository name (e.g., "bazzite-nix")
-#   BASE_CACHE_KEY     - Base cache key for digest caching
 #   FORCE_BUILD        - "true" to force rebuild regardless of digest
 #   VARIANTS_CONFIG    - Path to variants.json config file
 #
@@ -35,11 +34,6 @@ fi
 
 if [ -z "${IMAGE_NAME+x}" ]; then
   echo "::error::IMAGE_NAME environment variable must be set"
-  exit 1
-fi
-
-if [ -z "${BASE_CACHE_KEY+x}" ]; then
-  echo "::error::BASE_CACHE_KEY environment variable must be set"
   exit 1
 fi
 
@@ -158,48 +152,33 @@ generate_tags() {
 
 # Check if build is needed for this variant
 # Arguments: $1 = prefix, $2 = canonical, $3 = digest, $4 = variant_name
-# Outputs: Sets build_needed and reason variables
+# Outputs: Sets REASON global variable, returns 0 if build needed, 1 if skip
 check_build_needed() {
   local prefix="$1"
   local canonical="$2"
   local digest="$3"
   local variant_name="$4"
-  local cache_dir=".digest-cache-${variant_name}"
-  local cached_digest_file="${cache_dir}/last_digest"
 
-  build_needed=false
-  reason=""
+  REASON=""
 
-  # Check canonical tag existence (only if not force build)
-  if [ "$FORCE_BUILD" != "true" ]; then
-    local target_ref="docker://${prefix}:${canonical}"
-    echo "::debug::Checking if target image exists: ${target_ref}"
-    if skopeo inspect "${target_ref}" >/dev/null 2>&1; then
-      echo "::debug::Target image exists: ${target_ref}"
-      echo "::notice::Variant ${variant_name}: canonical tag already exists, skipping"
-      return 1
-    fi
-    echo "::debug::Target image does not exist: ${target_ref}"
-  fi
-
-  # Check digest cache
+  # Check if force build requested
   if [ "$FORCE_BUILD" = "true" ]; then
-    build_needed=true
-    reason="Force build requested"
-  elif [ ! -f "$cached_digest_file" ]; then
-    build_needed=true
-    reason="No previous cache found"
-  else
-    local cached_digest
-    cached_digest=$(<"$cached_digest_file")
-    if [ "$digest" = "$cached_digest" ]; then
-      reason="Digest unchanged: $digest"
-    else
-      build_needed=true
-      reason="Digest changed from $cached_digest to $digest"
-    fi
+    REASON="Force build requested"
+    return 0
   fi
 
+  # Check canonical tag existence
+  local target_ref="docker://${prefix}:${canonical}"
+  echo "::debug::Checking if target image exists: ${target_ref}"
+  if skopeo inspect "${target_ref}" >/dev/null 2>&1; then
+    echo "::debug::Target image exists: ${target_ref}"
+    echo "::notice::Variant ${variant_name}: canonical tag already exists, skipping"
+    return 1
+  fi
+  echo "::debug::Target image does not exist: ${target_ref}"
+
+  # Target doesn't exist, need to build
+  REASON="Target image does not exist"
   return 0
 }
 
@@ -226,10 +205,6 @@ for ((i = 0; i < variant_count; i++)); do
 
   echo "::group::Checking variant: $variant"
 
-  # Generate variant cache key
-  variant_hash=$(echo "$variant" | sha256sum | cut -c1-8)
-  cache_dir=".digest-cache-${variant}"
-
   # Extract metadata from upstream image
   metadata_output=$(inspect_upstream_image "$base_image") || {
     echo "::error::Failed to inspect upstream image for variant $variant"
@@ -255,15 +230,13 @@ for ((i = 0; i < variant_count; i++)); do
 
   # Check if build is needed
   if ! check_build_needed "$prefix" "$canonical" "$digest" "$variant"; then
-    echo "::notice::Variant $variant: $reason"
+    echo "::notice::Variant $variant: $REASON"
     echo "::endgroup::"
     continue
   fi
 
-  echo "Variant $variant needs building: $reason"
-
-  # Compute final cache key
-  final_key="${BASE_CACHE_KEY}-${variant_hash}-${digest}"
+  echo "Variant $variant needs building: $REASON"
+  needs_build=true
 
   # Build result JSON
   result=$(jq -n \
@@ -275,7 +248,6 @@ for ((i = 0; i < variant_count; i++)); do
     --arg digest "$digest" \
     --arg canonical_tag "$canonical" \
     --arg tags "$tags" \
-    --arg final_cache_key "$final_key" \
     --argjson needs_build "$build_needed" \
     '{
                 variant: $variant,
@@ -286,7 +258,6 @@ for ((i = 0; i < variant_count; i++)); do
                 digest: $digest,
                 canonical_tag: $canonical_tag,
                 tags: $tags,
-                final_cache_key: $final_cache_key,
                 needs_build: $needs_build
             }')
 
