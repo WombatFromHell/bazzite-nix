@@ -1,3 +1,12 @@
+[[customizations.user]]
+name = "testuser"
+password = "somepass"
+groups = ["wheel"]
+
 [[customizations.filesystem]]
 mountpoint = "/"
-minsize = "20 GiB"
+minsize = "28 GiB"
+
+[[customizations.filesystem]]
+mountpoint = "/boot"
+minsize = "2 GiB"
