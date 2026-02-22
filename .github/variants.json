@@ -4,6 +4,7 @@
     "variants": [
       {
         "name": "string - variant identifier (must be unique)",
+        "description": "string - optional variant description",
         "base_image": "string - upstream image reference (registry:tag)",
         "build_script": "string - optional build script in build_files/, defaults to 'build.sh'",
         "image_suffix": "string - optional suffix for output image name",
@@ -23,15 +24,17 @@
     {
       "name": "upstream",
       "base_image": "ghcr.io/ublue-os/bazzite:testing",
+      "description": "Builds the bazzite image with kernel from testing-updates",
       "build_script": "build-upstream.sh",
-      "image_suffix": "-upstream"
+      "image_suffix": "-upstream",
+      "disabled": true
     },
     {
       "name": "cachyos",
       "base_image": "ghcr.io/ublue-os/bazzite:testing",
+      "description": "Builds the bazzite image with kernel from cachyos copr",
       "build_script": "build-cachyos.sh",
-      "image_suffix": "-cachyos",
-      "disabled": true
+      "image_suffix": "-cachyos"
     },
     {
       "name": "nvidia-open",

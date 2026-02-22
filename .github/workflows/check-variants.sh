@@ -119,14 +119,14 @@ compute_canonical_tag() {
 
         while skopeo inspect "docker://${search_base}.${next_num}" >/dev/null 2>&1; do
           echo "${search_base}.${next_num} also exists, checking next..."
-          ((next_num++))
+          : $((next_num++))
         done
         canonical="${search_base}.${next_num}"
       else
         local search_base="$canonical"
         local next_num=1
         while skopeo inspect "docker://${search_base}.${next_num}" >/dev/null 2>&1; do
-          ((next_num++))
+          : $((next_num++))
         done
         canonical="${search_base}.${next_num}"
       fi
@@ -150,14 +150,57 @@ generate_tags() {
   esac
 }
 
+# Get variant count from config
+variant_count=$(jq '.variants | length' "$VARIANTS_CONFIG")
+
+# Get the primary tag for version comparison based on base image tag
+# Arguments: $1 = base_image_tag
+# Outputs: Echoes the primary tag to compare against (stable, testing, or latest)
+get_primary_tag() {
+  local base_image_tag="$1"
+  case "${base_image_tag}" in
+    "stable") echo "stable" ;;
+    "testing") echo "testing" ;;
+    *) echo "latest" ;;
+  esac
+}
+
+# Get parent_version label from a target image
+# Arguments: $1 = image_ref (e.g., "ghcr.io/owner/image:tag")
+# Outputs: Echoes parent_version on success, returns 0 on success, 1 on failure
+get_image_parent_version() {
+  local image_ref="$1"
+  local inspect_output
+  local version
+
+  inspect_output=$(skopeo inspect "docker://${image_ref}" 2>&1)
+  local exit_code=$?
+  
+  if [ $exit_code -ne 0 ]; then
+    echo "::debug::skopeo inspect failed for ${image_ref}: ${inspect_output}"
+    return 1
+  fi
+  
+  version=$(echo "$inspect_output" | jq -r '.Labels["org.opencontainers.image.version"] // empty')
+
+  if [ -n "$version" ] && [ "$version" != "null" ]; then
+    echo "$version"
+    return 0
+  fi
+  
+  echo "::debug::No valid version label found in ${image_ref}"
+  return 1
+}
+
 # Check if build is needed for this variant
-# Arguments: $1 = prefix, $2 = canonical, $3 = digest, $4 = variant_name
+# Arguments: $1 = prefix, $2 = canonical, $3 = variant_name, $4 = base_image_tag, $5 = upstream_parent_version
 # Outputs: Sets REASON global variable, returns 0 if build needed, 1 if skip
 check_build_needed() {
   local prefix="$1"
   local canonical="$2"
-  local digest="$3"
-  local variant_name="$4"
+  local variant_name="$3"
+  local base_image_tag="$4"
+  local upstream_parent_version="$5"
 
   REASON=""
 
@@ -167,12 +210,39 @@ check_build_needed() {
     return 0
   fi
 
-  # Check canonical tag existence
+  # Get the primary tag for version comparison
+  local primary_tag
+  primary_tag=$(get_primary_tag "$base_image_tag")
+  
+  # Check if our primary tag exists and compare parent_version labels
+  local primary_ref="${prefix}:${primary_tag}"
+  echo "::debug::Checking primary tag for version comparison: ${primary_ref}"
+
+  local local_parent_version
+  if local_parent_version=$(get_image_parent_version "$primary_ref"); then
+    echo "::debug::Local parent_version: ${local_parent_version}"
+    echo "::debug::Upstream parent_version: ${upstream_parent_version}"
+
+    if [ "$local_parent_version" = "$upstream_parent_version" ]; then
+      REASON="Upstream unchanged (parent_version: ${upstream_parent_version})"
+      echo "::notice::Variant ${variant_name}: ${REASON}"
+      return 1
+    fi
+    REASON="Upstream changed (${local_parent_version} → ${upstream_parent_version})"
+    echo "Variant ${variant_name}: ${REASON}"
+    return 0
+  fi
+  
+  echo "::notice::Could not fetch parent_version from ${primary_ref} (may not exist), checking canonical tag"
+  echo "::debug::Failed to get parent_version from primary tag ${primary_ref}, falling back to canonical tag check"
+  
+  # Primary tag doesn't exist, check canonical tag
   local target_ref="docker://${prefix}:${canonical}"
-  echo "::debug::Checking if target image exists: ${target_ref}"
+  echo "::debug::Primary tag not found, checking canonical: ${target_ref}"
   if skopeo inspect "${target_ref}" >/dev/null 2>&1; then
     echo "::debug::Target image exists: ${target_ref}"
-    echo "::notice::Variant ${variant_name}: canonical tag already exists, skipping"
+    REASON="Canonical tag already exists"
+    echo "::notice::Variant ${variant_name}: ${REASON}"
     return 1
   fi
   echo "::debug::Target image does not exist: ${target_ref}"
@@ -181,11 +251,6 @@ check_build_needed() {
   REASON="Target image does not exist"
   return 0
 }
-
-# Get variant count from config
-variant_count=$(jq '.variants | length' "$VARIANTS_CONFIG")
-
-# Main processing loop
 for ((i = 0; i < variant_count; i++)); do
   # Read variant from JSON config
   variant=$(jq -r ".variants[$i].name" "$VARIANTS_CONFIG")
@@ -218,8 +283,9 @@ for ((i = 0; i < variant_count; i++)); do
   base_image_tag="${base_image##*:}"
 
   # Standardized image reference components (matching workflow convention)
+  # Note: GHCR normalizes owner names to lowercase
   output_image="${IMAGE_NAME}${image_suffix}"
-  registry="ghcr.io/${REGISTRY_OWNER}"
+  registry="ghcr.io/$(echo "${REGISTRY_OWNER}" | tr '[:upper:]' '[:lower:]')"
   prefix="${registry}/${output_image}"
 
   # Compute canonical tag
@@ -229,8 +295,8 @@ for ((i = 0; i < variant_count; i++)); do
   tags=$(generate_tags "$base_image_tag" "$canonical")
 
   # Check if build is needed
-  if ! check_build_needed "$prefix" "$canonical" "$digest" "$variant"; then
-    echo "::notice::Variant $variant: $REASON"
+  if ! check_build_needed "$prefix" "$canonical" "$variant" "$base_image_tag" "$parent_version"; then
+    # Note: check_build_needed already emits the notice annotation
     echo "::endgroup::"
     continue
   fi
@@ -248,7 +314,7 @@ for ((i = 0; i < variant_count; i++)); do
     --arg digest "$digest" \
     --arg canonical_tag "$canonical" \
     --arg tags "$tags" \
-    --argjson needs_build "$build_needed" \
+    --argjson needs_build "$needs_build" \
     '{
                 variant: $variant,
                 base_image: $base_image,
