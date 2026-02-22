@@ -114,8 +114,7 @@ jobs:
               ${{ steps.labels.outputs.buildah_args }} \
               --build-arg BASE_IMAGE="${{ matrix.variant_data.base_image }}" \
               --build-arg BUILD_SCRIPT="${{ matrix.variant_data.build_script || 'build.sh' }}" \
-              --file ./Containerfile 
-              . && \
+              --file ./Containerfile . && \
               echo "skopeo_ref=containers-storage:${SKOPEO_TAG}" >> $GITHUB_OUTPUT
 
       - name: Check if previous image exists

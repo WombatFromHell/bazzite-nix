@@ -28,6 +28,14 @@
       }
     },
     {
+      "name": "cachyos",
+      "suffix": "-cachyos",
+      "base_image": "ghcr.io/ublue-os/bazzite:testing",
+      "description": "Builds the bazzite image with kernel from cachyos copr",
+      "build_script": "build-cachyos.sh",
+      "latest": true
+    },
+    {
       "name": "upstream",
       "suffix": "-upstream",
       "base_image": "ghcr.io/ublue-os/bazzite:testing",
@@ -35,14 +43,6 @@
       "build_script": "build-upstream.sh",
       "latest": true,
       "disabled": true
-    },
-    {
-      "name": "cachyos",
-      "suffix": "-cachyos",
-      "base_image": "ghcr.io/ublue-os/bazzite:testing",
-      "description": "Builds the bazzite image with kernel from cachyos copr",
-      "build_script": "build-cachyos.sh",
-      "latest": true
     },
     {
       "name": "nvidia-open",

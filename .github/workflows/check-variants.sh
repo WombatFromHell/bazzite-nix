@@ -172,25 +172,25 @@ generate_tags() {
         versioned_tag="${versioned_tag//\{branch\}/$branch}"
         tags_array+=("$versioned_tag")
       fi
-    done <<< "$tags_versioned"
+    done <<<"$tags_versioned"
 
     # Output as comma-separated string
-    (IFS=,; echo "${tags_array[*]}")
+    (
+      IFS=,
+      echo "${tags_array[*]}"
+    )
     return 0
   fi
 
-  # No explicit tags config - use default logic
-  # Suffixed variants without explicit tags is an error
-  if [ -n "$suffix" ]; then
-    echo "::error::Variant '${variant_name}' has suffix but no 'tags' configuration. Suffixed variants must explicitly declare tags." >&2
-    return 1
-  fi
-
-  # Primary variant default logic - add branch and versioned tags
+  # No explicit tags config - use default logic for all variants
+  # Default: branch tag + versioned tags
   tags_array+=("${base_image_tag}" "${base_image_tag}-${canonical}" "${canonical}")
 
   # Output as comma-separated string
-  (IFS=,; echo "${tags_array[*]}")
+  (
+    IFS=,
+    echo "${tags_array[*]}"
+  )
 }
 
 # Get variant count from config
@@ -202,9 +202,9 @@ variant_count=$(jq '.variants | length' "$VARIANTS_CONFIG")
 get_primary_tag() {
   local base_image_tag="$1"
   case "${base_image_tag}" in
-    "stable") echo "stable" ;;
-    "testing") echo "testing" ;;
-    *) echo "latest" ;;
+  "stable") echo "stable" ;;
+  "testing") echo "testing" ;;
+  *) echo "latest" ;;
   esac
 }
 
@@ -218,19 +218,19 @@ get_image_parent_version() {
 
   inspect_output=$(skopeo inspect "docker://${image_ref}" 2>&1)
   local exit_code=$?
-  
+
   if [ $exit_code -ne 0 ]; then
     echo "::debug::skopeo inspect failed for ${image_ref}: ${inspect_output}"
     return 1
   fi
-  
+
   version=$(echo "$inspect_output" | jq -r '.Labels["org.opencontainers.image.version"] // empty')
 
   if [ -n "$version" ] && [ "$version" != "null" ]; then
     echo "$version"
     return 0
   fi
-  
+
   echo "::debug::No valid version label found in ${image_ref}"
   return 1
 }
@@ -256,7 +256,7 @@ check_build_needed() {
   # Get the primary tag for version comparison
   local primary_tag
   primary_tag=$(get_primary_tag "$base_image_tag")
-  
+
   # Check if our primary tag exists and compare parent_version labels
   local primary_ref="${prefix}:${primary_tag}"
   echo "::debug::Checking primary tag for version comparison: ${primary_ref}"
@@ -275,10 +275,10 @@ check_build_needed() {
     echo "Variant ${variant_name}: ${REASON}"
     return 0
   fi
-  
+
   echo "::notice::Could not fetch parent_version from ${primary_ref} (may not exist), checking canonical tag"
   echo "::debug::Failed to get parent_version from primary tag ${primary_ref}, falling back to canonical tag check"
-  
+
   # Primary tag doesn't exist, check canonical tag
   local target_ref="docker://${prefix}:${canonical}"
   echo "::debug::Primary tag not found, checking canonical: ${target_ref}"
