@@ -24,7 +24,8 @@
       "name": "cachyos",
       "base_image": "ghcr.io/ublue-os/bazzite:testing",
       "build_script": "build-cachyos.sh",
-      "image_suffix": "-cachyos"
+      "image_suffix": "-cachyos",
+      "disabled": true
     },
     {
       "name": "nvidia-open",
