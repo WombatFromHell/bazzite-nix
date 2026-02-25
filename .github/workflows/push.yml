@@ -117,48 +117,63 @@ jobs:
               --file ./Containerfile . && \
               echo "skopeo_ref=containers-storage:${SKOPEO_TAG}" >> $GITHUB_OUTPUT
 
-      - name: Check if previous image exists
-        id: check_prev
-        run: |
-          if [ -n "${{ matrix.variant_data.prev_ref }}" ]; then
-            PREV_REF="${{ matrix.variant_data.prev_ref }}"
-            echo "Checking existence of previous image: $PREV_REF"
-            if skopeo inspect "docker://${PREV_REF}" > /dev/null 2>&1; then
-              echo "prev_ref_exists=true" >> $GITHUB_OUTPUT
-            else
-              echo "prev_ref_exists=false" >> $GITHUB_OUTPUT
-            fi
-          else
-            echo "No previous build reference available"
-            echo "prev_ref_exists=false" >> $GITHUB_OUTPUT
-          fi
-
       - name: Run Rechunker
-        if: inputs.skip_rechunk != 'true' && steps.check_prev.outputs.prev_ref_exists == 'true'
+        if: inputs.skip_rechunk != 'true'
         id: rechunk
-        uses: ublue-os/legacy-rechunk@a925083d9af7cb04b3e2a6e8c01bfa495f38b710 # v1.0.0
-        with:
-          rechunk: "ghcr.io/ublue-os/legacy-rechunk:v1.0.0-x86_64"
-          ref: "raw-img"
-          prev-ref: "${{ matrix.variant_data.prev_ref }}"
-          labels: ${{ steps.labels.outputs.rechunk_labels }}
-          skip_compression: true
-          max-layers: 45
+        run: |
+          # Clear labels before rechunk (required for centos-bootc compatibility)
+          container=$(sudo buildah from localhost/raw-img)
+          sudo buildah config --label "-" "$container"
+          sudo buildah commit --identity-label=false --rm "$container" localhost/raw-img
+          sudo podman run --rm --privileged --volume /var/lib/containers:/var/lib/containers \
+              quay.io/centos-bootc/centos-bootc:stream10 \
+              rpm-ostree compose build-chunked-oci \
+              --bootc --max-layers 96 --format-version 2 \
+              --from localhost/raw-img --output containers-storage:localhost/chunked-img
+
+          # Cleanup raw-img if it still exists (rechunker may have consumed it)
+          sudo podman image exists localhost/raw-img && sudo podman rmi localhost/raw-img || true
+
+          echo "ref=containers-storage:localhost/chunked-img" >> "$GITHUB_OUTPUT"
+
+      - name: Validate rechunk output
+        if: inputs.skip_rechunk != 'true'
+        run: |
+          if [ -z "${{ steps.rechunk.outputs.ref }}" ]; then
+            echo "::error::Rechunk step did not produce a valid image reference"
+            exit 1
+          fi
+          echo "✅ Rechunk output validated: ${{ steps.rechunk.outputs.ref }}"
+
+      - name: Relabel Image
+        if: inputs.skip_rechunk != 'true'
+        id: relabel
+        run: |
+          IMAGE_REF="${{ steps.rechunk.outputs.ref }}"
+
+          # Reapply labels from build step
+          container=$(sudo buildah from "$IMAGE_REF")
+          while IFS= read -r line; do
+            [ -n "$line" ] && sudo buildah config --label "$line" "$container"
+          done <<< "${{ steps.labels.outputs.rechunk_labels }}"
+          sudo buildah commit --identity-label=false --rm "$container" "$IMAGE_REF"
+
+          echo "source_ref=$IMAGE_REF" >> "$GITHUB_OUTPUT"
+
+      - name: Set source reference
+        id: source_ref
+        run: |
+          # Use rechunked image if available, otherwise use original build
+          if [ -n "${{ steps.relabel.outputs.source_ref }}" ]; then
+            echo "source_ref=${{ steps.relabel.outputs.source_ref }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "source_ref=${{ steps.build_image.outputs.skopeo_ref }}" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Get build digest
         id: build_digest
         run: |
-          SKIP_RECHUNK="${{ inputs.skip_rechunk }}"
-          RECHUNK_REF="${{ steps.rechunk.outputs.ref }}"
-          SKOPEO_REF="${{ steps.build_image.outputs.skopeo_ref }}"
-
-          if [ "$SKIP_RECHUNK" == "true" ]; then
-            IMAGE_REF="${SKOPEO_REF}"
-          elif [ -n "$RECHUNK_REF" ]; then
-            IMAGE_REF="${RECHUNK_REF}"
-          else
-            IMAGE_REF="${SKOPEO_REF}"
-          fi
+          IMAGE_REF="${{ steps.source_ref.outputs.source_ref }}"
 
           if [ -z "$IMAGE_REF" ]; then
             echo "::error::No valid image reference found to inspect"
@@ -184,6 +199,8 @@ jobs:
             SOURCE_REF="${{ steps.build_digest.outputs.source_ref }}"
             IMAGE_DIGEST="${{ steps.build_digest.outputs.full_build_digest }}"
             SHORT_DIGEST="${{ steps.build_digest.outputs.build_digest }}"
+
+            # Use pre-computed tags from check-variants.sh
             IFS=',' read -r -a tags <<< "${{ matrix.variant_data.tags }}"
 
             # Use standardized image references from image_refs step
@@ -197,8 +214,6 @@ jobs:
             echo "Pushing primary image: ${DIGEST_REF}"
             sudo skopeo copy \
               --authfile /tmp/skopeo-auth/auth.json \
-              --dest-compress-format zstd:chunked \
-              --dest-compress-level 3 \
               "$SOURCE_REF" "docker://$DIGEST_REF"
             echo "::endgroup::"
 
