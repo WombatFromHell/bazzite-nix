@@ -106,6 +106,8 @@ sudoif command *args:
 # Build the image using the specified parameters
 # Usage: just build [image:tag] (e.g., just build bazzite-nix-cachyos:latest)
 #
+# Builds directly in rootful podman storage to avoid copying image layers.
+#
 # Defaults can be overridden via environment variables: IMAGE_NAME, IMAGE_TAG, IMAGE_BUILD_SCRIPT
 
 build $image_spec="{{ image_name }}:{{ image_tag }}" $build_script=image_build_script $base_image=base_image $dx="0" $hwe="0" $gdx="0":
@@ -145,12 +147,142 @@ build $image_spec="{{ image_name }}:{{ image_tag }}" $build_script=image_build_s
         BUILD_ARGS+=("--build-arg" "SHA_HEAD_SHORT=$(git rev-parse --short HEAD)")
     fi
 
-    podman build \
+    sudo podman build \
         "${BUILD_ARGS[@]}" \
         --pull=newer \
         --security-opt label=disable \
         --tag "${target_image}:${tag}" \
         .
+
+# Rechunk a container image using centos-bootc for optimized layer distribution.
+# This matches the GitHub Actions rechunk workflow for local builds.
+#
+# Arguments:
+#   $target_image - The tag you want to apply to the image (default: aurora).
+#   $tag - The tag for the image (default: lts).
+#   $skip - Skip rechunk step (default: "0").
+#
+# Usage: just rechunk [image:tag] [skip]
+#
+# Example usage:
+#   just rechunk bazzite-nix:testing
+#   just rechunk bazzite-nix:testing 1  # skip rechunk
+#
+# Defaults can be overridden via environment variables: IMAGE_NAME, IMAGE_TAG
+
+rechunk $image_spec="{{ image_name }}:{{ image_tag }}" $skip="0":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    # Parse image_spec into target_image and tag
+    image_spec_val="{{ image_spec }}"
+    default_target_val="{{ image_name }}"
+    default_tag_val="{{ image_tag }}"
+    if [[ -n "$image_spec_val" ]]; then
+        if [[ "$image_spec_val" == *":"* ]]; then
+            target_image="${image_spec_val%:*}"
+            tag="${image_spec_val#*:}"
+        else
+            target_image="${image_spec_val}"
+            tag="${default_tag_val}"
+        fi
+    else
+        target_image="${default_target_val}"
+        tag="${default_tag_val}"
+    fi
+
+    if [[ "$skip" == "1" ]]; then
+        echo "⏭️  Skipping rechunk step"
+        exit 0
+    fi
+
+    echo "🔄 Rechunking image ${target_image}:${tag}..."
+
+    # Ensure image exists in rootful storage
+    if ! sudo podman image exists "${target_image}:${tag}" 2>/dev/null; then
+        echo "❌ Image ${target_image}:${tag} not found in rootful storage"
+        echo "   Build it first with: just build ${image_spec}"
+        exit 1
+    fi
+
+    # Create intermediate raw-img tag for rechunking
+    echo "Creating intermediate image for rechunking..."
+    sudo podman tag "${target_image}:${tag}" localhost/raw-img
+
+    # Clear labels to avoid duplication during rechunk
+    echo "Clearing existing labels..."
+    container=$(sudo buildah from localhost/raw-img)
+    sudo buildah config --label "-" "$container"
+    sudo buildah commit --identity-label=false --rm "$container" localhost/raw-img
+
+    # Run rechunker using centos-bootc
+    echo "Running centos-bootc rechunker with max-layers 96..."
+    sudo podman run --rm --privileged --volume /var/lib/containers:/var/lib/containers \
+        quay.io/centos-bootc/centos-bootc:{{ centos_version }} \
+        rpm-ostree compose build-chunked-oci \
+        --bootc --max-layers 96 --format-version 2 \
+        --from localhost/raw-img --output containers-storage:localhost/chunked-img
+
+    # Clean up intermediate image
+    echo "Cleaning up intermediate image..."
+    sudo podman untag localhost/raw-img && sudo podman rmi localhost/raw-img
+
+    # Re-tag the rechunked image
+    echo "Tagging rechunked image as ${target_image}:${tag}..."
+    sudo podman tag localhost/chunked-img "${target_image}:${tag}"
+
+    echo "✅ Rechunk complete: ${target_image}:${tag}"
+
+# Build and rechunk a container image in one step.
+# Combines the build and rechunk targets for convenience.
+#
+# Arguments:
+#   $target_image - The tag you want to apply to the image (default: aurora).
+#   $tag - The tag for the image (default: lts).
+#   $dx - Enable DX (default: "0").
+#   $hwe - Enable HWE (default: "0").
+#   $gdx - Enable GDX (default: "0").
+#   $skip_rechunk - Skip rechunk step (default: "0").
+#
+# Usage: just rebuild [image:tag] [tag] [dx] [hwe] [gdx] [skip_rechunk]
+#
+# Example usage:
+#   just rebuild bazzite-nix:testing
+#   just rebuild bazzite-nix:testing testing 0 0 0 1  # skip rechunk
+#
+# Defaults can be overridden via environment variables: IMAGE_NAME, IMAGE_TAG, IMAGE_BUILD_SCRIPT
+
+rebuild $image_spec="{{ image_name }}:{{ image_tag }}" $tag="" $dx="0" $hwe="0" $gdx="0" $skip_rechunk="0":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    # Parse image_spec into target_image and tag
+    image_spec_val="{{ image_spec }}"
+    default_target_val="{{ image_name }}"
+    default_tag_val="{{ image_tag }}"
+    if [[ -n "$image_spec_val" ]]; then
+        if [[ "$image_spec_val" == *":"* ]]; then
+            target_image="${image_spec_val%:*}"
+            tag="${image_spec_val#*:}"
+        else
+            target_image="${image_spec_val}"
+            tag="${default_tag_val}"
+        fi
+    else
+        target_image="${default_target_val}"
+        tag="${default_tag_val}"
+    fi
+
+    # Override tag if explicitly provided
+    if [[ -n "{{ tag }}" ]]; then
+        tag="{{ tag }}"
+    fi
+
+    # Build the image first
+    just --unstable build "{{ image_spec }}" "{{ tag }}" "{{ dx }}" "{{ hwe }}" "{{ gdx }}"
+
+    # Then rechunk (unless skipped)
+    just --unstable rechunk "${target_image}:${tag}" "{{ skip_rechunk }}"
 
 # Build a container image directly in rootful podman storage.
 # This avoids the need to copy images from user to rootful storage.
@@ -184,106 +316,10 @@ _build-rootful $target_image $tag:
         --tag "${target_image}:${tag}" \
         .
 
-# Command: _rootful_load_image
-# Description: This script checks if the current user is root or running under sudo. If not, it attempts to resolve the image tag using podman inspect.
-#              If the image is found, it loads it into rootful podman. If the image is not found, it pulls it from the repository.
-#
-# Parameters:
-#   $target_image - The name of the target image to be loaded or pulled.
-#   $tag - The tag of the target image to be loaded or pulled. Default is 'default_tag'.
-#
-# Example usage:
-#   _rootful_load_image my_image latest
-#
-# Steps:
-# 1. Check if the script is already running as root or under sudo.
-# 2. Check if target image is in the non-root podman container storage)
-# 3. If the image is found, load it into rootful podman using podman scp.
-# 4. If the image is not found, pull it from the remote repository into reootful podman.
-
-_rootful_load_image $target_image=image_name $tag=default_tag:
-    #!/usr/bin/bash
-    set -euo pipefail
-
-    # Check if already running as root or under sudo
-    if [[ -n "${SUDO_USER:-}" || "${UID}" -eq "0" ]]; then
-        echo "Already root or running under sudo, no need to load image from user podman."
-        exit 0
-    fi
-
-    # Get user image ID
-    USER_IMG_ID=$(podman images --filter reference="${target_image}:${tag}" --format json | jq -r '.[0].Id')
-
-    # Check if user image exists
-    if [[ -z "$USER_IMG_ID" ]]; then
-        echo "Image ${target_image}:${tag} not found in user podman, pulling into rootful podman"
-        just sudoif podman pull "${target_image}:${tag}"
-        exit 0
-    fi
-
-    # Get rootful image ID (may be empty if not present)
-    ROOT_IMG_ID=$(just sudoif podman images --filter reference="${target_image}:${tag}" --format json | jq -r '.[0].Id' || echo "")
-
-    # Only copy if rootful image is missing or different from user image
-    if [[ -z "$ROOT_IMG_ID" ]]; then
-        echo "Image ${target_image}:${tag} not found in rootful podman, copying from user"
-        COPYTMP=$(mktemp -p "${PWD}" -d -t _build_podman_scp.XXXXXXXXXX)
-        just sudoif TMPDIR=${COPYTMP} podman image scp ${UID}@localhost::"${target_image}:${tag}" root@localhost::"${target_image}:${tag}"
-        rm -rf "${COPYTMP}"
-    elif [[ "$ROOT_IMG_ID" != "$USER_IMG_ID" ]]; then
-        echo "Image ${target_image}:${tag} differs between user and rootful podman, copying from user"
-        COPYTMP=$(mktemp -p "${PWD}" -d -t _build_podman_scp.XXXXXXXXXX)
-        just sudoif TMPDIR=${COPYTMP} podman image scp ${UID}@localhost::"${target_image}:${tag}" root@localhost::"${target_image}:${tag}"
-        rm -rf "${COPYTMP}"
-    else
-        echo "Image ${target_image}:${tag} already exists in rootful podman with matching ID, skipping copy"
-    fi
-
-# Command: _sync-user-to-rootful
-# Description: Always copy an image from user podman storage to rootful podman storage.
-#              Unlike _rootful_load_image, this does NOT check if the image exists or matches.
-#              It always attempts to copy, ensuring the latest layers are available in rootful storage.
-#              Does NOT clean or remove existing images - just overwrites via scp.
-#
-# Parameters:
-#   $target_image - The name of the target image to sync.
-#   $tag - The tag of the target image. Default is 'default_tag'.
-#
-# Example usage:
-#   _sync-user-to-rootful my_image latest
-#
-# Returns:
-#   0 - Success (image copied or already running as root)
-#   1 - Failure (image not found in user storage)
-
-[private]
-_sync-user-to-rootful $target_image=image_name $tag=default_tag:
-    #!/usr/bin/bash
-    set -euo pipefail
-
-    # Check if already running as root or under sudo
-    if [[ -n "${SUDO_USER:-}" || "${UID}" -eq "0" ]]; then
-        echo "Already root or running under sudo, no sync needed."
-        exit 0
-    fi
-
-    # Check if image exists in user storage
-    USER_IMG_ID=$(podman images --filter reference="${target_image}:${tag}" --format json | jq -r '.[0].Id')
-
-    if [[ -z "$USER_IMG_ID" ]]; then
-        echo "❌ Image ${target_image}:${tag} not found in user podman storage."
-        exit 1
-    fi
-
-    # Always copy from user to rootful (no ID check - always sync)
-    echo "Syncing image ${target_image}:${tag} from user to rootful podman storage..."
-    COPYTMP=$(mktemp -p "${PWD}" -d -t _build_podman_scp.XXXXXXXXXX)
-    just sudoif TMPDIR=${COPYTMP} podman image scp ${UID}@localhost::"${target_image}:${tag}" root@localhost::"${target_image}:${tag}"
-    rm -rf "${COPYTMP}"
-    echo "✅ Synced image ${target_image}:${tag} to rootful podman storage."
-
 # Build a bootc bootable image using Bootc Image Builder (BIB)
 # Converts a container image to a bootable image
+# Assumes the source image exists in rootful podman storage.
+#
 # Parameters:
 #   target_image: The name of the image to build (ex. localhost/fedora)
 #   tag: The tag of the image to build (ex. latest)
@@ -654,7 +690,7 @@ _remove-image-rootful $target_image $tag:
 #   $clean - Clean disk cache only (default: 0)
 #
 # Behavior:
-#   - Local images (localhost/*): Always syncs from user storage to rootful storage
+#   - Local images (localhost/*): Checks rootful storage, errors if not found
 #   - Remote images: Pulls to rootful storage if not cached or if force_pull=1
 #   - Set force_pull=1 to always pull remote images
 #   - Set clean=1 to remove cached disk image before rebuilding
@@ -709,18 +745,13 @@ _run-vm $target_image $tag $type $config $output_dir="" $force_pull="0" $clean="
         echo "Checking for container image ${target_image}:${tag}..."
 
         if [[ "$is_local" == "true" ]]; then
-            # Local image: always sync from user storage to rootful storage
-            # This ensures we have the absolute latest layers before building
-            just --unstable _sync-user-to-rootful "$target_image" "$tag" || {
-                echo "⚠️  Image ${target_image}:${tag} not found in user storage."
-                # Check if it exists in rootful storage at least
-                if ! just --unstable _check-image-exists "$target_image" "$tag"; then
-                    echo "❌ Image ${target_image}:${tag} not found in rootful storage either."
-                    echo "   Build it first with: just build-qcow2 ${target_image}:${tag}"
-                    exit 1
-                fi
-                echo "✅ Using existing image from rootful storage."
-            }
+            # Local image: check if it exists in rootful storage
+            if ! just --unstable _check-image-exists "$target_image" "$tag"; then
+                echo "❌ Image ${target_image}:${tag} not found in rootful storage."
+                echo "   Build it first with: just build-qcow2 ${target_image}:${tag}"
+                exit 1
+            fi
+            echo "✅ Found local image ${target_image}:${tag} in rootful storage."
         else
             # Remote image: check if cached in rootful, pull if needed or if force_pull
             if [[ "$force_pull" == "1" ]]; then
