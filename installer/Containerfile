@@ -1,0 +1,23 @@
+# Titanoboa Live ISO Payload Builder
+# Run with: sudo podman build --cap-add sys_admin --security-opt label=disable \
+#           --pull=never -t localhost/bazzite-nix-live:latest -f installer/Containerfile .
+#
+# Build arguments:
+#   BASE_IMAGE - The base bazzite-nix image to use (default: localhost/bazzite-nix:testing)
+#   INSTALL_IMAGE_PAYLOAD - The container image to install (default: same as BASE_IMAGE)
+#
+# Note: BASE_IMAGE must exist in rootful storage before building.
+
+ARG BASE_IMAGE=${BASE_IMAGE:-localhost/bazzite-nix:testing}
+ARG INSTALL_IMAGE_PAYLOAD=${INSTALL_IMAGE_PAYLOAD:-${BASE_IMAGE}}
+
+FROM $BASE_IMAGE
+
+ARG BASE_IMAGE
+ARG INSTALL_IMAGE_PAYLOAD
+
+RUN --mount=type=bind,source=./installer,target=/src \
+    env \
+        BASE_IMAGE="$BASE_IMAGE" \
+        INSTALL_IMAGE_PAYLOAD="$INSTALL_IMAGE_PAYLOAD" \
+    /src/build.sh

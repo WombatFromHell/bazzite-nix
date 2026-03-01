@@ -154,6 +154,15 @@ build $image_spec="{{ image_name }}:{{ image_tag }}" $build_script=image_build_s
         --tag "${target_image}:${tag}" \
         .
 
+build-stable:
+    just --unstable build "bazzite-nix:stable" "build.sh" "ghcr.io/ublue-os/bazzite:stable"
+
+build-testing:
+    just --unstable build "bazzite-nix:testing" "build.sh" "ghcr.io/ublue-os/bazzite:testing"
+
+build-cachyos:
+    just --unstable build "bazzite-nix-cachyos:latest" "build-cachyos.sh" "ghcr.io/ublue-os/bazzite:testing"
+
 # Rechunk a container image using centos-bootc for optimized layer distribution.
 # This matches the GitHub Actions rechunk workflow for local builds.
 #
@@ -291,8 +300,9 @@ rebuild $image_spec="{{ image_name }}:{{ image_tag }}" $tag="" $dx="0" $hwe="0" 
 # Parameters:
 #   $target_image - The name of the target image (ex. localhost/bazzite-nix)
 #   $tag - The tag of the image (ex. testing)
+#   $base_image - The base image to build from (default: ghcr.io/ublue-os/bazzite:stable)
 
-_build-rootful $target_image $tag:
+_build-rootful $target_image $tag $base_image=base_image:
     #!/usr/bin/env bash
     set -euo pipefail
 
@@ -303,7 +313,7 @@ _build-rootful $target_image $tag:
     BUILD_ARGS+=("--build-arg" "ENABLE_DX=0")
     BUILD_ARGS+=("--build-arg" "ENABLE_HWE=0")
     BUILD_ARGS+=("--build-arg" "ENABLE_GDX=0")
-    BUILD_ARGS+=("--build-arg" "BASE_IMAGE={{ base_image }}")
+    BUILD_ARGS+=("--build-arg" "BASE_IMAGE=${base_image}")
     BUILD_ARGS+=("--build-arg" "BUILD_SCRIPT=build.sh")
     if [[ -z "$(git status -s)" ]]; then
         BUILD_ARGS+=("--build-arg" "SHA_HEAD_SHORT=$(git rev-parse --short HEAD)")
@@ -331,9 +341,30 @@ _build-bib $target_image $tag $type $config:
     #!/usr/bin/env bash
     set -euo pipefail
 
+    # Ensure image exists in rootful storage
+    if ! sudo podman image exists "${target_image}:${tag}" 2>/dev/null; then
+        echo "Image ${target_image}:${tag} not found in rootful storage."
+        echo "Checking rootless storage..."
+        if podman image exists "${target_image}:${tag}" 2>/dev/null; then
+            echo "Found in rootless storage, copying to rootful..."
+            podman save "${target_image}:${tag}" | sudo podman load
+        else
+            echo "Image not found in rootless storage either. Pulling..."
+            sudo podman pull "${target_image}:${tag}"
+        fi
+    fi
+
     args="--type ${type} "
     args+="--use-librepo=True "
     args+="--rootfs=btrfs"
+
+    # For container-storage:, strip localhost/ prefix as it causes parsing issues
+    # BIB expects: container-storage:imagename:tag (not container-storage:localhost/imagename:tag)
+    if [[ "$target_image" == localhost/* ]]; then
+        source_image="container-storage:${target_image#localhost/}:${tag}"
+    else
+        source_image="container-storage:${target_image}:${tag}"
+    fi
 
     BUILDTMP=$(mktemp -p "${PWD}" -d -t _build-bib.XXXXXXXXXX)
 
@@ -349,7 +380,7 @@ _build-bib $target_image $tag $type $config:
       -v /var/lib/containers/storage:/var/lib/containers/storage \
       "${bib_image}" \
       ${args} \
-      "${target_image}:${tag}"
+      "$source_image"
 
     mkdir -p output
     sudo mv -f $BUILDTMP/* output/
@@ -434,13 +465,40 @@ build-raw $image_spec="":
     just _build-rootful "$target_image" "$tag"
     just _build-bib "$target_image" "$tag" "raw" "image.toml"
 
-# Build an ISO virtual machine image
+# Build a live ISO using titanoboa (container-native ISO contract)
+# This creates a live ISO that boots into an installer session.
+#
+# Usage: just build-iso-titanoboa [image:tag] (e.g., just build-iso-titanoboa bazzite-nix:testing)
+# Examples:
+#   just build-iso-titanoboa localhost/bazzite-nix:testing
+#   just build-iso-titanoboa bazzite-nix-cachyos:latest
+#
+# The ISO will be created in ./output/ directory.
+#
+# Workflow:
+#   1. Build the container image in rootful storage
+#   2. Build the titanoboa live ISO payload image
 
-# Usage: just build-iso [image:tag] (e.g., just build-iso bazzite-nix-cachyos:latest)
+# 3. Run titanoboa/main.sh to generate the ISO
 [group('Build Virtual Machine Image')]
 build-iso $image_spec="":
+    just --unstable build-iso-titanoboa "{{ image_spec }}"
+
+# Build a live ISO using titanoboa (container-native ISO contract)
+# This creates a live ISO that boots into an installer session.
+#
+# Usage: just build-iso-titanoboa [image:tag] [base_image]
+# Examples:
+#   just build-iso-titanoboa bazzite-nix:testing
+#   just build-iso-titanoboa bazzite-nix-cachyos:latest ghcr.io/ublue-os/bazzite:testing
+#
+# If the target image already exists in rootful storage, rebuild is skipped.
+
+# Specify base_image to override the source image when building.
+[group('Build Virtual Machine Image')]
+build-iso-titanoboa $image_spec="" $base_image="":
     #!/usr/bin/env bash
-    set -euo pipefail
+    set -euxo pipefail
 
     # Parse image_spec into target_image and tag
     image_spec_val="{{ image_spec }}"
@@ -463,8 +521,292 @@ build-iso $image_spec="":
         tag="${default_tag_val}"
     fi
 
-    just _build-rootful "$target_image" "$tag"
-    just _build-bib "$target_image" "$tag" "iso" "iso.toml"
+    # Check if image already exists in rootful storage
+    if sudo podman image exists "${target_image}:${tag}" 2>/dev/null; then
+        echo "✅ Image ${target_image}:${tag} already exists in rootful storage"
+    else
+        echo "🔨 Building base image ${target_image}:${tag}..."
+        # Use provided base_image or fall back to default
+        if [[ -n "{{ base_image }}" ]]; then
+            just --unstable _build-rootful "$target_image" "$tag" "{{ base_image }}"
+        else
+            just --unstable _build-rootful "$target_image" "$tag"
+        fi
+    fi
+
+    # Verify image exists in rootful storage
+    if ! sudo podman image exists "${target_image}:${tag}"; then
+        echo "❌ Image ${target_image}:${tag} not found in rootful storage after build"
+        exit 1
+    fi
+    echo "✅ Found image ${target_image}:${tag} in rootful storage"
+
+    live_image="${target_image}-live:${tag}"
+
+    # Check if live payload image already exists
+    if sudo podman image exists "${live_image}" 2>/dev/null; then
+        echo "✅ Live payload image ${live_image} already exists, skipping build"
+    else
+        echo "🔨 Building titanoboa live ISO payload..."
+        # Run installer in a container, keep container for commit
+        container_name="titanoboa-payload"
+
+        sudo podman run --replace --name "${container_name}" \
+            --privileged \
+            --cap-add sys_admin \
+            --security-opt label=disable \
+            -v "$(pwd)/installer:/src:ro" \
+            --env BASE_IMAGE="${target_image}:${tag}" \
+            --env INSTALL_IMAGE_PAYLOAD="${target_image}:${tag}" \
+            "${target_image}:${tag}" \
+            /src/build.sh
+
+        # Commit as payload image
+        sudo podman commit "${container_name}" "${live_image}"
+        sudo podman rm -f "${container_name}" 2>/dev/null || true
+    fi
+
+    echo "📀 Generating live ISO with titanoboa..."
+    mkdir -p "${HOME}/.cache/bazzite-nix/iso"
+    export TITANOBOA_CTR_IMAGE="${live_image}"
+    export TITANOBOA_OUTPUT_DIR="${HOME}/.cache/bazzite-nix/iso"
+    bash ./installer/main.sh || {
+      # Clean up on failure/cancellation
+      echo "ISO build cancelled or failed"
+      exit 1
+    }
+
+    echo "✅ Live ISO created: ${HOME}/.cache/bazzite-nix/iso/*.iso"
+
+# Verify ISO bootability using xorriso (if available)
+# Includes checks for:
+#   - Bootable flag
+#   - UEFI boot entry in El Torito catalog
+#   - Required files on ISO 9660 filesystem
+#   - EFI partition presence and contents
+#   - EFI boot loader (BOOTX64.EFI/BOOTIA32.EFI)
+#   - EFI grub.cfg with menu entries
+#
+# Usage: just verify-iso [iso_path]
+# Examples:
+#   just verify-iso output/bazzite-nix-Live.iso
+
+# just verify-iso  # uses latest ISO in output/ or ~/.cache/bazzite-nix/iso/
+[group('Test')]
+verify-iso $iso_path="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    if [[ -n "{{ iso_path }}" ]]; then
+        iso_file="{{ iso_path }}"
+    else
+        iso_file=$(find output -name "*.iso" -type f -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2-)
+        if [[ -z "$iso_file" ]]; then
+            cache_iso_dir="$HOME/.cache/bazzite-nix/iso"
+            if [[ -d "$cache_iso_dir" ]]; then
+                iso_file=$(find "$cache_iso_dir" -name "*.iso" -type f -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2-)
+            fi
+        fi
+        if [[ -z "$iso_file" ]]; then
+            echo "❌ No ISO found in output/ or ~/.cache/bazzite-nix/iso/"
+            exit 1
+        fi
+    fi
+
+    if [[ ! -f "$iso_file" ]]; then
+        echo "❌ ISO not found: $iso_file"
+        exit 1
+    fi
+
+    # Check required tools
+    missing_tools=()
+    command -v xorriso &>/dev/null || missing_tools+=("xorriso")
+    command -v isoinfo &>/dev/null || missing_tools+=("isoinfo")
+    command -v file &>/dev/null || missing_tools+=("file")
+
+    if [[ ${#missing_tools[@]} -gt 0 ]]; then
+        echo "❌ Missing required tools: ${missing_tools[*]}"
+        echo "   Install with: sudo dnf install libisoburn p7zip file"
+        exit 1
+    fi
+
+    echo "🧪 Verifying ISO: $iso_file"
+    echo ""
+
+    # Check bootability
+    echo "=== Bootable Check ==="
+    if file "$iso_file" | grep -q "bootable"; then
+        echo "✅ ISO is bootable"
+    else
+        echo "❌ ISO is NOT bootable"
+        exit 1
+    fi
+    echo ""
+
+    # El Torito boot info
+    echo "=== El Torito Boot Record ==="
+    el_torito_output=$(xorriso -indev "$iso_file" -report_el_torito 2>&1)
+    echo "$el_torito_output" | grep -E "(El Torito|Boot record|Boot media)" || true
+    echo ""
+
+    # Check for UEFI boot entry
+    echo "=== UEFI Boot Check ==="
+    if echo "$el_torito_output" | grep -qi "UEFI"; then
+        echo "✅ UEFI boot entry found"
+    else
+        echo "❌ UEFI boot entry NOT found"
+        exit 1
+    fi
+    echo ""
+
+    # Required files on ISO filesystem (Rock Ridge preserves case)
+    files=(
+      "/images/pxeboot/vmlinuz"
+      "/images/pxeboot/initrd.img"
+      "/liveos/squashfs.img"
+      "/boot/grub2/grub.cfg"
+    )
+    echo "=== Required Files (ISO 9660/Rock Ridge) ==="
+    for path in "${files[@]}"; do
+      if isoinfo -f -i "$iso_file" 2>/dev/null | grep -qi "^${path}"; then
+          echo "✅ ${path}"
+      else
+          echo "❌ ${path} (MISSING)"
+          exit 1
+      fi
+    done
+    echo ""
+
+    # Extract and verify EFI partition
+    echo "=== EFI Partition Check ==="
+
+    # Use cache directory for temp files to avoid tmpfs/quota issues
+    cache_work_dir="${HOME}/.cache/bazzite-nix/iso/.verify-work"
+    mkdir -p "$cache_work_dir"
+    trap "rm -rf '$cache_work_dir'" EXIT
+
+    efi_start=$(fdisk -l "$iso_file" 2>/dev/null | grep -E "EFI System|efi" | awk '{print $2}' | head -1)
+    if [[ -n "$efi_start" ]]; then
+        echo "✅ EFI partition found (start sector: $efi_start)"
+
+        efi_img="$cache_work_dir/efi-part.img"
+        efi_mount="$cache_work_dir/efi-mount"
+        mkdir -p "$efi_mount"
+
+        sector_size=512
+        efi_size=$(fdisk -l "$iso_file" 2>/dev/null | grep -E "EFI System|efi" | awk '{print $4}' | head -1)
+
+        dd if="$iso_file" of="$efi_img" bs="$sector_size" skip="$efi_start" count="$efi_size" 2>/dev/null
+
+        # Mount and check EFI partition contents
+        if sudo mount -o loop "$efi_img" "$efi_mount" 2>/dev/null; then
+            echo "✅ EFI partition mounted successfully"
+
+            # Check for required EFI files
+            if [[ -f "$efi_mount/EFI/BOOT/BOOTX64.EFI" ]] || [[ -f "$efi_mount/EFI/BOOT/BOOTIA32.EFI" ]]; then
+                echo "✅ EFI boot loader found"
+            else
+                echo "❌ EFI boot loader NOT found (missing BOOTX64.EFI/BOOTIA32.EFI)"
+                sudo umount "$efi_mount" 2>/dev/null || true
+                exit 1
+            fi
+
+            # Check for grub.cfg on EFI partition
+            if [[ -f "$efi_mount/EFI/BOOT/grub.cfg" ]]; then
+                echo "✅ EFI grub.cfg found"
+                # Verify grub.cfg is not empty and has menu entries
+                if grep -q "menuentry" "$efi_mount/EFI/BOOT/grub.cfg" 2>/dev/null; then
+                    echo "✅ EFI grub.cfg contains menu entries"
+                else
+                    echo "❌ EFI grub.cfg is empty or missing menu entries"
+                    sudo umount "$efi_mount" 2>/dev/null || true
+                    exit 1
+                fi
+            else
+                echo "❌ EFI grub.cfg NOT found at /EFI/BOOT/grub.cfg"
+                sudo umount "$efi_mount" 2>/dev/null || true
+                exit 1
+            fi
+
+            sudo umount "$efi_mount" 2>/dev/null || true
+        else
+            echo "⚠️  Could not mount EFI partition (may need root)"
+        fi
+    else
+        echo "❌ EFI partition NOT found"
+        exit 1
+    fi
+    echo ""
+
+    echo "✅ All checks passed!"
+
+# Rebuild a live ISO using titanoboa (builds image and ISO in one step)
+#
+# Run a VM from a titanoboa-generated live ISO
+#
+# Usage: just run-vm-iso-titanoboa [iso_path]
+# Examples:
+#   just run-vm-iso-titanoboa output/bazzite-nix-Live.iso
+# just run-vm-iso-titanoboa  # uses latest ISO in output/
+
+alias run-vm-iso-titanoboa := run-vm-iso
+
+[group('Run Virtual Machine')]
+run-vm-iso $iso_path="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    if [[ -n "{{ iso_path }}" ]]; then
+        iso_file="{{ iso_path }}"
+    else
+        # Try output/ first, then ~/.cache/bazzite-nix/iso/ as fallback
+        iso_file=$(find output -name "*.iso" -type f -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2-)
+        if [[ -z "$iso_file" ]]; then
+            cache_iso_dir="$HOME/.cache/bazzite-nix/iso"
+            if [[ -d "$cache_iso_dir" ]]; then
+                iso_file=$(find "$cache_iso_dir" -name "*.iso" -type f -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -1 | cut -d' ' -f2-)
+            fi
+        fi
+        if [[ -z "$iso_file" ]]; then
+            echo "❌ No ISO found in output/ or ~/.cache/bazzite-nix/iso/. Build one first with: just build-iso-titanoboa"
+            exit 1
+        fi
+    fi
+
+    if [[ ! -f "$iso_file" ]]; then
+        echo "❌ ISO not found: $iso_file"
+        exit 1
+    fi
+
+    echo "🚀 Starting VM with ISO: $iso_file"
+    echo "Connect to http://127.0.0.1:8006"
+
+    sudo podman run --rm --privileged \
+        --env "CPU_CORES=4" \
+        --env "RAM_SIZE=6G" \
+        --env "DISK_SIZE=30G" \
+        --env "TPM=N" \
+        --env "GPU=N" \
+        --device=/dev/kvm \
+        --device=/dev/net/tun \
+        --cap-add NET_ADMIN \
+        -p "8006:8006" \
+        --volume "$iso_file:/boot.iso:ro" \
+        "docker.io/qemux/qemu:latest" &
+    QEMU_PID=$!
+
+    echo "Waiting for VM web interface..."
+    for _ in {1..15}; do
+        if curl -sf http://127.0.0.1:8006 >/dev/null 2>&1; then
+            echo "✅ VM running at http://127.0.0.1:8006"
+            xdg-open http://127.0.0.1:8006 || echo "⚠️  Open http://127.0.0.1:8006 manually"
+            break
+        fi
+        echo -n "."
+        sleep 2
+    done
+
+    wait $QEMU_PID || echo "⚠️  VM exited"
 
 # Rebuild a QCOW2 virtual machine image
 
@@ -875,30 +1217,6 @@ run-vm-raw $image_spec="" $output_dir="" $force_pull="0" $clean="0":
 
     eval "$(just --unstable _parse-image-spec-vm "{{ image_spec }}")"
     just _run-vm "$TARGET_IMAGE" "$TAG" "raw" "image.toml" "{{ output_dir }}" "{{ force_pull }}" "{{ clean }}"
-
-# Run a virtual machine from an ISO
-#
-# Usage: just run-vm-iso [image:tag] [output_dir] [force_pull] [clean]
-# Examples:
-#   just run-vm-iso localhost/bazzite-nix:testing
-#   just run-vm-iso ghcr.io/user/image:latest
-#   just run-vm-iso image:latest "" 1      # force pull
-#   just run-vm-iso image:latest "" 0 1    # clean start
-#   just run-vm-iso localhost/image:latest --clean
-#
-# Parameters:
-#   $image_spec - Image specification (e.g., image:tag or localhost/image:tag)
-#   $output_dir - Optional output directory for disk images
-#   $force_pull - Force pull image even if cached (default: 0)
-
-# $clean - Clean disk cache and refresh local images (default: 0)
-[group('Run Virtual Machine')]
-run-vm-iso $image_spec="" $output_dir="" $force_pull="0" $clean="0":
-    #!/usr/bin/env bash
-    set -euo pipefail
-
-    eval "$(just --unstable _parse-image-spec-vm "{{ image_spec }}")"
-    just _run-vm "$TARGET_IMAGE" "$TAG" "iso" "iso.toml" "{{ output_dir }}" "{{ force_pull }}" "{{ clean }}"
 
 # Clean cached VM disk images
 [group('Utility')]

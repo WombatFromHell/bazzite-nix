@@ -14,10 +14,19 @@ add_dracutmodules+=" ostree "
 add_drivers+=" virtio virtio_blk virtio_scsi virtio_pci "
 # Include filesystem drivers needed for root mount
 filesystems+=" btrfs ext4 ext3 xfs squashfs overlay "
-# Disable hostonly mode for container builds - we need generic initramfs
-# that can boot on any hardware, not just the build host
-hostonly="no"
-hostonly_cmdline="no"
+EOF
+
+# Add live ISO boot support for installer ISOs
+# This enables booting from live ISO with squashfs.img
+cat >/usr/lib/dracut/dracut.conf.d/99-live-iso.conf <<'EOF'
+# Live ISO boot support (dmsquash-live for mounting squashfs from ISO)
+add_dracutmodules+=" dmsquash-live livenet "
+# Additional filesystems needed for live boot
+filesystems+=" iso9660 "
+# Include block device drivers for CD/DVD and USB boot
+add_drivers+=" sr_mod cdrom sd_mod usb_storage "
+# Include virtio drivers for VMs
+add_drivers+=" virtio virtio_blk virtio_scsi virtio_pci virtio_net "
 EOF
 
 # Set up dracut configuration for ostree/bootc images
@@ -29,9 +38,13 @@ depmod -a "${KERNEL_VERSION}"
 # Generate initramfs with ostree support and host-specific modules
 # This is required because tsflags=noscripts skips the kernel RPM postinst that runs dracut
 echo "Generating initramfs for kernel ${KERNEL_VERSION}..."
-dracut -f \
+dracut --no-hostonly \
+  --kver "${KERNEL_VERSION}" \
+  --force \
   "/usr/lib/modules/${KERNEL_VERSION}/initramfs.img" \
-  "${KERNEL_VERSION}"
+  "${KERNEL_VERSION}" 2>&1 || {
+  echo "WARNING: dracut had errors, but continuing..."
+}
 
 # Verify initramfs was created
 if [[ ! -f "/usr/lib/modules/${KERNEL_VERSION}/initramfs.img" ]]; then
@@ -39,4 +52,5 @@ if [[ ! -f "/usr/lib/modules/${KERNEL_VERSION}/initramfs.img" ]]; then
   exit 1
 else
   echo "initramfs.img created successfully"
+  ls -lh "/usr/lib/modules/${KERNEL_VERSION}/initramfs.img"
 fi
