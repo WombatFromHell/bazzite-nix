@@ -215,6 +215,18 @@ jobs:
             sudo skopeo copy \
               --authfile /tmp/skopeo-auth/auth.json \
               "$SOURCE_REF" "docker://$DIGEST_REF"
+
+            # Verify remote digest matches expected (catches skopeo/registry mutations)
+            echo "Verifying remote digest..."
+            REMOTE_DIGEST=$(sudo skopeo inspect --format='{{.Digest}}' "docker://$DIGEST_REF")
+            echo "Local digest:  ${IMAGE_DIGEST}"
+            echo "Remote digest: ${REMOTE_DIGEST}"
+            if [ "${IMAGE_DIGEST}" != "${REMOTE_DIGEST}" ]; then
+              echo "::warning::Remote digest differs from local! Using remote digest for signing."
+              DIGEST_REF="${{ steps.image_refs.outputs.registry }}/${{ steps.image_refs.outputs.output_image }}@${REMOTE_DIGEST}"
+              SHORT_DIGEST=$(echo "$REMOTE_DIGEST" | sed 's/sha256://')
+            fi
+            echo "Final digest ref: ${DIGEST_REF}"
             echo "::endgroup::"
 
             # Push all tags BEFORE signing so signature applies to all tag references
