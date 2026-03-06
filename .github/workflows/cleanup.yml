@@ -420,7 +420,7 @@ jobs:
 
       - name: Upload cleanup log
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: cleanup-log-${{ matrix.package }}
           # LOG_FILE is the single structured log written throughout this job.
