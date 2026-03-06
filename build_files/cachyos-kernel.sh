@@ -27,4 +27,6 @@ dnf5 -y copr enable bieszczaders/kernel-cachyos &&
 export KERNEL_VERSION
 KERNEL_VERSION=$(rpm -qa --queryformat '%{VERSION}-%{RELEASE}.%{ARCH}' kernel-cachyos-core)
 
+source ./extract-kver.sh
+
 source ./dracut-kernel-fix.sh

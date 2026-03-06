@@ -28,4 +28,6 @@ dnf5 -y install --enablerepo=updates-testing --setopt=tsflags=noscripts \
 export KERNEL_VERSION
 KERNEL_VERSION="$(rpm -qa --queryformat '%{VERSION}-%{RELEASE}.%{ARCH}' kernel-core)"
 
+source ./extract-kver.sh
+
 source ./dracut-kernel-fix.sh

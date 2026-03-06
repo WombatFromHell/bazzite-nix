@@ -117,6 +117,18 @@ jobs:
               --file ./Containerfile . && \
               echo "skopeo_ref=containers-storage:${SKOPEO_TAG}" >> $GITHUB_OUTPUT
 
+      - name: Extract kernel version
+        id: kernel_version
+        run: |
+          # Extract kernel version from the built image
+          KERNEL_VERSION=$(sudo podman run --rm localhost/raw-img cat /usr/share/ublue-os/kernel-version 2>/dev/null || echo "")
+          if [ -n "$KERNEL_VERSION" ]; then
+            echo "kernel_version=$KERNEL_VERSION" >> $GITHUB_OUTPUT
+            echo "Found kernel version: $KERNEL_VERSION"
+          else
+            echo "No kernel version file found in image"
+          fi
+
       - name: Run Rechunker
         if: inputs.skip_rechunk != 'true'
         id: rechunk
@@ -156,6 +168,12 @@ jobs:
           while IFS= read -r line; do
             [ -n "$line" ] && sudo buildah config --label "$line" "$container"
           done <<< "${{ steps.labels.outputs.rechunk_labels }}"
+
+          # Add kernel version label if available
+          if [ -n "${{ steps.kernel_version.outputs.kernel_version }}" ]; then
+            sudo buildah config --label "org.opencontainers.image.kernel-version=${{ steps.kernel_version.outputs.kernel_version }}" "$container"
+          fi
+
           sudo buildah commit --identity-label=false --rm "$container" "$IMAGE_REF"
 
           echo "source_ref=$IMAGE_REF" >> "$GITHUB_OUTPUT"
@@ -169,6 +187,14 @@ jobs:
           else
             echo "source_ref=${{ steps.build_image.outputs.skopeo_ref }}" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Apply kernel version label (no rechunk)
+        if: inputs.skip_rechunk == 'true' && steps.kernel_version.outputs.kernel_version != ''
+        run: |
+          IMAGE_REF="${{ steps.build_image.outputs.skopeo_ref }}"
+          container=$(sudo buildah from "$IMAGE_REF")
+          sudo buildah config --label "org.opencontainers.image.kernel-version=${{ steps.kernel_version.outputs.kernel_version }}" "$container"
+          sudo buildah commit --identity-label=false --rm "$container" "$IMAGE_REF"
 
       - name: Get build digest
         id: build_digest
