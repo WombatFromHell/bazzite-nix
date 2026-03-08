@@ -24,8 +24,3 @@ if [[ -f "$FRAGMENT_FILE" ]] && [[ -f "$GLOBAL_POLICY_FILE" ]]; then
     mv "${GLOBAL_POLICY_FILE}.tmp" "$GLOBAL_POLICY_FILE"
   cp -f "${GLOBAL_POLICY_FILE}" "/etc/containers/policy.json"
 fi
-
-# Install dracut-live for live ISO boot support
-dnf5 -y install --setopt=tsflags=noscripts \
-  dracut-live \
-  dracut-tools || exit 1

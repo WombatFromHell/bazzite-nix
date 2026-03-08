@@ -16,19 +16,6 @@ add_drivers+=" virtio virtio_blk virtio_scsi virtio_pci "
 filesystems+=" btrfs ext4 ext3 xfs squashfs overlay "
 EOF
 
-# Add live ISO boot support for installer ISOs
-# This enables booting from live ISO with squashfs.img
-cat >/usr/lib/dracut/dracut.conf.d/99-live-iso.conf <<'EOF'
-# Live ISO boot support (dmsquash-live for mounting squashfs from ISO)
-add_dracutmodules+=" dmsquash-live livenet "
-# Additional filesystems needed for live boot
-filesystems+=" iso9660 "
-# Include block device drivers for CD/DVD and USB boot
-add_drivers+=" sr_mod cdrom sd_mod usb_storage "
-# Include virtio drivers for VMs
-add_drivers+=" virtio virtio_blk virtio_scsi virtio_pci virtio_net "
-EOF
-
 # Set up dracut configuration for ostree/bootc images
 # Disable xattr preservation to avoid errors in container build environment
 export DRACUT_NO_XATTR=1
