@@ -24,3 +24,9 @@ if [[ -f "$FRAGMENT_FILE" ]] && [[ -f "$GLOBAL_POLICY_FILE" ]]; then
     mv "${GLOBAL_POLICY_FILE}.tmp" "$GLOBAL_POLICY_FILE"
   cp -f "${GLOBAL_POLICY_FILE}" "/etc/containers/policy.json"
 fi
+
+# try to fix our downstream os-release to bootloader entries are more accurate
+VARIANT="${VARIANT:-stable}" # pick this up from our VARIANT build-arg
+OSTREE_VERSION=$(grep -oP "(?<=OSTREE_VERSION=')[^']+" /usr/lib/os-release)
+sed -i "s/^PRETTY_NAME=.*/PRETTY_NAME=\"Bazzite ${VARIANT}-${OSTREE_VERSION}\"/" \
+  /usr/lib/os-release

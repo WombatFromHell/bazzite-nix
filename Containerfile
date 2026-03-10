@@ -9,6 +9,9 @@ FROM ${BASE_IMAGE}
 
 ARG BUILD_SCRIPT=build.sh
 
+ARG VARIANT=stable
+ENV VARIANT=${VARIANT}
+
 RUN --mount=type=bind,from=ctx,source=/,target=/ctx \
   --mount=type=cache,dst=/var/cache \
   --mount=type=cache,dst=/var/log \
