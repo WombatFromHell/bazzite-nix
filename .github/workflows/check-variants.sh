@@ -94,15 +94,17 @@ inspect_upstream_image() {
 
 # Compute canonical tag, handling version collisions
 # Arguments: $1 = parent_version, $2 = prefix (registry/image)
-# Outputs: Sets canonical variable
+# Outputs: Echoes "canonical collision_detected" on success
 compute_canonical_tag() {
 	local parent_version="$1"
 	local prefix="$2"
 	local canonical="$parent_version"
+	local collision_detected="false"
 
 	if [ "$FORCE_BUILD" = "true" ]; then
 		if skopeo inspect "docker://${prefix}:${canonical}" >/dev/null 2>&1; then
-			echo "Collision detected: ${canonical} exists. Calculating next version..."
+			echo "::notice::Collision detected: ${canonical} exists. Calculating next version..." >&2
+			collision_detected="true"
 			if [[ "$canonical" =~ ^(.*)\.([0-9]+)$ ]]; then
 				local stem="${BASH_REMATCH[1]}"
 				local last_num="${BASH_REMATCH[2]}"
@@ -118,7 +120,7 @@ compute_canonical_tag() {
 				fi
 
 				while skopeo inspect "docker://${search_base}.${next_num}" >/dev/null 2>&1; do
-					echo "${search_base}.${next_num} also exists, checking next..."
+					echo "::notice::${search_base}.${next_num} also exists, checking next..." >&2
 					: $((next_num++))
 				done
 				canonical="${search_base}.${next_num}"
@@ -133,7 +135,7 @@ compute_canonical_tag() {
 		fi
 	fi
 
-	echo "$canonical"
+	echo "$canonical $collision_detected"
 }
 
 # Generate tags based on base image tag and variant configuration
@@ -443,8 +445,8 @@ for ((i = 0; i < variant_count; i++)); do
 	registry="ghcr.io/$(echo "${REGISTRY_OWNER}" | tr '[:upper:]' '[:lower:]')"
 	prefix="${registry}/${output_image}"
 
-	# Compute canonical tag
-	canonical=$(compute_canonical_tag "$parent_version" "$prefix")
+	# Compute canonical tag (returns "canonical collision_detected")
+	read -r canonical collision_detected <<<"$(compute_canonical_tag "$parent_version" "$prefix")"
 
 	# Strip branch prefix from canonical if already present (e.g., "testing-43.20260221.2" → "43.20260221.2")
 	# This prevents double-prefixing when using templates like "{branch}-{canonical}"
@@ -484,6 +486,7 @@ for ((i = 0; i < variant_count; i++)); do
 		--arg canonical_tag "$canonical" \
 		--arg tags "$tags" \
 		--arg prev_ref "$prev_ref" \
+		--arg collision_detected "$collision_detected" \
 		--argjson needs_build "$needs_build" \
 		'{
         variant: $variant,
@@ -495,6 +498,7 @@ for ((i = 0; i < variant_count; i++)); do
         canonical_tag: $canonical_tag,
         tags: $tags,
         prev_ref: $prev_ref,
+        collision_detected: ($collision_detected == "true"),
         needs_build: $needs_build
     }')
 

@@ -121,8 +121,13 @@ jobs:
               name=$(echo "$variant" | jq -r '.variant')
               suffix=$(echo "$variant" | jq -r '.suffix // ""')
               tags=$(echo "$variant" | jq -r '.tags')
+              collision=$(echo "$variant" | jq -r '.collision_detected // false')
               target_image="${{ steps.image_refs.outputs.registry }}/${{ steps.image_refs.outputs.repo }}${suffix}"
-              echo "| \`${name}\` | \`${target_image}\` | \`${tags}\` |" >> $GITHUB_STEP_SUMMARY
+              if [ "$collision" = "true" ]; then
+                echo "| \`${name}\` | \`${target_image}\` | \`${tags}\` ⚠️ |" >> $GITHUB_STEP_SUMMARY
+              else
+                echo "| \`${name}\` | \`${target_image}\` | \`${tags}\` |" >> $GITHUB_STEP_SUMMARY
+              fi
             done
             echo "variants_to_build=[]" >> $GITHUB_OUTPUT
           else
@@ -136,8 +141,13 @@ jobs:
               name=$(echo "$variant" | jq -r '.variant')
               suffix=$(echo "$variant" | jq -r '.suffix // ""')
               tags=$(echo "$variant" | jq -r '.tags')
+              collision=$(echo "$variant" | jq -r '.collision_detected // false')
               target_image="${{ steps.image_refs.outputs.registry }}/${{ steps.image_refs.outputs.repo }}${suffix}"
-              echo "| \`${name}\` | \`${target_image}\` | \`${tags}\` |" >> $GITHUB_STEP_SUMMARY
+              if [ "$collision" = "true" ]; then
+                echo "| \`${name}\` | \`${target_image}\` | \`${tags}\` ⚠️ |" >> $GITHUB_STEP_SUMMARY
+              else
+                echo "| \`${name}\` | \`${target_image}\` | \`${tags}\` |" >> $GITHUB_STEP_SUMMARY
+              fi
             done
           fi
 
