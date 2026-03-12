@@ -179,62 +179,25 @@ jobs:
 
           echo "source_ref=$IMAGE_REF" >> "$GITHUB_OUTPUT"
 
-      - name: Set source reference
-        id: source_ref
-        run: |
-          # Use rechunked image if available, otherwise use original build
-          if [ -n "${{ steps.relabel.outputs.source_ref }}" ]; then
-            echo "source_ref=${{ steps.relabel.outputs.source_ref }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "source_ref=${{ steps.build_image.outputs.skopeo_ref }}" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Apply kernel version label (no rechunk)
-        if: inputs.skip_rechunk == 'true' && steps.kernel_version.outputs.kernel_version != ''
-        run: |
-          IMAGE_REF="${{ steps.build_image.outputs.skopeo_ref }}"
-          container=$(sudo buildah from "$IMAGE_REF")
-          sudo buildah config --label "org.opencontainers.image.kernel-version=${{ steps.kernel_version.outputs.kernel_version }}" "$container"
-          sudo buildah commit --identity-label=false --rm "$container" "$IMAGE_REF"
-
-      - name: Get build digest
-        id: build_digest
-        run: |
-          IMAGE_REF="${{ steps.source_ref.outputs.source_ref }}"
-
-          if [ -z "$IMAGE_REF" ]; then
-            echo "::error::No valid image reference found to inspect"
-            exit 1
-          fi
-
-          echo "Using image ref: $IMAGE_REF"
-          FULL_BUILD_DIGEST=$(sudo skopeo inspect --format='{{.Digest}}' "${IMAGE_REF}")
-          BUILD_DIGEST=$(echo "$FULL_BUILD_DIGEST" | sed 's/sha256://')
-          echo "full_build_digest=${FULL_BUILD_DIGEST}" >> $GITHUB_OUTPUT
-          echo "build_digest=${BUILD_DIGEST}" >> $GITHUB_OUTPUT
-          echo "source_ref=${IMAGE_REF}" >> $GITHUB_OUTPUT
-
       - name: Sign and Push to GHCR
         id: sign_and_push
-        uses: Wandalen/wretry.action@e68c23e6309f2871ca8ae4763e7629b9c258e1ea # v3.8.0
-        with:
-          attempt_limit: 3
-          attempt_delay: 15000
-          command: |
-            set -euo pipefail
+        env:
+          SIGNING_SECRET: ${{ secrets.signing_secret }}
+        run: |
+          set -euo pipefail
 
-            SOURCE_REF="${{ steps.build_digest.outputs.source_ref }}"
-            IMAGE_DIGEST="${{ steps.build_digest.outputs.full_build_digest }}"
-            SHORT_DIGEST="${{ steps.build_digest.outputs.build_digest }}"
+          SOURCE_REF="${{ steps.build_digest.outputs.source_ref }}"
+          IMAGE_DIGEST="${{ steps.build_digest.outputs.full_build_digest }}"
+          SHORT_DIGEST="${{ steps.build_digest.outputs.build_digest }}"
+          IFS=',' read -r -a tags <<< "${{ matrix.variant_data.tags }}"
+          BASE_IMG="${{ steps.image_refs.outputs.registry }}/${{ steps.image_refs.outputs.output_image }}"
 
-            # Use pre-computed tags from check-variants.sh
-            IFS=',' read -r -a tags <<< "${{ matrix.variant_data.tags }}"
+          push_and_sign() {
+            DIGEST_REF="${BASE_IMG}@${IMAGE_DIGEST}"
+            SHORT_DIGEST_INNER="${SHORT_DIGEST}"
+            local attempt_tags=("${tags[@]}")
 
-            # Use standardized image references from image_refs step
-            DIGEST_REF="${{ steps.image_refs.outputs.registry }}/${{ steps.image_refs.outputs.output_image }}@${IMAGE_DIGEST}"
-            BASE_IMG="${{ steps.image_refs.outputs.registry }}/${{ steps.image_refs.outputs.output_image }}"
-
-            echo "::group::Push primary image"
+            echo "::group::Push primary image (attempt ${attempt}/${max_attempts})"
             echo "Source ref: ${SOURCE_REF}"
             echo "Digest ref: ${DIGEST_REF}"
             echo "Base image: ${BASE_IMG}"
@@ -243,24 +206,22 @@ jobs:
               --authfile /tmp/skopeo-auth/auth.json \
               "$SOURCE_REF" "docker://$DIGEST_REF"
 
-            # Verify remote digest matches expected (catches skopeo/registry mutations)
             echo "Verifying remote digest..."
             REMOTE_DIGEST=$(sudo skopeo inspect --format='{{.Digest}}' "docker://$DIGEST_REF")
             echo "Local digest:  ${IMAGE_DIGEST}"
             echo "Remote digest: ${REMOTE_DIGEST}"
             if [ "${IMAGE_DIGEST}" != "${REMOTE_DIGEST}" ]; then
               echo "::warning::Remote digest differs from local! Using remote digest for signing."
-              DIGEST_REF="${{ steps.image_refs.outputs.registry }}/${{ steps.image_refs.outputs.output_image }}@${REMOTE_DIGEST}"
-              SHORT_DIGEST=$(echo "$REMOTE_DIGEST" | sed 's/sha256://')
+              DIGEST_REF="${BASE_IMG}@${REMOTE_DIGEST}"
+              SHORT_DIGEST_INNER=$(echo "$REMOTE_DIGEST" | sed 's/sha256://')
             fi
             echo "Final digest ref: ${DIGEST_REF}"
             echo "::endgroup::"
 
-            # Push all tags BEFORE signing so signature applies to all tag references
             echo "::group::Push tags"
-            tags+=("$SHORT_DIGEST")
-            echo "Tags to push: ${tags[*]}"
-            for tag in "${tags[@]}"; do
+            attempt_tags+=("$SHORT_DIGEST_INNER")
+            echo "Tags to push: ${attempt_tags[*]}"
+            for tag in "${attempt_tags[@]}"; do
               FULL_TAG="${BASE_IMG}:${tag}"
               echo "Pushing tag: ${FULL_TAG}"
               sudo skopeo copy \
@@ -271,7 +232,6 @@ jobs:
             done
             echo "::endgroup::"
 
-            # Sign after all tags exist - signature attaches to digest, all tags inherit
             echo "::group::Sign image"
             echo "Signing image: ${DIGEST_REF}"
             cosign sign -y \
@@ -283,7 +243,6 @@ jobs:
               "$DIGEST_REF"
             echo "::endgroup::"
 
-            # Verify signature was created successfully (catches silent failures)
             echo "::group::Verify signature"
             echo "Verifying signature with cosign.pub..."
             if cosign verify \
@@ -295,5 +254,20 @@ jobs:
               exit 1
             fi
             echo "::endgroup::"
-        env:
-          SIGNING_SECRET: ${{ secrets.signing_secret }}
+          }
+
+          max_attempts=3
+          delay=15
+          for attempt in $(seq 1 $max_attempts); do
+            if push_and_sign; then
+              break
+            fi
+
+            if [ "$attempt" -ge "$max_attempts" ]; then
+              echo "::error::All ${max_attempts} attempts failed."
+              exit 1
+            fi
+
+            echo "::warning::Attempt ${attempt} failed. Retrying in ${delay}s..."
+            sleep "$delay"
+          done
