@@ -12,3 +12,9 @@ if [ -r "$PORTALS_GLOBAL"/niri-portals.conf ]; then
   mv "$PORTALS_GLOBAL"/niri-portals.conf "$PORTALS_GLOBAL"/niri-portals.conf.bak
   cp -f "$PORTALS_OVERRIDE"/niri-portals.conf "$PORTALS_GLOBAL"/niri-portals.conf
 fi
+
+# use our niri config override as well
+NIRI_GLOBAL="/etc/niri"
+NIRI_OVERRIDE="/ctx/override/etc/niri"
+mkdir -p "$NIRI_GLOBAL"
+cp -f "$NIRI_OVERRIDE"/config.kdl "$NIRI_GLOBAL"/config.kdl
