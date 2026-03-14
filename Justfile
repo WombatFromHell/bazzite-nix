@@ -47,6 +47,7 @@ clean:
     find *_build* -exec rm -rf {} \;
     rm -f previous.manifest.json changelog.md output.env
     rm -rf output/
+    just --unstable clean-vm
 
 # Clean cached VM disk images
 [group('Utility')]
@@ -56,8 +57,8 @@ clean-vm:
     VM_CACHE="${HOME}/.cache/bazzite-nix"
     if [[ -d "$VM_CACHE" ]]; then
         echo "Removing VM cache from $VM_CACHE..."
-        sudo rm -rf "$VM_CACHE"
-        echo "✅ VM cache cleaned"
+        rm -rf "$VM_CACHE"
+        echo "VM cache cleaned"
     else
         echo "VM cache does not exist: $VM_CACHE"
     fi
@@ -125,13 +126,20 @@ rechunk $image_spec="{{ image_name }}:{{ image_tag }}" $skip="0":
         tag="{{ image_tag }}"
     fi
     if [[ "$skip" == "1" ]]; then
-        echo "⏭️  Skipping rechunk step"
+        echo "Skipping rechunk step"
         exit 0
     fi
-    echo "🔄 Rechunking image ${target_image}:${tag}..."
+    just --unstable _rechunk "$target_image" "$tag"
+
+# Rechunk a container image for optimized layer distribution (private helper)
+[private]
+_rechunk $target_image $tag:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "Rechunking image ${target_image}:${tag}..."
     if ! sudo podman image exists "${target_image}:${tag}" 2>/dev/null; then
-        echo "❌ Image ${target_image}:${tag} not found in rootful storage"
-        echo "   Build it first with: just build ${image_spec}"
+        echo "Image ${target_image}:${tag} not found in rootful storage"
+        echo "   Build it first with: just build ${target_image}:${tag}"
         exit 1
     fi
     echo "Creating intermediate image for rechunking..."
@@ -151,29 +159,21 @@ rechunk $image_spec="{{ image_name }}:{{ image_tag }}" $skip="0":
     sudo podman untag localhost/raw-img && sudo podman rmi localhost/raw-img
     echo "Tagging rechunked image as ${target_image}:${tag}..."
     sudo podman tag localhost/chunked-img "${target_image}:${tag}"
-    echo "✅ Rechunk complete: ${target_image}:${tag}"
+    echo "Rechunk complete: ${target_image}:${tag}"
 
 # Build a QCOW2 VM image
 
 # Usage: just build-qcow2 [image:tag]
 [group('Build Virtual Machine Image')]
 build-qcow2 $image_spec="":
-    #!/usr/bin/env bash
-    set -euo pipefail
-    eval "$(just --unstable _parse-image-spec-vm "{{ image_spec }}")"
-    just --unstable _build-rootful "$TARGET_IMAGE" "$TAG" "$TAG"
-    just --unstable _build-bib "$TARGET_IMAGE" "$TAG" "qcow2" "image.toml"
+    just --unstable _build-vm-image "{{ image_spec }}" "qcow2"
 
 # Build a RAW VM image
 
 # Usage: just build-raw [image:tag]
 [group('Build Virtual Machine Image')]
 build-raw $image_spec="":
-    #!/usr/bin/env bash
-    set -euo pipefail
-    eval "$(just --unstable _parse-image-spec-vm "{{ image_spec }}")"
-    just --unstable _build-rootful "$TARGET_IMAGE" "$TAG" "$TAG"
-    just --unstable _build-bib "$TARGET_IMAGE" "$TAG" "raw" "image.toml"
+    just --unstable _build-vm-image "{{ image_spec }}" "raw"
 
 # Aliases for build-qcow2 / build-raw
 [group('Build Virtual Machine Image')]
@@ -189,69 +189,67 @@ rebuild-raw $image_spec="":
 # Usage: just run-vm-qcow2 [image:tag] [output_dir] [force_pull] [clean]
 [group('Run Virtual Machine')]
 run-vm-qcow2 $image_spec="" $output_dir="" $force_pull="0" $clean="0":
-    #!/usr/bin/env bash
-    set -euo pipefail
-    eval "$(just --unstable _parse-image-spec-vm "{{ image_spec }}")"
-    just --unstable _run-vm "$TARGET_IMAGE" "$TAG" "qcow2" "image.toml" "{{ output_dir }}" "{{ force_pull }}" "{{ clean }}"
+    just --unstable _run-vm-wrapper "{{ image_spec }}" "qcow2" "{{ output_dir }}" "{{ force_pull }}" "{{ clean }}"
 
 # Run a RAW VM
 
 # Usage: just run-vm-raw [image:tag] [output_dir] [force_pull] [clean]
 [group('Run Virtual Machine')]
 run-vm-raw $image_spec="" $output_dir="" $force_pull="0" $clean="0":
+    just --unstable _run-vm-wrapper "{{ image_spec }}" "raw" "{{ output_dir }}" "{{ force_pull }}" "{{ clean }}"
+
+# --- Private helpers --------------------------------------------------------
+
+# Run VM wrapper (shared helper for run-vm-qcow2 and run-vm-raw)
+[private]
+_run-vm-wrapper $image_spec $type $output_dir $force_pull $clean:
     #!/usr/bin/env bash
     set -euo pipefail
     eval "$(just --unstable _parse-image-spec-vm "{{ image_spec }}")"
-    just --unstable _run-vm "$TARGET_IMAGE" "$TAG" "raw" "image.toml" "{{ output_dir }}" "{{ force_pull }}" "{{ clean }}"
+    just --unstable _run-vm "$TARGET_IMAGE" "$TAG" "$type" "image.toml" "{{ output_dir }}" "{{ force_pull }}" "{{ clean }}"
 
-# ── Private helpers ────────────────────────────────────────────────────────────
+# Build VM image (shared helper for build-qcow2 and build-raw)
+[private]
+_build-vm-image $image_spec $type:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    eval "$(just --unstable _parse-image-spec-vm "{{ image_spec }}")"
+    just --unstable _build-rootful "$TARGET_IMAGE" "$TAG" "$TAG"
+    just --unstable _build-bib "$TARGET_IMAGE" "$TAG" "$type" "image.toml"
+
+# Parse image_spec into TARGET_IMAGE and TAG
+
+# $1 = image_spec, $2 = prefix (localhost or ghcr.io/{{ repo_organization }})
+[private]
+_parse-image-spec $image_spec="" $prefix="localhost/{{ image_name }}":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    image_spec="{{ image_spec }}"
+    prefix="{{ prefix }}"
+    default_target="${prefix}"
+    default_tag="{{ default_tag }}"
+    if [[ -n "$image_spec" ]]; then
+        if [[ "$image_spec" == *":"* ]]; then
+            target_image="${image_spec%:*}"
+            tag="${image_spec#*:}"
+        else
+            target_image="$image_spec"
+            tag="$default_tag"
+        fi
+        [[ "$target_image" != *"/"* ]] && target_image="${prefix%/*}/${target_image}"
+    else
+        target_image="$default_target"
+        tag="$default_tag"
+    fi
+    echo "TARGET_IMAGE=\"$target_image\""
+    echo "TAG=\"$tag\""
 
 # Parse image_spec into TARGET_IMAGE and TAG for local (localhost/) images
+
+# Deprecated: use _parse-image-spec with prefix instead
 [private]
 _parse-image-spec-vm $image_spec="":
-    #!/usr/bin/env bash
-    set -euo pipefail
-    image_spec="{{ image_spec }}"
-    default_target="localhost/{{ image_name }}"
-    default_tag="{{ default_tag }}"
-    if [[ -n "$image_spec" ]]; then
-        if [[ "$image_spec" == *":"* ]]; then
-            target_image="${image_spec%:*}"
-            tag="${image_spec#*:}"
-        else
-            target_image="$image_spec"
-            tag="$default_tag"
-        fi
-        [[ "$target_image" != *"/"* ]] && target_image="localhost/${target_image}"
-    else
-        target_image="$default_target"
-        tag="$default_tag"
-    fi
-    echo "TARGET_IMAGE=\"$target_image\""
-    echo "TAG=\"$tag\""
-
-[private]
-_parse-image-spec $image_spec="":
-    #!/usr/bin/env bash
-    set -euo pipefail
-    image_spec="{{ image_spec }}"
-    default_target="ghcr.io/{{ repo_organization }}/{{ image_name }}"
-    default_tag="{{ default_tag }}"
-    if [[ -n "$image_spec" ]]; then
-        if [[ "$image_spec" == *":"* ]]; then
-            target_image="${image_spec%:*}"
-            tag="${image_spec#*:}"
-        else
-            target_image="$image_spec"
-            tag="$default_tag"
-        fi
-        [[ "$target_image" != *"/"* ]] && target_image="ghcr.io/{{ repo_organization }}/${target_image}"
-    else
-        target_image="$default_target"
-        tag="$default_tag"
-    fi
-    echo "TARGET_IMAGE=\"$target_image\""
-    echo "TAG=\"$tag\""
+    just --unstable _parse-image-spec "{{ image_spec }}" "localhost/{{ image_name }}"
 
 [private]
 _build-rootful $target_image $tag $variant $base_image=base_image $build_script=image_build_script $dx="0" $hwe="0" $gdx="0":
@@ -296,7 +294,7 @@ _build-rootful $target_image $tag $variant $base_image=base_image $build_script=
         .
 
 [private]
-_build-bib $target_image $tag $type $config:
+_build-bib $target_image $tag $type $config $output_dir="":
     #!/usr/bin/env bash
     set -euo pipefail
 
@@ -319,6 +317,15 @@ _build-bib $target_image $tag $type $config:
         source_image="container-storage:${target_image}:${tag}"
     fi
 
+    # Use provided output_dir or default to ./output
+    local out_dir="${output_dir}"
+    if [[ -z "$out_dir" ]]; then
+        out_dir="$(pwd)/output"
+        mkdir -p "$out_dir"
+    else
+        mkdir -p "$out_dir"
+    fi
+
     BUILDTMP=$(mktemp -p "${PWD}" -d -t _build-bib.XXXXXXXXXX)
 
     sudo podman run --rm -it --privileged \
@@ -332,10 +339,9 @@ _build-bib $target_image $tag $type $config:
         ${args} \
         "$source_image"
 
-    mkdir -p output
-    sudo mv -f "$BUILDTMP"/* output/
+    sudo mv -f "$BUILDTMP"/* "$out_dir"/
     sudo rmdir "$BUILDTMP"
-    sudo chown -R "$USER:$USER" output/
+    sudo chown -R "$USER:$USER" "$out_dir"
 
 [private]
 _run-vm $target_image $tag $type $config $output_dir="" $force_pull="0" $clean="0":
@@ -346,9 +352,6 @@ _run-vm $target_image $tag $type $config $output_dir="" $force_pull="0" $clean="
     [[ -n "{{ output_dir }}" ]] && OUTPUT_DIR="{{ output_dir }}"
     mkdir -p "$OUTPUT_DIR"
 
-    BUILDER="${bib_image}"
-    RUNNER="docker.io/qemux/qemu:latest"
-
     case "$type" in
         qcow2) subdir="qcow2"; disk_name="disk.qcow2" ;;
         raw)   subdir="image"; disk_name="disk.raw" ;;
@@ -358,8 +361,8 @@ _run-vm $target_image $tag $type $config $output_dir="" $force_pull="0" $clean="
     image_file="${OUTPUT_DIR}/${subdir}/${disk_name}"
 
     if [[ "{{ clean }}" == "1" ]]; then
-        echo "🧹 Removing cached disk image..."
-        [[ -f "$image_file" ]] && sudo rm -f "$image_file" && echo "✅ Removed: $image_file" || echo "Nothing to clean"
+        echo "Removing cached disk image..."
+        [[ -f "$image_file" ]] && sudo rm -f "$image_file" && echo "Removed: $image_file" || echo "Nothing to clean"
     fi
 
     if [[ ! -f "$image_file" ]]; then
@@ -368,7 +371,7 @@ _run-vm $target_image $tag $type $config $output_dir="" $force_pull="0" $clean="
 
         if [[ "$is_local" == "true" ]]; then
             if ! sudo podman image exists "${target_image}:${tag}" 2>/dev/null; then
-                echo "❌ Image ${target_image}:${tag} not found in rootful storage."
+                echo "Image ${target_image}:${tag} not found in rootful storage."
                 echo "   Build it first with: just build-{{ type }} ${target_image}:${tag}"
                 exit 1
             fi
@@ -379,23 +382,16 @@ _run-vm $target_image $tag $type $config $output_dir="" $force_pull="0" $clean="
             fi
         fi
 
-        for img in "$BUILDER" "$RUNNER"; do
-            sudo podman image exists "$img" 2>/dev/null || sudo podman pull "$img"
-        done
+        # Pull required images
+        sudo podman image exists "${bib_image}" 2>/dev/null || sudo podman pull "${bib_image}"
+        sudo podman image exists "docker.io/qemux/qemu:latest" 2>/dev/null || sudo podman pull "docker.io/qemux/qemu:latest"
 
         echo "Building disk image..."
-        sudo podman run --rm -it --privileged \
-            --security-opt label=type:unconfined_t \
-            -v "$OUTPUT_DIR:/output" \
-            -v "$(pwd)/${config}:/config.toml:ro" \
-            -v "/var/lib/containers/storage:/var/lib/containers/storage" \
-            "$BUILDER" \
-            --type "$type" --use-librepo=True --rootfs=btrfs \
-            "${target_image}:${tag}"
+        just --unstable _build-bib "$target_image" "$tag" "$type" "$config" "$OUTPUT_DIR"
     fi
 
     if [[ ! -f "$image_file" ]]; then
-        echo "❌ Disk image not found: $image_file"
+        echo "Disk image not found: $image_file"
         exit 1
     fi
 
@@ -407,15 +403,15 @@ _run-vm $target_image $tag $type $config $output_dir="" $force_pull="0" $clean="
         --cap-add NET_ADMIN \
         -p 8006:8006 \
         --volume "$image_file:/storage/boot.img" \
-        "$RUNNER" &
+        "docker.io/qemux/qemu:latest" &
     QEMU_PID=$!
 
     echo "Waiting for VM web interface..."
     success=false
     for i in {1..30}; do  # Increased to 30 attempts (60 seconds)
         if curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8006 | grep -q "200"; then
-            echo -e "\n✅ VM ready! Opening browser..."
-            xdg-open "http://127.0.0.1:8006" >/dev/null 2>&1 & 
+            echo -e "\n VM ready! Opening browser..."
+            xdg-open "http://127.0.0.1:8006" >/dev/null 2>&1 &
             success=true
             break
         fi
@@ -424,10 +420,10 @@ _run-vm $target_image $tag $type $config $output_dir="" $force_pull="0" $clean="
     done
 
     if [ "$success" = false ]; then
-        echo -e "\n⚠️  Timeout: Service didn't start in time. Check logs or open http://127.0.0.1:8006 manually."
+        echo -e "\n  Timeout: Service didn't start in time. Check logs or open http://127.0.0.1:8006 manually."
     fi
 
-    wait $QEMU_PID || echo "⚠️  VM exited"
+    wait $QEMU_PID || echo "  VM exited"
 
 [private]
 sudoif command *args:

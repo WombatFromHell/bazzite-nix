@@ -3,6 +3,11 @@
 # nix installer enablement
 mkdir -p /nix
 
+# disable Wants/After 'systemd-udev-settle' override for sddm.service
+SDDM_OVERRIDE="/usr/lib/systemd/system/sddm.service.d"
+mkdir -p "${SDDM_OVERRIDE}" &&
+  ln -sf /dev/null "${SDDM_OVERRIDE}"/override.conf
+
 # place the public key on our image for local cosign verification
 PUBLIC_KEY_FILE="/usr/share/ublue-os/signing/etc/pki/containers/cosign.pub"
 curl -L \
