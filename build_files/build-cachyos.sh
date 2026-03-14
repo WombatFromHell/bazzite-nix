@@ -7,4 +7,4 @@ source ./init.sh
 source ./cachyos-kernel.sh
 source ./tools.sh
 source ./extras.sh
-source ./cleanup.sh
+source ./finalize.sh

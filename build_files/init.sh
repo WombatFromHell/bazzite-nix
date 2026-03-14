@@ -33,5 +33,6 @@ if [ -n "${CANONICAL_TAG:-}" ]; then
 else
   OSTREE_VERSION=$(grep -oP "(?<=OSTREE_VERSION=')[^']+" /usr/lib/os-release)
 fi
+
 sed -i "s/^PRETTY_NAME=.*/PRETTY_NAME=\"Bazzite-Nix ${VARIANT}-${OSTREE_VERSION}\"/" \
   /usr/lib/os-release

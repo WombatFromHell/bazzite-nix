@@ -12,4 +12,4 @@ export KERNEL_VERSION
 KERNEL_VERSION="$(rpm -qa --queryformat '%{VERSION}-%{RELEASE}.%{ARCH}' kernel-core)"
 source ./extract-kver.sh
 
-source ./cleanup.sh
+source ./finalize.sh

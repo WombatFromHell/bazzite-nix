@@ -17,10 +17,7 @@ ARG CANONICAL_TAG=""
 RUN --mount=type=bind,from=ctx,source=/,target=/ctx \
   --mount=type=cache,dst=/var/cache \
   --mount=type=cache,dst=/var/log \
-  --mount=type=tmpfs,dst=/tmp \
-  --mount=type=tmpfs,dst=/run \
-  /ctx/"${BUILD_SCRIPT}" && \
-  ostree container commit
+  /ctx/"${BUILD_SCRIPT}"
 
 ### LINTING
 RUN bootc container lint
