@@ -16,3 +16,9 @@ install -Z -m 755 \
 install -Z -D -m 644 \
   /ctx/overrides/etc/niri/config.kdl \
   /etc/niri/config.kdl
+
+# use a workaround to avoid the "white dialog" problem in xwaylandvideobridge
+XWVB_GLOBAL_TGT="/usr/share/applications/org.kde.xwaylandvideobridge.desktop"
+XWVB_XDG_TGT="/etc/xdg/autostart/org.kde.xwaylandvideobridge.desktop"
+sed -i '/^OnlyShowIn=/d' "$XWVB_GLOBAL_TGT" && echo "OnlyShowIn=KDE;GNOME;" | tee -a "$XWVB_GLOBAL_TGT"
+sed -i '/^OnlyShowIn=/d' "$XWVB_XDG_TGT" && echo "OnlyShowIn=KDE;GNOME;" | tee -a "$XWVB_XDG_TGT"
