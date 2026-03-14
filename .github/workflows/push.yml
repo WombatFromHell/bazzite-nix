@@ -180,6 +180,25 @@ jobs:
 
           echo "source_ref=$IMAGE_REF" >> "$GITHUB_OUTPUT"
 
+      - name: Extract final image digest
+        id: final_digest
+        run: |
+          # Determine which image reference to use based on whether rechunk was run
+          if [ "${{ inputs.skip_rechunk }}" = "true" ]; then
+            SOURCE_REF="${{ steps.build_image.outputs.skopeo_ref }}"
+          else
+            SOURCE_REF="${{ steps.rechunk.outputs.ref }}"
+            # If rechunk ran but relabel also ran, use the relabeled source_ref
+            if [ -n "${{ steps.relabel.outputs.source_ref }}" ]; then
+              SOURCE_REF="${{ steps.relabel.outputs.source_ref }}"
+            fi
+          fi
+          FULL_DIGEST=$(sudo skopeo inspect --format='{{.Digest}}' "$SOURCE_REF")
+          SHORT_DIGEST=$(echo "$FULL_DIGEST" | sed 's/sha256://')
+          echo "source_ref=$SOURCE_REF" >> $GITHUB_OUTPUT
+          echo "full_build_digest=$FULL_DIGEST" >> $GITHUB_OUTPUT
+          echo "build_digest=$SHORT_DIGEST" >> $GITHUB_OUTPUT
+
       - name: Sign and Push to GHCR
         id: sign_and_push
         env:
@@ -187,9 +206,9 @@ jobs:
         run: |
           set -euo pipefail
 
-          SOURCE_REF="${{ steps.build_digest.outputs.source_ref }}"
-          IMAGE_DIGEST="${{ steps.build_digest.outputs.full_build_digest }}"
-          SHORT_DIGEST="${{ steps.build_digest.outputs.build_digest }}"
+          SOURCE_REF="${{ steps.final_digest.outputs.source_ref }}"
+          IMAGE_DIGEST="${{ steps.final_digest.outputs.full_build_digest }}"
+          SHORT_DIGEST="${{ steps.final_digest.outputs.build_digest }}"
           IFS=',' read -r -a tags <<< "${{ matrix.variant_data.tags }}"
           BASE_IMG="${{ steps.image_refs.outputs.registry }}/${{ steps.image_refs.outputs.output_image }}"
 
