@@ -411,17 +411,21 @@ _run-vm $target_image $tag $type $config $output_dir="" $force_pull="0" $clean="
     QEMU_PID=$!
 
     echo "Waiting for VM web interface..."
-    for _ in {1..15}; do
-        if curl -sf http://127.0.0.1:8006 >/dev/null 2>&1; then
-            echo "✅ VM ready at http://127.0.0.1:8006"
-            xdg-open http://127.0.0.1:8006 || echo "⚠️  Open http://127.0.0.1:8006 manually."
+    success=false
+    for i in {1..30}; do  # Increased to 30 attempts (60 seconds)
+        if curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8006 | grep -q "200"; then
+            echo -e "\n✅ VM ready! Opening browser..."
+            xdg-open "http://127.0.0.1:8006" >/dev/null 2>&1 & 
+            success=true
             break
         fi
         echo -n "."
         sleep 2
     done
 
-    curl -sf http://127.0.0.1:8006 >/dev/null 2>&1 || echo "⚠️  Timeout. Open http://127.0.0.1:8006 manually when ready."
+    if [ "$success" = false ]; then
+        echo -e "\n⚠️  Timeout: Service didn't start in time. Check logs or open http://127.0.0.1:8006 manually."
+    fi
 
     wait $QEMU_PID || echo "⚠️  VM exited"
 

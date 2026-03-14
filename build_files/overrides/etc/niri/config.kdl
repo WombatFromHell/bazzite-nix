@@ -346,7 +346,6 @@ environment {
   QT_STYLE_OVERRIDE "breeze"
   QT_QPA_PLATFORMTHEME "kde"
   QT_WAYLAND_DISABLE_WINDOWDECORATION "0"
-  XDG_CURRENT_DESKTOP "KDE"
 }
 
 // Add lines like this to spawn processes at startup.
