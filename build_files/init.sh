@@ -25,8 +25,13 @@ if [[ -f "$FRAGMENT_FILE" ]] && [[ -f "$GLOBAL_POLICY_FILE" ]]; then
   cp -f "${GLOBAL_POLICY_FILE}" "/etc/containers/policy.json"
 fi
 
-# try to fix our downstream os-release to bootloader entries are more accurate
+# try to fix our downstream os-release so bootloader entries are more accurate
 VARIANT="${VARIANT:-stable}" # pick this up from our VARIANT build-arg
-OSTREE_VERSION=$(grep -oP "(?<=OSTREE_VERSION=')[^']+" /usr/lib/os-release)
-sed -i "s/^PRETTY_NAME=.*/PRETTY_NAME=\"Bazzite ${VARIANT}-${OSTREE_VERSION}\"/" \
+# Use downstream canonical_tag if provided (handles collision suffixes like .1, .2)
+if [ -n "${CANONICAL_TAG:-}" ]; then
+  OSTREE_VERSION="${CANONICAL_TAG}"
+else
+  OSTREE_VERSION=$(grep -oP "(?<=OSTREE_VERSION=')[^']+" /usr/lib/os-release)
+fi
+sed -i "s/^PRETTY_NAME=.*/PRETTY_NAME=\"Bazzite-Nix ${VARIANT}-${OSTREE_VERSION}\"/" \
   /usr/lib/os-release
