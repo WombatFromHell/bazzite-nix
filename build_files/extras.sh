@@ -5,16 +5,14 @@ dnf5 -y copr enable avengemedia/dms-git &&
   dnf5 -y install niri dms danksearch dgop fuzzel kanshi cava matugen cups-pk-helper xdg-desktop-portal-kde
 
 # use our niri-portals.conf override customized for KDE
-PORTALS_GLOBAL="/usr/share/xdg-desktop-portal"
-PORTALS_OVERRIDE="/ctx/override/usr/share/xdg-desktop-portal"
-if [ -r "$PORTALS_GLOBAL"/niri-portals.conf ]; then
-  # backup our default niri-portals.conf
-  mv "$PORTALS_GLOBAL"/niri-portals.conf "$PORTALS_GLOBAL"/niri-portals.conf.bak
-  cp -f "$PORTALS_OVERRIDE"/niri-portals.conf "$PORTALS_GLOBAL"/niri-portals.conf
-fi
-
+install -Z -b -m 644 \
+  /ctx/overrides/usr/share/xdg-desktop-portal/niri-portals.conf \
+  /usr/share/xdg-desktop-portal/niri-portals.conf
+# include our 'spawn-browser.sh' helper referenced by niri
+install -Z -m 755 \
+  /ctx/overrides/usr/bin/spawn-browser.sh \
+  /usr/bin/spawn-browser.sh
 # use our niri config override as well
-NIRI_GLOBAL="/etc/niri"
-NIRI_OVERRIDE="/ctx/override/etc/niri"
-mkdir -p "$NIRI_GLOBAL"
-cp -f "$NIRI_OVERRIDE"/config.kdl "$NIRI_GLOBAL"/config.kdl
+install -Z -D -m 644 \
+  /ctx/overrides/etc/niri/config.kdl \
+  /etc/niri/config.kdl

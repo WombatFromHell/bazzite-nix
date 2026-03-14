@@ -262,29 +262,6 @@ layout {
     }
 }
 
-environment {
-  QT_QPA_PLATFORM "wayland"
-  QT_STYLE_OVERRIDE "breeze"
-  QT_QPA_PLATFORMTHEME "kde"
-  QT_WAYLAND_DISABLE_WINDOWDECORATION "0"
-  XDG_CURRENT_DESKTOP "KDE"
-}
-
-// Add lines like this to spawn processes at startup.
-// Note that running niri as a session supports xdg-desktop-autostart,
-// which may be more convenient to use.
-// See the binds section below for more spawn examples.
-
-// This line starts waybar, a commonly used bar for Wayland compositors.
-// spawn-at-startup "waybar"
-
-// attempt to unlock kwallet automatically on login
-spawn-at-startup "/usr/libexec/pam_kwallet_init"
-spawn-at-startup "/usr/libexec/kf6/polkit-kde-authentication-agent-1"
-// only uncomment below if using 'kdewallet' with blank password
-// spawn-sh-at-startup "qdbus org.kde.kwalletd6 /modules/kwalletd6 org.kde.KWallet.open kdewallet 0 login"
-spawn-at-startup "/usr/bin/dms" "run"
-
 // To run a shell command (with variables, pipes, etc.), use spawn-sh-at-startup:
 // spawn-sh-at-startup "qs -c ~/source/qs/MyAwesomeShell"
 
@@ -364,6 +341,31 @@ layer-rule {
     clip-to-geometry true
 }
 
+environment {
+  QT_QPA_PLATFORM "wayland"
+  QT_STYLE_OVERRIDE "breeze"
+  QT_QPA_PLATFORMTHEME "kde"
+  QT_WAYLAND_DISABLE_WINDOWDECORATION "0"
+  XDG_CURRENT_DESKTOP "KDE"
+}
+
+// Add lines like this to spawn processes at startup.
+// Note that running niri as a session supports xdg-desktop-autostart,
+// which may be more convenient to use.
+// See the binds section below for more spawn examples.
+
+// This line starts waybar, a commonly used bar for Wayland compositors.
+// spawn-at-startup "waybar"
+
+// attempt to unlock kwallet automatically on login
+spawn-at-startup "/usr/libexec/pam_kwallet_init"
+spawn-at-startup "/usr/libexec/kf6/polkit-kde-authentication-agent-1"
+// only uncomment below if using 'kdewallet' with blank password
+// spawn-sh-at-startup "qdbus org.kde.kwalletd6 /modules/kwalletd6 org.kde.KWallet.open kdewallet 0 login"
+spawn-at-startup "/usr/bin/dms" "run"
+// don't forget to set a kanshi config in ~/.config/kanshi/config
+spawn-at-startup "/usr/bin/kanshi"
+
 binds {
     // Keys consist of modifiers separated by + signs, followed by an XKB key name
     // in the end. To find an XKB name for a particular key, you may use a program
@@ -383,7 +385,7 @@ binds {
     // Mod+Space hotkey-overlay-title="Run an Application: fuzzel" { spawn "fuzzel"; }
     Mod+Space hotkey-overlay-title="App Launcher: Toggle" { spawn "dms" "ipc" "call" "spotlight" "toggle"; }
     Mod+Alt+T hotkey-overlay-title="Open a Terminal" { spawn "ghostty"; }
-    Mod+Alt+B hotkey-overlay-title="Open Browser" { spawn-sh "spawn-browser.sh"; }
+    Mod+Alt+B hotkey-overlay-title="Open Browser" { spawn "spawn-browser.sh"; }
     // Mod+Alt+D hotkey-overlay-title="Open DSearch" { spawn "dsearch"; }
     Mod+Alt+F hotkey-overlay-title="Open Dolphin" { spawn "dolphin"; }
     //
