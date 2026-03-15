@@ -7,6 +7,7 @@ export fedora_version := env("FEDORA_VERSION", "43")
 export default_tag := env("DEFAULT_TAG", "testing")
 export bib_image := env("BIB_IMAGE", "quay.io/centos-bootc/bootc-image-builder:latest")
 export base_image := env("BASE_IMAGE", "ghcr.io/ublue-os/bazzite:stable")
+export cache_dir := env("CACHE_DIR", "${HOME}/.cache/bazzite-nix")
 
 alias build-vm := build-qcow2
 alias rebuild-vm := rebuild-qcow2
@@ -54,7 +55,7 @@ clean:
 clean-vm:
     #!/usr/bin/env bash
     set -euo pipefail
-    VM_CACHE="${HOME}/.cache/bazzite-nix"
+    VM_CACHE="{{ cache_dir }}"
     if [[ -d "$VM_CACHE" ]]; then
         echo "Removing VM cache from $VM_CACHE..."
         rm -rf "$VM_CACHE"
@@ -97,12 +98,18 @@ build $image_spec="{{ image_name }}:{{ image_tag }}" $base_image=base_image $bui
     just --unstable _build-rootful "$target_image" "$tag" "$variant" "$base_image" "$build_script" "$dx" "$hwe" "$gdx"
 
 build-stable:
+    #!/usr/bin/env bash
+    set -euo pipefail
     just --unstable build "bazzite-nix:stable" "ghcr.io/ublue-os/bazzite:stable"
 
 build-testing:
+    #!/usr/bin/env bash
+    set -euo pipefail
     just --unstable build "bazzite-nix:testing" "ghcr.io/ublue-os/bazzite:testing"
 
 build-cachyos:
+    #!/usr/bin/env bash
+    set -euo pipefail
     just --unstable build "bazzite-nix-cachyos:latest" "ghcr.io/ublue-os/bazzite:testing" "build-cachyos.sh" "cachyos"
 
 # Build and rechunk a container image
@@ -163,26 +170,90 @@ _rechunk $target_image $tag:
 
 # Build a QCOW2 VM image
 
-# Usage: just build-qcow2 [image:tag]
+# Usage: just build-qcow2 [image:tag] [base_image] [build_script] [variant] [output_dir]
 [group('Build Virtual Machine Image')]
-build-qcow2 $image_spec="":
-    just --unstable _build-vm-image "{{ image_spec }}" "qcow2"
+build-qcow2 $image_spec="" $base_image=base_image $build_script=image_build_script $variant="" $output_dir="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    just --unstable _build-vm-image "{{ image_spec }}" "qcow2" "{{ output_dir }}" "{{ variant }}" "{{ base_image }}" "{{ build_script }}" "0"
+
+# Build QCOW2 VM image from bazzite-nix-cachyos:latest
+[group('Build Virtual Machine Image')]
+build-qcow2-cachyos:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    just --unstable build-qcow2 "bazzite-nix-cachyos:latest" "ghcr.io/ublue-os/bazzite:testing" "build-cachyos.sh" "cachyos"
+
+# Build QCOW2 VM image from bazzite-nix:testing
+[group('Build Virtual Machine Image')]
+build-qcow2-testing:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    just --unstable build-qcow2 "bazzite-nix:testing" "ghcr.io/ublue-os/bazzite:testing"
 
 # Build a RAW VM image
 
-# Usage: just build-raw [image:tag]
+# Usage: just build-raw [image:tag] [base_image] [build_script] [variant] [output_dir]
 [group('Build Virtual Machine Image')]
-build-raw $image_spec="":
-    just --unstable _build-vm-image "{{ image_spec }}" "raw"
+build-raw $image_spec="" $base_image=base_image $build_script=image_build_script $variant="" $output_dir="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    just --unstable _build-vm-image "{{ image_spec }}" "raw" "{{ output_dir }}" "{{ variant }}" "{{ base_image }}" "{{ build_script }}" "0"
 
-# Aliases for build-qcow2 / build-raw
+# Aliases for build-qcow2 / build-raw (force rebuild container image)
 [group('Build Virtual Machine Image')]
-rebuild-qcow2 $image_spec="":
-    just --unstable build-qcow2 "{{ image_spec }}"
+rebuild-qcow2 $image_spec="" $base_image=base_image $build_script=image_build_script $variant="" $output_dir="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    just --unstable _build-vm-image "{{ image_spec }}" "qcow2" "{{ output_dir }}" "{{ variant }}" "{{ base_image }}" "{{ build_script }}" "1"
 
 [group('Build Virtual Machine Image')]
-rebuild-raw $image_spec="":
-    just --unstable build-raw "{{ image_spec }}"
+rebuild-raw $image_spec="" $base_image=base_image $build_script=image_build_script $variant="" $output_dir="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    just --unstable _build-vm-image "{{ image_spec }}" "raw" "{{ output_dir }}" "{{ variant }}" "{{ base_image }}" "{{ build_script }}" "1"
+
+# Rebuild QCOW2 VM image from bazzite-nix-cachyos:latest
+[group('Build Virtual Machine Image')]
+rebuild-qcow2-cachyos:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    just --unstable rebuild-qcow2 "bazzite-nix-cachyos:latest" "ghcr.io/ublue-os/bazzite:testing" "build-cachyos.sh" "cachyos"
+
+# Rebuild QCOW2 VM image from bazzite-nix:testing
+[group('Build Virtual Machine Image')]
+rebuild-qcow2-testing:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    just --unstable rebuild-qcow2 "bazzite-nix:testing" "ghcr.io/ublue-os/bazzite:testing"
+
+# Rebuild RAW VM image from bazzite-nix-cachyos:latest
+[group('Build Virtual Machine Image')]
+rebuild-raw-cachyos:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    just --unstable rebuild-raw "bazzite-nix-cachyos:latest" "ghcr.io/ublue-os/bazzite:testing" "build-cachyos.sh" "cachyos"
+
+# Rebuild RAW VM image from bazzite-nix:testing
+[group('Build Virtual Machine Image')]
+rebuild-raw-testing:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    just --unstable rebuild-raw "bazzite-nix:testing" "ghcr.io/ublue-os/bazzite:testing"
+
+# Build RAW VM image from bazzite-nix-cachyos:latest
+[group('Build Virtual Machine Image')]
+build-raw-cachyos:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    just --unstable build-raw "bazzite-nix-cachyos:latest" "ghcr.io/ublue-os/bazzite:testing" "build-cachyos.sh" "cachyos"
+
+# Build RAW VM image from bazzite-nix:testing
+[group('Build Virtual Machine Image')]
+build-raw-testing:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    just --unstable build-raw "bazzite-nix:testing" "ghcr.io/ublue-os/bazzite:testing"
 
 # Run a QCOW2 VM
 
@@ -210,12 +281,25 @@ _run-vm-wrapper $image_spec $type $output_dir $force_pull $clean:
 
 # Build VM image (shared helper for build-qcow2 and build-raw)
 [private]
-_build-vm-image $image_spec $type:
+_build-vm-image $image_spec $type $output_dir="" $variant="" $base_image=base_image $build_script=image_build_script $force_rebuild="0":
     #!/usr/bin/env bash
     set -euo pipefail
     eval "$(just --unstable _parse-image-spec-vm "{{ image_spec }}")"
-    just --unstable _build-rootful "$TARGET_IMAGE" "$TAG" "$TAG"
-    just --unstable _build-bib "$TARGET_IMAGE" "$TAG" "$type" "image.toml"
+    if [[ -z "{{ variant }}" ]]; then
+        variant="${TAG}"
+    fi
+    if [[ "{{ force_rebuild }}" == "1" ]]; then
+        echo "Force rebuilding container image..."
+        sudo podman rmi "${TARGET_IMAGE}:${TAG}" 2>/dev/null || true
+        just --unstable _build-rootful "$TARGET_IMAGE" "$TAG" "$variant" "{{ base_image }}" "{{ build_script }}" "0" "0" "0"
+    else
+        if sudo podman image exists "${TARGET_IMAGE}:${TAG}" 2>/dev/null; then
+            echo "Container image ${TARGET_IMAGE}:${TAG} already exists, skipping build"
+        else
+            just --unstable _build-rootful "$TARGET_IMAGE" "$TAG" "$variant" "{{ base_image }}" "{{ build_script }}" "0" "0" "0"
+        fi
+    fi
+    just --unstable _build-bib "$TARGET_IMAGE" "$TAG" "$type" "image.toml" "{{ output_dir }}"
 
 # Parse image_spec into TARGET_IMAGE and TAG
 
@@ -311,22 +395,24 @@ _build-bib $target_image $tag $type $config $output_dir="":
 
     args="--type ${type} --use-librepo=True --rootfs=btrfs"
 
+    # bib reads from the mounted /var/lib/containers/storage, need localhost/ prefix
     if [[ "$target_image" == localhost/* ]]; then
-        source_image="container-storage:${target_image#localhost/}:${tag}"
+        source_image="${target_image}:${tag}"
     else
-        source_image="container-storage:${target_image}:${tag}"
+        source_image="localhost/${target_image}:${tag}"
     fi
 
-    # Use provided output_dir or default to ./output
-    local out_dir="${output_dir}"
+    # Use provided output_dir or default to cache_dir
+    out_dir="${output_dir}"
     if [[ -z "$out_dir" ]]; then
-        out_dir="$(pwd)/output"
-        mkdir -p "$out_dir"
-    else
-        mkdir -p "$out_dir"
+        out_dir="{{ cache_dir }}"
     fi
+    mkdir -p "$out_dir"
 
-    BUILDTMP=$(mktemp -p "${PWD}" -d -t _build-bib.XXXXXXXXXX)
+    # Use cache_dir for bib temp output (avoids cluttering project dir)
+    BUILDTMP="${out_dir}/.bib-tmp"
+    rm -rf "$BUILDTMP"
+    mkdir -p "$BUILDTMP"
 
     sudo podman run --rm -it --privileged \
         --pull=newer \
@@ -339,7 +425,16 @@ _build-bib $target_image $tag $type $config $output_dir="":
         ${args} \
         "$source_image"
 
-    sudo mv -f "$BUILDTMP"/* "$out_dir"/
+    # Flatten bib output (bib creates type subdirs like image/, qcow2/, bootiso/)
+    for item in "$BUILDTMP"/*; do
+        if [[ -d "$item" ]]; then
+            # Move contents of subdirectory up one level
+            sudo mv -f "$item"/* "$out_dir"/
+            sudo rmdir "$item"
+        else
+            sudo mv -f "$item" "$out_dir"/
+        fi
+    done
     sudo rmdir "$BUILDTMP"
     sudo chown -R "$USER:$USER" "$out_dir"
 
@@ -348,17 +443,18 @@ _run-vm $target_image $tag $type $config $output_dir="" $force_pull="0" $clean="
     #!/usr/bin/bash
     set -e
 
-    OUTPUT_DIR="${OUTPUT_DIR:-${HOME}/.cache/bazzite-nix}"
-    [[ -n "{{ output_dir }}" ]] && OUTPUT_DIR="{{ output_dir }}"
+    OUTPUT_DIR="${output_dir}"
+    [[ -z "$OUTPUT_DIR" ]] && OUTPUT_DIR="{{ cache_dir }}"
     mkdir -p "$OUTPUT_DIR"
 
+    # Disk images are flattened to output dir root (bib subdirs are flattened)
     case "$type" in
-        qcow2) subdir="qcow2"; disk_name="disk.qcow2" ;;
-        raw)   subdir="image"; disk_name="disk.raw" ;;
-        iso)   subdir="bootiso"; disk_name="install.iso" ;;
-        *)     subdir="$type"; disk_name="disk.${type}" ;;
+        qcow2) disk_name="disk.qcow2" ;;
+        raw)   disk_name="disk.raw" ;;
+        iso)   disk_name="install.iso" ;;
+        *)     disk_name="disk.${type}" ;;
     esac
-    image_file="${OUTPUT_DIR}/${subdir}/${disk_name}"
+    image_file="${OUTPUT_DIR}/${disk_name}"
 
     if [[ "{{ clean }}" == "1" ]]; then
         echo "Removing cached disk image..."
