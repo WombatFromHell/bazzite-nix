@@ -2,7 +2,11 @@
 
 # include niri + DMS and friends from a verified repo
 dnf5 -y copr enable avengemedia/dms-git &&
-  dnf5 -y install niri dms danksearch dgop fuzzel kanshi cava matugen cups-pk-helper xdg-desktop-portal-kde
+  dnf5 -y install niri dms danksearch dgop fuzzel kanshi cava matugen cups-pk-helper xdg-desktop-portal-kde qt6ct-kde
+
+# include some extra hyprland tools for wlroots desktops
+dnf5 -y copr enable solopasha/hyprland &&
+  dnf5 -y install hyprpicker hyprshot
 
 # use our niri-portals.conf override customized for KDE
 install -Z -b -m 644 \
