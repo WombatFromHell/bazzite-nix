@@ -1,12 +1,20 @@
 #!/usr/bin/env bash
 
+# bring in some useful qt5/qt6 tools
+dnf5 -y install --enable-repo=terra \
+  qt5-qttools qt6-qttools tmux
+
 # include niri + DMS and friends from a verified repo
 dnf5 -y copr enable avengemedia/dms-git &&
-  dnf5 -y install niri dms danksearch dgop fuzzel kanshi cava matugen cups-pk-helper xdg-desktop-portal-kde qt6ct-kde
+  dnf5 -y copr disable avengemedia/dms-git &&
+  dnf5 -y install --enable-repo="*avengemedia*" \
+    niri dms danksearch dgop fuzzel kanshi cava matugen cups-pk-helper xdg-desktop-portal-kde qt6ct-kde \
+    ghostty
 
 # include some extra hyprland tools for wlroots desktops
 dnf5 -y copr enable solopasha/hyprland &&
-  dnf5 -y install hyprpicker hyprshot
+  dnf5 -y copr disable solopasha/hyprland &&
+  dnf5 -y install --enable-repo="*solopasha*" hyprpicker hyprshot
 
 # use our niri-portals.conf override customized for KDE
 install -Z -b -m 644 \
