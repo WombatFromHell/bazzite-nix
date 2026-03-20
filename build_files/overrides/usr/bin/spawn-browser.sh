@@ -43,7 +43,7 @@ spawn_browser() {
   # Add PREFIX if set (e.g., for env vars or wrappers)
   if [[ -n "${PREFIX:-}" ]]; then
     # shellcheck disable=SC2086
-    cmd+=($PREFIX)
+    cmd+=("$PREFIX")
   fi
 
   case "$browser_name" in
@@ -95,7 +95,7 @@ if [[ "$EXEC_LINE" =~ ^(/usr/bin/)?flatpak[[:space:]]+run ]]; then
   # Extract flatpak app ID and clean up desktop-specific args
   # Remove flatpak options (--branch=, --arch=, --command=, --file-forwarding) and @@ markers
   FLATPAK_APP_ID="$(echo "$EXEC_LINE" |
-    sed 's/@@[^ ]*//g' |                    # Remove @@u, @@, etc.
+    sed 's/@@[^ ]*//g' | # Remove @@u, @@, etc.
     awk '{
       for(i=1;i<=NF;i++) {
         if($i !~ /^--/ && $i !~ /^flatpak$/ && $i !~ /^run$/) {
@@ -122,18 +122,18 @@ if [[ "$EXEC_LINE" =~ ^(/usr/bin/)?flatpak[[:space:]]+run ]]; then
 # Check if this is a distrobox run command
 elif [[ "$EXEC_LINE" =~ ^distrobox[[:space:]]+run[[:space:]]+([^[:space:]]+) ]]; then
   DISTROBOX_CONTAINER="${BASH_REMATCH[1]}"
-  
+
   # Extract the command after '--' separator, strip distrobox-specific options
   DISTROBOX_CMD="$(echo "$EXEC_LINE" | sed 's/.*--[[:space:]]*//' | sed 's/@@[^ ]*//g')"
-  
+
   # Get the browser binary (first token)
   BROWSER_BIN="${DISTROBOX_CMD%% *}"
-  
+
   [[ -z "$BROWSER_BIN" ]] && {
     echo "Error: could not determine browser command from '$EXEC_LINE'" >&2
     exit 1
   }
-  
+
   spawn_browser "distrobox" "$DISTROBOX_CONTAINER" "$BROWSER_BIN" ${URL:+"$URL"}
 else
   # Native binary path

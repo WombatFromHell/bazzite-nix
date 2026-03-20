@@ -51,8 +51,6 @@ jobs:
 
       - name: Install Cosign
         uses: sigstore/cosign-installer@ba7bc0a3fef59531c69a25acd34668d6d3fe6f22 # v4.1.0
-        with:
-          cosign-release: "v2.6.2"
 
       - name: Login for Skopeo (for push operations)
         id: skopeo_login
@@ -79,20 +77,26 @@ jobs:
             sleep "$delay"
           done
 
-      - name: Compute image references
-        id: image_refs
+      - name: Build image
+        id: build_image
         run: |
-          # Standardized image reference components
-          # All downstream steps should use these outputs instead of inline interpolation
-          echo "registry=${{ inputs.registry_lower }}" >> $GITHUB_OUTPUT
-          echo "repo=${{ inputs.repo }}" >> $GITHUB_OUTPUT
-          echo "suffix=${{ matrix.variant_data.suffix }}" >> $GITHUB_OUTPUT
-          echo "output_image=${{ inputs.repo }}${{ matrix.variant_data.suffix }}" >> $GITHUB_OUTPUT
-          echo "base_image_tag=$(echo '${{ matrix.variant_data.base_image }}' | sed 's|.*:||')" >> $GITHUB_OUTPUT
+          set -euo pipefail
+          SKOPEO_TAG="localhost/raw-img"
+          sudo podman build \
+              --tag "${SKOPEO_TAG}" \
+              --build-arg BASE_IMAGE="${{ matrix.variant_data.base_image }}" \
+              --build-arg BUILD_SCRIPT="${{ matrix.variant_data.build_script || 'build.sh' }}" \
+              --build-arg CANONICAL_TAG="${{ matrix.variant_data.canonical_tag }}" \
+              --build-arg VARIANT="${{ matrix.variant_data.variant }}" \
+              --file ./Containerfile . && \
+              echo "skopeo_ref=containers-storage:${SKOPEO_TAG}" >> $GITHUB_OUTPUT
 
       - name: Assemble image labels
         id: labels
         run: |
+          set -euo pipefail
+          # Extract kernel version from the built image
+          KERNEL_VERSION=$(sudo podman run --rm localhost/raw-img cat /usr/share/ublue-os/kernel-version)
           LABELS=$(cat <<EOF
           org.opencontainers.image.created=${{ inputs.date }}
           org.opencontainers.image.description=${{ inputs.image_desc }}
@@ -102,108 +106,57 @@ jobs:
           org.opencontainers.image.url=https://github.com/${{ github.repository_owner }}/${{ github.event.repository.name }}
           org.opencontainers.image.vendor=${{ github.repository_owner }}
           org.opencontainers.image.version=${{ matrix.variant_data.parent_version }}
+          org.opencontainers.image.kernel-version=${KERNEL_VERSION}
           containers.bootc=1
           EOF
           )
-          echo "rechunk_labels<<EOF" >> $GITHUB_OUTPUT
+          LABELS=$(echo "$LABELS" | sed 's/^[[:space:]]*//')
+          echo "labels<<EOF" >> $GITHUB_OUTPUT
           echo "$LABELS" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
-
-          BUILDAH_ARGS=""
-          while IFS= read -r line; do
-            [ -n "$line" ] && BUILDAH_ARGS="$BUILDAH_ARGS --label \"$line\""
-          done <<< "$LABELS"
-          echo "buildah_args<<EOF" >> $GITHUB_OUTPUT
-          echo "$BUILDAH_ARGS" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-
-      - name: Build image
-        id: build_image
-        run: |
-          SKOPEO_TAG="localhost/raw-img"
-          sudo podman build \
-              --tag "${SKOPEO_TAG}" \
-              ${{ steps.labels.outputs.buildah_args }} \
-              --build-arg BASE_IMAGE="${{ matrix.variant_data.base_image }}" \
-              --build-arg BUILD_SCRIPT="${{ matrix.variant_data.build_script || 'build.sh' }}" \
-              --build-arg CANONICAL_TAG="${{ matrix.variant_data.canonical_tag }}" \
-              --build-arg VARIANT="${{ matrix.variant_data.variant }}" \
-              --file ./Containerfile . && \
-              echo "skopeo_ref=containers-storage:${SKOPEO_TAG}" >> $GITHUB_OUTPUT
-
-      - name: Extract kernel version
-        id: kernel_version
-        run: |
-          # Extract kernel version from the built image
-          KERNEL_VERSION=$(sudo podman run --rm localhost/raw-img cat /usr/share/ublue-os/kernel-version 2>/dev/null || echo "")
-          if [ -n "$KERNEL_VERSION" ]; then
-            echo "kernel_version=$KERNEL_VERSION" >> $GITHUB_OUTPUT
-            echo "Found kernel version: $KERNEL_VERSION"
-          else
-            echo "No kernel version file found in image"
-          fi
 
       - name: Run Rechunker
         if: inputs.skip_rechunk != 'true'
         id: rechunk
         run: |
-          # Clear labels before rechunk (required for centos-bootc compatibility)
-          container=$(sudo buildah from localhost/raw-img)
-          sudo buildah config --label "-" "$container"
-          sudo buildah commit --identity-label=false --rm "$container" localhost/raw-img
-          sudo podman run --rm --privileged --volume /var/lib/containers:/var/lib/containers \
+          LABEL_ARGS=()
+          while IFS= read -r line; do
+            [ -n "$line" ] && LABEL_ARGS+=(--label "$line")
+          done <<< "${{ steps.labels.outputs.labels }}"
+
+          # we normalize labels on our rechunked image directly in the rechunk step
+          sudo podman run --rm --privileged \
+              --volume /var/lib/containers:/var/lib/containers \
               quay.io/centos-bootc/centos-bootc:stream10 \
               rpm-ostree compose build-chunked-oci \
               --bootc --max-layers 67 --format-version 2 \
-              --from localhost/raw-img --output containers-storage:localhost/chunked-img
+              --from localhost/raw-img \
+              --output containers-storage:localhost/chunked-img \
+              "${LABEL_ARGS[@]}"
 
-          # Cleanup raw-img if it still exists (rechunker may have consumed it)
-          sudo podman image exists localhost/raw-img && sudo podman rmi localhost/raw-img || true
-
+          sudo podman image exists localhost/raw-img && \
+            sudo podman rmi localhost/raw-img
           echo "ref=containers-storage:localhost/chunked-img" >> "$GITHUB_OUTPUT"
 
-      - name: Validate rechunk output
-        if: inputs.skip_rechunk != 'true'
+      - name: Normalize labels on raw image
+        if: inputs.skip_rechunk == 'true'
         run: |
-          if [ -z "${{ steps.rechunk.outputs.ref }}" ]; then
-            echo "::error::Rechunk step did not produce a valid image reference"
-            exit 1
-          fi
-          echo "✅ Rechunk output validated: ${{ steps.rechunk.outputs.ref }}"
-
-      - name: Relabel Image
-        if: inputs.skip_rechunk != 'true'
-        id: relabel
-        run: |
-          IMAGE_REF="${{ steps.rechunk.outputs.ref }}"
-
-          # Reapply labels from build step
-          container=$(sudo buildah from "$IMAGE_REF")
+          set -euo pipefail
+          container=$(sudo buildah from localhost/raw-img)
+          sudo buildah config --label "-" "$container"
           while IFS= read -r line; do
             [ -n "$line" ] && sudo buildah config --label "$line" "$container"
-          done <<< "${{ steps.labels.outputs.rechunk_labels }}"
-
-          # Add kernel version label if available
-          if [ -n "${{ steps.kernel_version.outputs.kernel_version }}" ]; then
-            sudo buildah config --label "org.opencontainers.image.kernel-version=${{ steps.kernel_version.outputs.kernel_version }}" "$container"
-          fi
-
-          sudo buildah commit --identity-label=false --rm "$container" "$IMAGE_REF"
-
-          echo "source_ref=$IMAGE_REF" >> "$GITHUB_OUTPUT"
+          done <<< "${{ steps.labels.outputs.labels }}"
+          sudo buildah commit --identity-label=false --rm "$container" localhost/raw-img
 
       - name: Extract final image digest
         id: final_digest
         run: |
-          # Determine which image reference to use based on whether rechunk was run
+          set -euo pipefail
           if [ "${{ inputs.skip_rechunk }}" = "true" ]; then
-            SOURCE_REF="${{ steps.build_image.outputs.skopeo_ref }}"
+            SOURCE_REF="containers-storage:localhost/raw-img"
           else
-            SOURCE_REF="${{ steps.rechunk.outputs.ref }}"
-            # If rechunk ran but relabel also ran, use the relabeled source_ref
-            if [ -n "${{ steps.relabel.outputs.source_ref }}" ]; then
-              SOURCE_REF="${{ steps.relabel.outputs.source_ref }}"
-            fi
+            SOURCE_REF="containers-storage:localhost/chunked-img"
           fi
           FULL_DIGEST=$(sudo skopeo inspect --format='{{.Digest}}' "$SOURCE_REF")
           SHORT_DIGEST=$(echo "$FULL_DIGEST" | sed 's/sha256://')
@@ -217,14 +170,15 @@ jobs:
           SIGNING_SECRET: ${{ secrets.signing_secret }}
         run: |
           set -euo pipefail
-
           SOURCE_REF="${{ steps.final_digest.outputs.source_ref }}"
           IMAGE_DIGEST="${{ steps.final_digest.outputs.full_build_digest }}"
           SHORT_DIGEST="${{ steps.final_digest.outputs.build_digest }}"
           IFS=',' read -r -a tags <<< "${{ matrix.variant_data.tags }}"
-          BASE_IMG="${{ steps.image_refs.outputs.registry }}/${{ steps.image_refs.outputs.output_image }}"
+          BASE_IMG="${{ inputs.registry_lower }}/${{ inputs.repo }}${{ matrix.variant_data.suffix }}"
 
           push_and_sign() {
+            local attempt=$1
+            local max_attempts=$2
             DIGEST_REF="${BASE_IMG}@${IMAGE_DIGEST}"
             SHORT_DIGEST_INNER="${SHORT_DIGEST}"
             local attempt_tags=("${tags[@]}")
@@ -268,8 +222,6 @@ jobs:
             echo "Signing image: ${DIGEST_REF}"
             cosign sign -y \
               --key env://SIGNING_SECRET \
-              --registry-referrers-mode=legacy \
-              --new-bundle-format=false \
               --registry-username "${{ github.actor }}" \
               --registry-password "${{ secrets.GITHUB_TOKEN }}" \
               "$DIGEST_REF"
@@ -291,7 +243,7 @@ jobs:
           max_attempts=3
           delay=15
           for attempt in $(seq 1 $max_attempts); do
-            if push_and_sign; then
+            if push_and_sign "$attempt" "$max_attempts"; then
               break
             fi
 
