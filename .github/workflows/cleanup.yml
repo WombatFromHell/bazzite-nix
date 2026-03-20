@@ -10,19 +10,13 @@ on:
         type: boolean
         default: true
       package-filter:
-        description: "Comma-separated list of full package names to process (empty = all)"
+        description: "Comma-separated list of full package names to process (empty = all cleanup-enabled)"
         type: string
         default: ""
-      purge-untagged-referrers:
-        description: "CAUTION: Remove ALL untagged referrer/attestation packages"
-        type: boolean
-        default: false
 
 env:
   # Scheduled runs are always live; manual runs respect the input (default: true = safe).
-  # Logic: if schedule → 'false', else use the string form of the boolean input.
   DRY_RUN: ${{ github.event_name == 'schedule' && 'false' || inputs.dry-run == true && 'true' || 'false' }}
-  REGISTRY_OWNER_LC: ""
 
 jobs:
   prepare:
@@ -43,26 +37,24 @@ jobs:
           VARIANTS_FILE=".github/variants.json"
           BASE="bazzite-nix"
 
-          # The matrix operates on full package names (e.g. bazzite-nix, bazzite-nix-cachyos)
-          # rather than suffixes. This avoids the ambiguity of empty-string suffixes shared by
-          # multiple tag-only variants (e.g. 'stable' and 'testing' both have no suffix and
-          # map to the same package), which previously caused the cleanup job to run multiple
-          # times against the same package.
+          # Build the full list of unique package names from variants that have
+          # cleanup: true and are not disabled (unless a package-filter overrides).
           #
-          # unique deduplicates package names so that tag-only variants sharing the same
-          # package (bazzite-nix:stable, bazzite-nix:testing) produce exactly one matrix entry.
+          # The cleanup property opts a variant into scheduled/automated cleanup.
+          # Variants without it (or with cleanup: false) are skipped in normal runs.
+          # A package-filter override bypasses the cleanup flag so a specific package
+          # can be run manually even if cleanup is not set.
           #
-          # When an explicit package-filter is provided, disabled variants are intentionally
-          # included so a specific disabled variant's package can be run as a one-time override.
-          # When no filter is given (normal/scheduled runs), the disabled flag is respected.
+          # unique deduplicates so tag-only variants sharing the same package name
+          # (e.g. bazzite-nix:stable and bazzite-nix:testing) produce one matrix entry.
+
           if [ -n "$FILTER" ]; then
-            # Override mode: build the full package name list from all variants (including
-            # disabled), then filter down to exactly what was requested.
+            # Override mode: include all variants (disabled or not) then filter.
             jq -r --arg base "$BASE" \
               '[.variants[] | ($base + (.suffix // "")) | ascii_downcase] | unique[]' \
               "$VARIANTS_FILE" > /tmp/all_packages.txt
 
-            # -x: whole-line match — prevents 'bazzite-nix' from matching 'bazzite-nix-cachyos'
+            # -x: whole-line match prevents 'bazzite-nix' matching 'bazzite-nix-cachyos'
             grep -Fxf <(echo "$FILTER" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//') \
               /tmp/all_packages.txt > /tmp/packages.txt 2>/dev/null || touch /tmp/packages.txt
 
@@ -70,16 +62,15 @@ jobs:
               echo "::warning::package-filter '${FILTER}' matched no defined packages — check your package names"
             fi
           else
-            # Normal mode: respect the disabled flag
+            # Normal mode: respect disabled flag and require cleanup: true.
             jq -r --arg base "$BASE" \
-              '[.variants[] | select(.disabled != true) | ($base + (.suffix // "")) | ascii_downcase] | unique[]' \
+              '[.variants[] | select(.disabled != true) | select(.cleanup != false) | ($base + (.suffix // "")) | ascii_downcase] | unique[]' \
               "$VARIANTS_FILE" > /tmp/packages.txt
           fi
 
           echo "Packages to process:"
           cat /tmp/packages.txt
 
-          # Build a JSON array of package name strings for the matrix
           packages=$(jq -Rnc '[inputs]' < /tmp/packages.txt)
           echo "packages=${packages}" >> "$GITHUB_OUTPUT"
 
@@ -89,12 +80,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Each entry is a full package name: bazzite-nix, bazzite-nix-cachyos, etc.
-        # One job runs per unique package — tag-only variants (stable, testing) that share
-        # the same package are handled together by the cleanup action in a single pass.
         package: ${{ fromJson(needs.prepare.outputs.packages) }}
 
-    # Prevent parallel runs on the same package (recommended by action docs)
+    # Prevent parallel runs against the same package (recommended by action docs).
     concurrency:
       group: cleanup-${{ matrix.package }}
       cancel-in-progress: false
@@ -102,334 +90,23 @@ jobs:
     permissions:
       packages: write
 
-    env:
-      PACKAGE: ${{ matrix.package }}
-      # All steps append to this file; it is uploaded as the run artifact at the end.
-      LOG_FILE: "${{ github.workspace }}/cleanup-${{ matrix.package }}.log"
-
     steps:
       - name: Normalize registry owner to lowercase
-        # github.repository_owner preserves account casing (e.g. WombatFromHell).
         # OCI image refs must be fully lowercase per the OCI distribution spec.
-        # Normalize once and export for all subsequent steps via GITHUB_ENV.
         run: |
           lc_owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
           echo "REGISTRY_OWNER_LC=${lc_owner}" >> "$GITHUB_ENV"
-          echo "IMAGE_BASE=ghcr.io/${lc_owner}/${{ env.PACKAGE }}" >> "$GITHUB_ENV"
-
-          # Write log header — all subsequent steps append to this file
-          cat >> "${{ env.LOG_FILE }}" << EOF
-          =========================================================
-          Cleanup Run Log — ${{ env.PACKAGE }}
-          =========================================================
-          Run ID:    ${{ github.run_id }}
-          Trigger:   ${{ github.event_name }}
-          Dry-run:   ${{ env.DRY_RUN }}
-          Image:     ghcr.io/${lc_owner}/${{ env.PACKAGE }}
-          Timestamp: $(date -u +%Y-%m-%dT%H:%M:%SZ) UTC
-          =========================================================
-
-          EOF
-
-      - name: Snapshot version count (pre-cleanup)
-        id: pre
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          # Count all current package versions before any deletions.
-          # --paginate returns one JSON array per page; awk sums the per-page lengths
-          # to produce a single total rather than requiring jq to slurp all pages.
-          count=$(gh api --paginate \
-            "/users/${REGISTRY_OWNER_LC}/packages/container/${{ env.PACKAGE }}/versions" \
-            --jq '. | length' 2>/dev/null \
-            | awk '{s+=$1} END {print s+0}') \
-            || { echo "::warning::Pre-cleanup snapshot failed — counts will be unavailable"; count=0; }
-          echo "count=${count}" >> "$GITHUB_OUTPUT"
-
-          echo "Pre-cleanup version count: ${count}"
-          echo "[pre-cleanup]  version count: ${count}" >> "${{ env.LOG_FILE }}"
+          echo "IMAGE_BASE=ghcr.io/${lc_owner}/${{ matrix.package }}" >> "$GITHUB_ENV"
 
       - name: Cleanup images
-        id: cleanup
-        # delete-untagged: true      removes orphaned sha256:<hash> sigstore/attestation
-        #                            artifacts that appear as untagged packages in the UI.
-        #                            The action safely excludes valid untagged children of
-        #                            multi-arch images before applying this (step 3 of its
-        #                            cleanup algorithm removes child images from scope first).
-        #
-        # delete-orphaned-images     removes sha256-<hash>.sig cosign tags whose parent
-        #                            digest no longer exists (native support since v1.0.13).
-        #
-        # Together these two options cover all sigstore/cosign artifact cleanup natively,
-        # with no manual fallback step required.
         uses: dataaxiom/ghcr-cleanup-action@v1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          owner: ${{ env.REGISTRY_OWNER_LC }}
-          package: ${{ env.PACKAGE }}
-          keep-n-tagged: 60
+          package: ${{ matrix.package }}
+          older-than: 60 days # primary filter
+          keep-n-tagged: 24 # secondary filter (fallback)
           delete-untagged: true
           delete-partial-images: true
           delete-orphaned-images: true
           dry-run: ${{ env.DRY_RUN }}
           log-level: info
-
-      - name: Purge untagged referrer/attestation packages
-        # ⚠️  CAUTION — SIGSTORE/ATTESTATION ARTIFACT PURGE ⚠️
-        #
-        # This step forcibly deletes ALL untagged packages whose name matches the
-        # sha256:<hash> form — these are sigstore attestation artifacts and OCI
-        # referrer objects (e.g. cosign attestations, SBOM attachments) that ghcr.io
-        # surfaces as "untagged" packages in the GitHub UI.
-        #
-        # WHY THIS IS SEPARATE FROM THE MAIN CLEANUP ACTION:
-        # ghcr-cleanup-action intentionally excludes referrer-linked child images from
-        # its delete-untagged pass (step 3 of its algorithm) to protect valid
-        # multi-arch platform manifests. This means attestation artifacts attached to
-        # still-live parent images are never deleted by the action, and accumulate over
-        # time. This step bypasses that protection deliberately.
-        #
-        # RISKS:
-        # - Deletes ALL untagged sha256:<hash> packages, including attestations for
-        #   images that are still within the keep-n-tagged window.
-        # - Any tooling that verifies sigstore attestations (e.g. cosign verify-attestation,
-        #   policy controllers) will fail for affected images after this runs.
-        # - Deleted packages cannot be trivially restored — GitHub's package restoration
-        #   API requires the exact version ID, which is logged to both the step log and
-        #   the downloadable artifact for this run.
-        #
-        # SAFEGUARDS:
-        # - Only runs on workflow_dispatch, never on schedule (if: condition enforced
-        #   at the runner level — schedule events cannot set inputs).
-        # - Defaults to false — must be explicitly opted in per run.
-        # - Respects the top-level dry-run flag: set dry-run=true to preview deletions
-        #   before committing. Always do a dry run first.
-        if: github.event_name == 'workflow_dispatch' && inputs.purge-untagged-referrers == true
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-
-          OWNER="${REGISTRY_OWNER_LC}"
-          PKG="${{ env.PACKAGE }}"
-          LOG="${{ env.LOG_FILE }}"
-
-          echo "::warning::Purging untagged referrer/attestation packages for ${PKG} — sigstore attestations will be permanently lost"
-
-          {
-            echo ""
-            echo "---------------------------------------------------------"
-            echo "Referrer/Attestation Purge"
-            echo "---------------------------------------------------------"
-            echo "Started: $(date -u +%Y-%m-%dT%H:%M:%SZ) UTC"
-            echo ""
-          } >> "$LOG"
-
-          if ! raw_versions=$(gh api --paginate \
-            "/users/${OWNER}/packages/container/${PKG}/versions" \
-            --jq '.[] | {id: .id, name: .name, tags: (.metadata.container.tags // [])}' \
-            2>/dev/null); then
-            echo "::error::GitHub API call failed for ${PKG} — aborting referrer purge"
-            echo "[error] GitHub API call failed — purge aborted" >> "$LOG"
-            exit 1
-          fi
-
-          if [ -z "$raw_versions" ]; then
-            echo "No versions found for ${PKG}, nothing to purge."
-            echo "[info]  No versions found, nothing to purge" >> "$LOG"
-            exit 0
-          fi
-
-          deleted=0
-          skipped=0
-          errors=0
-
-          # Parse id, name, and tag count in one jq pass per version rather than
-          # three separate jq invocations — avoids spawning 3N processes for N versions
-          echo "::group::Referrer deletion detail"
-          while IFS=$'\t' read -r vid name tag_count; do
-            [[ -z "$vid" ]] && continue
-
-            if echo "$name" | grep -qE '^sha256:[a-f0-9]{64}$' && [ "$tag_count" -eq 0 ]; then
-              # This is an untagged referrer/attestation artifact — process it
-              if [ "${{ env.DRY_RUN }}" = "true" ]; then
-                echo "[DRY]  Would delete referrer: ${name} (id: ${vid})"
-                echo "[dry]  would-delete referrer: ${name} (id: ${vid})" >> "$LOG"
-              else
-                if gh api --method DELETE \
-                  "/users/${OWNER}/packages/container/${PKG}/versions/${vid}" \
-                  >/dev/null 2>&1; then
-                  echo "[✓] Deleted referrer: ${name} (id: ${vid})"
-                  echo "[deleted] referrer: ${name} (id: ${vid})" >> "$LOG"
-                else
-                  echo "::warning::Failed to delete ${name} (id: ${vid})"
-                  echo "[error]   failed to delete referrer: ${name} (id: ${vid})" >> "$LOG"
-                  (( errors++ )) || true
-                fi
-              fi
-              (( deleted++ )) || true
-
-              # Emit a progress line every 25 deletions so the log shows the step is alive
-              if (( deleted % 25 == 0 )); then
-                echo "Progress: ${deleted} referrer(s) processed so far..."
-              fi
-            else
-              # Not a referrer — has tags or non-digest name; skip it
-              # Only log skips in dry-run mode to avoid flooding live run logs
-              if [ "${{ env.DRY_RUN }}" = "true" ]; then
-                echo "[SKIP] Not a referrer: ${name} (${tag_count} tag(s))"
-                echo "[skip] not a referrer: ${name} (${tag_count} tag(s))" >> "$LOG"
-              fi
-              (( skipped++ )) || true
-            fi
-          done < <(echo "$raw_versions" | jq -r '[.id, .name, (.tags | length | tostring)] | @tsv')
-          echo "::endgroup::"
-
-          # Write structured purge summary to log file
-          {
-            echo ""
-            echo "Purge summary:"
-            if [ "${{ env.DRY_RUN }}" = "true" ]; then
-              echo "  would-delete: ${deleted}"
-            else
-              echo "  deleted:      ${deleted}"
-              echo "  errors:       ${errors}"
-            fi
-            echo "  skipped:      ${skipped}"
-            echo "Completed: $(date -u +%Y-%m-%dT%H:%M:%SZ) UTC"
-            echo "---------------------------------------------------------"
-          } >> "$LOG"
-
-          if [ "${{ env.DRY_RUN }}" = "true" ]; then
-            echo "DRY RUN: Would delete ${deleted} referrer package(s), skipped ${skipped} non-referrer package(s)"
-          else
-            echo "Purge complete: deleted ${deleted} referrer package(s), ${errors} error(s), skipped ${skipped} non-referrer package(s)"
-          fi
-
-      - name: Snapshot version count (post-cleanup)
-        id: post
-        if: always()
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          count=$(gh api --paginate \
-            "/users/${REGISTRY_OWNER_LC}/packages/container/${{ env.PACKAGE }}/versions" \
-            --jq '. | length' 2>/dev/null \
-            | awk '{s+=$1} END {print s+0}') \
-            || { echo "::warning::Post-cleanup snapshot failed — counts will be unavailable"; count=0; }
-          echo "count=${count}" >> "$GITHUB_OUTPUT"
-
-          pre="${{ steps.pre.outputs.count }}"
-          deleted=$(( pre - count ))
-          # Guard against negative delta (e.g. if pre-snapshot failed and returned 0)
-          if [ "$deleted" -lt 0 ]; then deleted=0; fi
-          echo "deleted=${deleted}" >> "$GITHUB_OUTPUT"
-
-          echo "Post-cleanup version count: ${count} (deleted: ${deleted})"
-          {
-            echo ""
-            echo "[post-cleanup] version count: ${count}"
-            echo "[post-cleanup] total deleted: ${deleted}"
-          } >> "${{ env.LOG_FILE }}"
-
-      - name: Generate step summary
-        if: always()
-        run: |
-          set -euo pipefail
-
-          if [ "${{ env.DRY_RUN }}" = "true" ]; then
-            MODE="🧪 DRY-RUN"
-          else
-            MODE="✅ LIVE"
-          fi
-
-          if [ "${{ github.event_name }}" = "schedule" ]; then
-            TRIGGER="schedule (weekly, always live)"
-          else
-            TRIGGER="workflow_dispatch (dry-run=${{ env.DRY_RUN }})"
-          fi
-
-          # Determine whether the referrer purge step ran this invocation
-          PURGE_RAN="false"
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.purge-untagged-referrers }}" = "true" ]; then
-            PURGE_RAN="true"
-          fi
-
-          PRE_COUNT="${{ steps.pre.outputs.count || '?' }}"
-          POST_COUNT="${{ steps.post.outputs.count || '?' }}"
-          DELETED="${{ steps.post.outputs.deleted || '?' }}"
-
-          # Write tail of log file to step summary for quick inspection without downloading
-          {
-            echo ""
-            echo "---------------------------------------------------------"
-            echo "Summary"
-            echo "---------------------------------------------------------"
-            echo "  mode:        ${{ env.DRY_RUN == 'true' && 'dry-run' || 'live' }}"
-            echo "  pre-count:   ${PRE_COUNT}"
-            echo "  post-count:  ${POST_COUNT}"
-            echo "  deleted:     ${DELETED}"
-            echo "  purge-ran:   ${PURGE_RAN}"
-            echo "Finished: $(date -u +%Y-%m-%dT%H:%M:%SZ) UTC"
-            echo "========================================================="
-          } >> "${{ env.LOG_FILE }}"
-
-          cat >> "$GITHUB_STEP_SUMMARY" << EOF
-          ## 🧹 Image Cleanup — \`${{ env.PACKAGE }}\`
-
-          **Mode**: ${MODE}
-          **Trigger**: \`${TRIGGER}\`
-          **Image**: \`${IMAGE_BASE}\`
-          **Timestamp**: $(date -u +%Y-%m-%dT%H:%M:%SZ) UTC
-
-          ---
-
-          ### 📦 Cleanup Results
-
-          | | Count |
-          |---|---|
-          | Versions before cleanup | \`${PRE_COUNT}\` |
-          | Versions after cleanup  | \`${POST_COUNT}\` |
-          | **Total deleted**       | \`${DELETED}\` |
-
-          > Breakdown by deletion type (tagged, untagged, orphaned, cosign) is available
-          > in the **Cleanup images** step log above (\`log-level: info\`).
-
-          $(if [ "$PURGE_RAN" = "true" ]; then echo "### ⚠️ Referrer/Attestation Purge
-          > All untagged \`sha256:<hash>\` referrer and sigstore attestation packages were
-          > forcibly deleted. Sigstore attestation verification for affected images will no
-          > longer succeed. The full list of deleted version IDs is available in the
-          > downloadable log artifact for this run (required for package restoration)."; fi)
-
-          <details>
-          <summary>🔍 Configuration</summary>
-
-          \`\`\`yaml
-          image:                      ${IMAGE_BASE}
-          keep-n-tagged:              60
-          delete-untagged:            true  # orphaned sha256:<hash> attestation artifacts only
-          delete-partial-images:      true
-          delete-orphaned-images:     true  # orphaned sha256-<hash>.sig cosign tags
-          dry-run:                    ${{ env.DRY_RUN }}
-          purge-untagged-referrers:   ${PURGE_RAN}  # ⚠️ destructive — removes all attestations
-          \`\`\`
-          </details>
-          EOF
-
-      - name: Upload cleanup log
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: cleanup-log-${{ matrix.package }}
-          # LOG_FILE is the single structured log written throughout this job.
-          # It contains: run metadata header, pre/post version counts, per-deletion
-          # records with version IDs (actionable for package restoration), purge
-          # summary, and final counts. The glob patterns below are kept as a fallback
-          # in case the action itself writes any additional log files.
-          path: |
-            ${{ env.LOG_FILE }}
-            ${{ github.workspace }}/*.log
-          retention-days: 30
-          overwrite: true

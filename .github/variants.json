@@ -13,7 +13,8 @@
           "versioned": ["string (supports {canonical}, {branch} placeholders)"]
         },
         "tags_default": "If 'tags' is omitted, generates: [base_image_tag, base_image_tag-canonical, canonical]",
-        "disabled": "boolean (optional, default: false)"
+        "disabled": "boolean (optional, default: false)",
+        "cleanup": "boolean (optional, default: true)"
       }
     ],
     "_output": "Fields computed by check-variants.sh for each variant needing a build:",
@@ -34,7 +35,8 @@
     {
       "name": "stable",
       "base_image": "ghcr.io/ublue-os/bazzite:stable",
-      "disabled": true
+      "disabled": true,
+      "cleanup": true
     },
     {
       "name": "testing",
@@ -42,32 +44,16 @@
       "latest": true,
       "tags": {
         "versioned": ["{branch}", "{branch}-{canonical}"]
-      }
+      },
+      "cleanup": true
     },
     {
       "name": "unstable",
       "base_image": "ghcr.io/ublue-os/bazzite:unstable",
       "tags": {
         "versioned": ["{branch}", "{branch}-{canonical}"]
-      }
-    },
-    {
-      "name": "cachyos",
-      "suffix": "-cachyos",
-      "base_image": "ghcr.io/ublue-os/bazzite:testing",
-      "description": "Builds the bazzite image with kernel from cachyos copr",
-      "build_script": "build-cachyos.sh",
-      "latest": true,
-      "disabled": true
-    },
-    {
-      "name": "upstream",
-      "suffix": "-upstream",
-      "base_image": "ghcr.io/ublue-os/bazzite:testing",
-      "description": "Builds the bazzite image with kernel from testing-updates",
-      "build_script": "build-upstream.sh",
-      "latest": true,
-      "disabled": true
+      },
+      "cleanup": true
     },
     {
       "name": "nvidia-open",
