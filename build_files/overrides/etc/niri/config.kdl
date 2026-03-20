@@ -342,10 +342,9 @@ layer-rule {
 }
 
 environment {
-  QT_QPA_PLATFORM "wayland"
-  QT_STYLE_OVERRIDE "breeze"
-  QT_QPA_PLATFORMTHEME "kde"
-  QT_WAYLAND_DISABLE_WINDOWDECORATION "0"
+    QT_QPA_PLATFORMTHEME "qt6ct"
+    QT_QPA_PLATFORM "wayland"
+    QT_WAYLAND_DISABLE_WINDOWDECORATION "0"
 }
 
 // Add lines like this to spawn processes at startup.
@@ -360,6 +359,10 @@ environment {
 spawn-at-startup "/usr/libexec/pam_kwallet_init"
 spawn-at-startup "/usr/libexec/kf6/polkit-kde-authentication-agent-1"
 // only uncomment below if using 'kdewallet' with blank password
+//
+spawn-sh-at-startup "/usr/bin/dbus-update-activation-environment --systemd QT_QPA_PLATFORMTHEME QT_QPA_PLATFORM QT_WAYLAND_DISABLE_WINDOWDECORATION"
+spawn-sh-at-startup "/usr/bin/systemctl --user restart xdg-desktop-portal xdg-desktop-portal-gtk plasma-xdg-desktop-portal-kde 2>/dev/null"
+//
 // spawn-sh-at-startup "qdbus org.kde.kwalletd6 /modules/kwalletd6 org.kde.KWallet.open kdewallet 0 login"
 spawn-at-startup "/usr/bin/dms" "run"
 // don't forget to set a kanshi config in ~/.config/kanshi/config
@@ -388,6 +391,12 @@ binds {
     // Mod+Alt+D hotkey-overlay-title="Open DSearch" { spawn "dsearch"; }
     Mod+Alt+F hotkey-overlay-title="Open Dolphin" { spawn "dolphin"; }
     //
+    Super+Shift+S hotkey-overlay-title="Grimshot Active Window" { spawn "grimshot.sh" "--" "active"; }
+    Super+Ctrl+Shift+S hotkey-overlay-title="Grimshot Window" { spawn "grimshot.sh" "--" "window"; }
+    Super+Ctrl+Shift+R hotkey-overlay-title="Grimshot Region" { spawn "grimshot.sh" "--" "region"; }
+    Super+Ctrl+Shift+Alt+S hotkey-overlay-title="Grimshot Screen" { spawn "grimshot.sh" "--" "screen"; }
+    Super+Ctrl+Shift+P hotkey-overlay-title="Hyprpicker" { spawn "hyprpicker.sh"; }
+    //
     Mod+Shift+L hotkey-overlay-title="Lock Screen" { spawn "dms" "ipc" "call" "lock" "lock"; }
     Mod+Shift+Q hotkey-overlay-title="Power Menu: Toggle" { spawn "dms" "ipc" "call" "powermenu" "toggle"; }
 
@@ -414,7 +423,7 @@ binds {
     // Open/close the Overview: a zoomed-out view of workspaces and windows.
     // You can also move the mouse into the top-left hot corner,
     // or do a four-finger swipe up on a touchpad.
-    Mod+Alt+O repeat=false { toggle-overview; }
+    Super+Tab repeat=false { toggle-overview; }
 
     Mod+Q repeat=false { close-window; }
 
