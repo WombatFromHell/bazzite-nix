@@ -49,9 +49,6 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Install Cosign
-        uses: sigstore/cosign-installer@ba7bc0a3fef59531c69a25acd34668d6d3fe6f22 # v4.1.0
-
       - name: Login for Skopeo (for push operations)
         id: skopeo_login
         run: |
@@ -129,7 +126,7 @@ jobs:
               --volume /var/lib/containers:/var/lib/containers \
               quay.io/centos-bootc/centos-bootc:stream10 \
               rpm-ostree compose build-chunked-oci \
-              --bootc --max-layers 67 --format-version 2 \
+              --bootc --max-layers 200 --format-version 2 \
               --from localhost/raw-img \
               --output containers-storage:localhost/chunked-img \
               "${LABEL_ARGS[@]}"
@@ -164,8 +161,11 @@ jobs:
           echo "full_build_digest=$FULL_DIGEST" >> $GITHUB_OUTPUT
           echo "build_digest=$SHORT_DIGEST" >> $GITHUB_OUTPUT
 
-      - name: Sign and Push to GHCR
-        id: sign_and_push
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@ba7bc0a3fef59531c69a25acd34668d6d3fe6f22 # v4.1.0
+
+      - name: Push to GHCR then sign
+        id: push_and_sign
         env:
           SIGNING_SECRET: ${{ secrets.signing_secret }}
         run: |
@@ -218,21 +218,15 @@ jobs:
             echo "Signing image: ${digest_ref}"
             cosign sign -y \
               --key env://SIGNING_SECRET \
+              --new-bundle-format=false \
               --registry-username "${{ github.actor }}" \
               --registry-password "${{ secrets.GITHUB_TOKEN }}" \
               "${digest_ref}"
             echo "::endgroup::"
 
-            echo "::group::Verify signature"
-            if cosign verify \
-              --key ./cosign.pub \
-              "${digest_ref}"; then
-              echo "Signature verification successful!"
-            else
-              echo "::error::Signature verification failed for ${digest_ref}"
-              exit 1
-            fi
-            echo "::endgroup::"
+            # Output the authoritative remote digest for downstream steps
+            echo "remote_digest=${remote_digest}" >> $GITHUB_OUTPUT
+            echo "remote_digest_ref=${digest_ref}" >> $GITHUB_OUTPUT
           }
 
           max_attempts=3
@@ -250,3 +244,73 @@ jobs:
             echo "::warning::Attempt ${attempt} failed. Retrying in ${delay}s..."
             sleep "$delay"
           done
+
+      - name: Install ORAS
+        run: |
+          set -euo pipefail
+          ORAS_VERSION="v1.3.1"
+          curl -fsSL \
+            "https://github.com/oras-project/oras/releases/download/${ORAS_VERSION}/oras_${ORAS_VERSION}_linux_amd64.tar.gz" \
+            -o /tmp/oras.tar.gz
+          mkdir -p /usr/local/bin
+          sudo tar -xzf /tmp/oras.tar.gz -C /usr/local/bin oras
+          sudo chmod 0755 /usr/local/bin/oras
+          oras version
+
+      - name: Verify signature and attestation
+        run: |
+          set -euo pipefail
+          BASE_IMG="${{ inputs.registry_lower }}/${{ inputs.repo }}${{ matrix.variant_data.suffix }}"
+          IFS=',' read -r -a tags <<< "${{ matrix.variant_data.tags }}"
+
+          # Prefer the authoritative remote digest from sign_and_push over
+          # the local digest from final_digest, in case the image was mutated
+          # during the push (e.g. by GHCR layer deduplication)
+          DIGEST_REF="${{ steps.sign_and_push.outputs.remote_digest_ref }}"
+          if [ -z "${DIGEST_REF}" ]; then
+            echo "::warning::Remote digest ref not available, falling back to local digest"
+            DIGEST_REF="${BASE_IMG}@${{ steps.final_digest.outputs.full_build_digest }}"
+          fi
+          echo "Verifying digest ref: ${DIGEST_REF}"
+
+          echo "::group::Verify cosign signature"
+          if ! cosign verify \
+            --key ./cosign.pub \
+            --new-bundle-format=false \
+            "${DIGEST_REF}"; then
+            echo "::error::Signature verification failed for ${DIGEST_REF}"
+            exit 1
+          fi
+          echo "::endgroup::"
+
+          echo "::group::Verify attestation format"
+          REFERRERS=$(oras discover \
+            --format json \
+            --registry-username "${{ github.actor }}" \
+            --registry-password "${{ secrets.GITHUB_TOKEN }}" \
+            "${DIGEST_REF}")
+          echo "Discovered referrers: ${REFERRERS}"
+
+          SIG_TAG=$(cosign triangulate "${DIGEST_REF}")
+          echo "Expected sig tag: ${SIG_TAG}"
+
+          if ! skopeo inspect \
+            --authfile /tmp/skopeo-auth/auth.json \
+            "docker://${SIG_TAG}" > /dev/null 2>&1; then
+            echo "::error::Signature tag not found: ${SIG_TAG}"
+            exit 1
+          fi
+
+          MEDIA_TYPE=$(skopeo inspect \
+            --authfile /tmp/skopeo-auth/auth.json \
+            --raw "docker://${SIG_TAG}" | \
+            jq -r '.mediaType // .config.mediaType')
+          echo "Signature media type: ${MEDIA_TYPE}"
+
+          if [[ "$MEDIA_TYPE" != "application/vnd.dev.cosign.artifact.sig.v1+json" ]]; then
+            echo "::error::Unexpected signature media type: ${MEDIA_TYPE}"
+            exit 1
+          fi
+
+          echo "Signature verification successful!"
+          echo "::endgroup::"

@@ -30,6 +30,10 @@ if [[ -f "$FRAGMENT_FILE" ]] && [[ -f "$GLOBAL_POLICY_FILE" ]]; then
   cp -f "${GLOBAL_POLICY_FILE}" "/etc/containers/policy.json"
 fi
 
+# include our expanded `ujust verify-image` helper override
+cp -f /ctx/ublue-os/just/92-bazzite-verify.just \
+  /usr/share/ublue-os/just/92-bazzite-verify.just
+
 # try to fix our downstream os-release so bootloader entries are more accurate
 VARIANT="${VARIANT:-stable}" # pick this up from our VARIANT build-arg
 # Use downstream canonical_tag if provided (handles collision suffixes like .1, .2)
