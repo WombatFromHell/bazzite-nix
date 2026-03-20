@@ -177,64 +177,59 @@ jobs:
           BASE_IMG="${{ inputs.registry_lower }}/${{ inputs.repo }}${{ matrix.variant_data.suffix }}"
 
           push_and_sign() {
-            local attempt=$1
-            local max_attempts=$2
-            DIGEST_REF="${BASE_IMG}@${IMAGE_DIGEST}"
-            SHORT_DIGEST_INNER="${SHORT_DIGEST}"
+            local attempt="$1"
+            local max_attempts="$2"
+            local short_digest_inner="${SHORT_DIGEST}"
             local attempt_tags=("${tags[@]}")
 
             echo "::group::Push primary image (attempt ${attempt}/${max_attempts})"
             echo "Source ref: ${SOURCE_REF}"
-            echo "Digest ref: ${DIGEST_REF}"
             echo "Base image: ${BASE_IMG}"
-            echo "Pushing primary image: ${DIGEST_REF}"
+
+            # Push by tag first, then derive the canonical digest ref from the remote
             sudo skopeo copy \
               --authfile /tmp/skopeo-auth/auth.json \
-              "$SOURCE_REF" "docker://$DIGEST_REF"
+              "${SOURCE_REF}" "docker://${BASE_IMG}:${attempt_tags[0]}"
 
-            echo "Verifying remote digest..."
-            REMOTE_DIGEST=$(sudo skopeo inspect --format='{{.Digest}}' "docker://$DIGEST_REF")
-            echo "Local digest:  ${IMAGE_DIGEST}"
-            echo "Remote digest: ${REMOTE_DIGEST}"
-            if [ "${IMAGE_DIGEST}" != "${REMOTE_DIGEST}" ]; then
-              echo "::warning::Remote digest differs from local! Using remote digest for signing."
-              DIGEST_REF="${BASE_IMG}@${REMOTE_DIGEST}"
-              SHORT_DIGEST_INNER=$(echo "$REMOTE_DIGEST" | sed 's/sha256://')
-            fi
-            echo "Final digest ref: ${DIGEST_REF}"
+            echo "Fetching remote digest..."
+            local remote_digest
+            remote_digest=$(sudo skopeo inspect --format='{{.Digest}}' "docker://${BASE_IMG}:${attempt_tags[0]}")
+            local digest_ref="${BASE_IMG}@${remote_digest}"
+            short_digest_inner=$(echo "$remote_digest" | sed 's/sha256://')
+
+            echo "Remote digest: ${remote_digest}"
+            echo "Digest ref: ${digest_ref}"
             echo "::endgroup::"
 
-            echo "::group::Push tags"
-            attempt_tags+=("$SHORT_DIGEST_INNER")
-            echo "Tags to push: ${attempt_tags[*]}"
-            for tag in "${attempt_tags[@]}"; do
-              FULL_TAG="${BASE_IMG}:${tag}"
-              echo "Pushing tag: ${FULL_TAG}"
+            echo "::group::Push remaining tags"
+            # Skip the first tag since we already pushed it above
+            attempt_tags+=("$short_digest_inner")
+            for tag in "${attempt_tags[@]:1}"; do
+              echo "Pushing tag: ${BASE_IMG}:${tag}"
               sudo skopeo copy \
                 --authfile /tmp/skopeo-auth/auth.json \
                 --preserve-digests \
                 --all \
-                "docker://$DIGEST_REF" "docker://${FULL_TAG}"
+                "docker://${digest_ref}" "docker://${BASE_IMG}:${tag}"
             done
             echo "::endgroup::"
 
             echo "::group::Sign image"
-            echo "Signing image: ${DIGEST_REF}"
+            echo "Signing image: ${digest_ref}"
             cosign sign -y \
               --key env://SIGNING_SECRET \
               --registry-username "${{ github.actor }}" \
               --registry-password "${{ secrets.GITHUB_TOKEN }}" \
-              "$DIGEST_REF"
+              "${digest_ref}"
             echo "::endgroup::"
 
             echo "::group::Verify signature"
-            echo "Verifying signature with cosign.pub..."
             if cosign verify \
               --key ./cosign.pub \
-              "$DIGEST_REF"; then
+              "${digest_ref}"; then
               echo "Signature verification successful!"
             else
-              echo "::error::Signature verification failed for ${DIGEST_REF}"
+              echo "::error::Signature verification failed for ${digest_ref}"
               exit 1
             fi
             echo "::endgroup::"
