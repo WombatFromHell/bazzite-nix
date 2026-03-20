@@ -7,11 +7,7 @@ export fedora_version := env("FEDORA_VERSION", "43")
 export default_tag := env("DEFAULT_TAG", "testing")
 export bib_image := env("BIB_IMAGE", "quay.io/centos-bootc/bootc-image-builder:latest")
 export base_image := env("BASE_IMAGE", "ghcr.io/ublue-os/bazzite:stable")
-export cache_dir := env("CACHE_DIR", "${HOME}/.cache/bazzite-nix")
-
-alias build-vm := build-qcow2
-alias rebuild-vm := rebuild-qcow2
-alias run-vm := run-vm-qcow2
+export cache_dir := env("CACHE_DIR", `echo "$HOME/.cache/bazzite-nix"`)
 
 [private]
 default:
@@ -42,8 +38,6 @@ fix:
 # Clean repo build artifacts
 [group('Utility')]
 clean:
-    #!/usr/bin/bash
-    set -eoux pipefail
     touch _build
     find *_build* -exec rm -rf {} \;
     rm -f previous.manifest.json changelog.md output.env
@@ -75,265 +69,159 @@ format:
     /usr/bin/find . -iname "*.sh" -type f -exec shfmt --write "{}" \;
 
 # Build a container image
-# Usage: just build [image:tag] [base_image] [dx] [hwe] [gdx]
+# Usage: just build [variant-name | image:tag] [base_image]
+# Examples:
+#   just build testing
+#   just build cachyos
 
-# Example: just build bazzite-nix:testing ghcr.io/ublue-os/bazzite:testing build.sh
-build $image_spec="{{ image_name }}:{{ image_tag }}" $base_image=base_image $build_script=image_build_script $variant="" $dx="0" $hwe="0" $gdx="0":
+# just build bazzite-nix:mytag ghcr.io/ublue-os/bazzite:testing
+[group('Build Container Image')]
+build $variant_or_spec="{{ default_tag }}" $base_image_override="":
     #!/usr/bin/env bash
     set -euo pipefail
-    if [[ "$image_spec" == *":"* ]]; then
-        target_image="${image_spec%:*}"
-        tag="${image_spec#*:}"
-    else
-        target_image="{{ image_name }}"
-        tag="{{ image_tag }}"
-    fi
-    base_image="{{ base_image }}"
-    # Use explicit variant if provided, otherwise inherit from base image tag
-    if [[ -n "{{ variant }}" ]]; then
-        variant="{{ variant }}"
-    else
-        variant="${base_image##*:}"
-    fi
-    just --unstable _build-rootful "$target_image" "$tag" "$variant" "$base_image" "$build_script" "$dx" "$hwe" "$gdx"
+    eval "$(just --unstable _resolve-variant "{{ variant_or_spec }}")"
+    [[ -n "{{ base_image_override }}" ]] && BASE_IMAGE="{{ base_image_override }}"
+    just --unstable _build-rootful "$TARGET_IMAGE" "$TAG" "$VARIANT_NAME" "$BASE_IMAGE" "$BUILD_SCRIPT" "0" "0" "0"
 
-build-stable:
+# Force-rebuild a container image, evicting any cached local image first
+
+# Usage: just rebuild [variant-name | image:tag] [base_image_override]
+[group('Build Container Image')]
+rebuild $variant_or_spec="{{ default_tag }}" $base_image_override="":
     #!/usr/bin/env bash
     set -euo pipefail
-    just --unstable build "bazzite-nix:stable" "ghcr.io/ublue-os/bazzite:stable"
+    eval "$(just --unstable _resolve-variant "{{ variant_or_spec }}")"
+    [[ -n "{{ base_image_override }}" ]] && BASE_IMAGE="{{ base_image_override }}"
+    sudo podman rmi "${TARGET_IMAGE}:${TAG}" 2>/dev/null || true
+    just --unstable _build-rootful "$TARGET_IMAGE" "$TAG" "$VARIANT_NAME" "$BASE_IMAGE" "$BUILD_SCRIPT" "0" "0" "0"
 
-build-testing:
+# List available (non-disabled) variants from variant.json
+[group('Utility')]
+list-variants:
     #!/usr/bin/env bash
-    set -euo pipefail
-    just --unstable build "bazzite-nix:testing" "ghcr.io/ublue-os/bazzite:testing"
+    echo "Available variants:"
+    jq -r '.variants[] | select((.disabled // false) == false) | "  \(.name)  →  \(.base_image)  [\(.build_script // "build.sh")]"' \
+        ./.github/variants.json
 
-build-cachyos:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    just --unstable build "bazzite-nix-cachyos:latest" "ghcr.io/ublue-os/bazzite:testing" "build-cachyos.sh" "cachyos"
+# Build a QCOW2 VM disk image
+# Usage: just build-qcow2 [variant-name | image:tag] [output_dir]
+# Examples:
+#   just build-qcow2 testing
 
-# Build and rechunk a container image
-
-# Usage: just rebuild [image:tag] [base_image] [dx] [hwe] [gdx] [skip_rechunk]
-rebuild $image_spec="{{ image_name }}:{{ image_tag }}" $base_image=base_image $dx="0" $hwe="0" $gdx="0" $skip_rechunk="0":
-    just --unstable build "{{ image_spec }}" "{{ base_image }}" "{{ dx }}" "{{ hwe }}" "{{ gdx }}"
-    just --unstable rechunk "{{ image_spec }}" "{{ skip_rechunk }}"
-
-# Rechunk a container image for optimized layer distribution
-
-# Usage: just rechunk [image:tag] [skip]
-rechunk $image_spec="{{ image_name }}:{{ image_tag }}" $skip="0":
-    #!/usr/bin/env bash
-    set -euo pipefail
-    if [[ "$image_spec" == *":"* ]]; then
-        target_image="${image_spec%:*}"
-        tag="${image_spec#*:}"
-    else
-        target_image="{{ image_name }}"
-        tag="{{ image_tag }}"
-    fi
-    if [[ "$skip" == "1" ]]; then
-        echo "Skipping rechunk step"
-        exit 0
-    fi
-    just --unstable _rechunk "$target_image" "$tag"
-
-# Rechunk a container image for optimized layer distribution (private helper)
-[private]
-_rechunk $target_image $tag:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    echo "Rechunking image ${target_image}:${tag}..."
-    if ! sudo podman image exists "${target_image}:${tag}" 2>/dev/null; then
-        echo "Image ${target_image}:${tag} not found in rootful storage"
-        echo "   Build it first with: just build ${target_image}:${tag}"
-        exit 1
-    fi
-    echo "Creating intermediate image for rechunking..."
-    sudo podman tag "${target_image}:${tag}" localhost/raw-img
-    container=$(sudo buildah from localhost/raw-img)
-    sudo buildah config --label "-" "$container"
-    sudo buildah commit --identity-label=false --rm "$container" localhost/raw-img
-    echo "Running rechunker with max-layers 96..."
-    sudo podman run --rm --privileged \
-        --volume /var/lib/containers:/var/lib/containers \
-        quay.io/centos-bootc/centos-bootc:{{ centos_version }} \
-        rpm-ostree compose build-chunked-oci \
-        --bootc --max-layers 96 --format-version 2 \
-        --from localhost/raw-img \
-        --output containers-storage:localhost/chunked-img
-    echo "Cleaning up intermediate image..."
-    sudo podman untag localhost/raw-img && sudo podman rmi localhost/raw-img
-    echo "Tagging rechunked image as ${target_image}:${tag}..."
-    sudo podman tag localhost/chunked-img "${target_image}:${tag}"
-    echo "Rechunk complete: ${target_image}:${tag}"
-
-# Build a QCOW2 VM image
-
-# Usage: just build-qcow2 [image:tag] [base_image] [build_script] [variant] [output_dir]
+# just build-qcow2 cachyos ~/.cache/my-vms
 [group('Build Virtual Machine Image')]
-build-qcow2 $image_spec="" $base_image=base_image $build_script=image_build_script $variant="" $output_dir="":
-    #!/usr/bin/env bash
-    set -euo pipefail
-    just --unstable _build-vm-image "{{ image_spec }}" "qcow2" "{{ output_dir }}" "{{ variant }}" "{{ base_image }}" "{{ build_script }}" "0"
+build-qcow2 $variant_or_spec="{{ default_tag }}" $output_dir="" $force_rebuild="0":
+    just --unstable _build-vm-image "{{ variant_or_spec }}" "qcow2" "{{ output_dir }}" "{{ force_rebuild }}"
 
-# Build QCOW2 VM image from bazzite-nix-cachyos:latest
+# Build a RAW VM disk image
+
+# Usage: just build-raw [variant-name | image:tag] [output_dir]
 [group('Build Virtual Machine Image')]
-build-qcow2-cachyos:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    just --unstable build-qcow2 "bazzite-nix-cachyos:latest" "ghcr.io/ublue-os/bazzite:testing" "build-cachyos.sh" "cachyos"
+build-raw $variant_or_spec="{{ default_tag }}" $output_dir="" $force_rebuild="0":
+    just --unstable _build-vm-image "{{ variant_or_spec }}" "raw" "{{ output_dir }}" "{{ force_rebuild }}"
 
-# Build QCOW2 VM image from bazzite-nix:testing
+# Build and force-rebuild a QCOW2 image (skips cached container image)
 [group('Build Virtual Machine Image')]
-build-qcow2-testing:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    just --unstable build-qcow2 "bazzite-nix:testing" "ghcr.io/ublue-os/bazzite:testing"
+rebuild-qcow2 $variant_or_spec="{{ default_tag }}" $output_dir="":
+    just --unstable build-qcow2 "{{ variant_or_spec }}" "{{ output_dir }}" "1"
 
-# Build a RAW VM image
-
-# Usage: just build-raw [image:tag] [base_image] [build_script] [variant] [output_dir]
+# Build and force-rebuild a RAW image (skips cached container image)
 [group('Build Virtual Machine Image')]
-build-raw $image_spec="" $base_image=base_image $build_script=image_build_script $variant="" $output_dir="":
-    #!/usr/bin/env bash
-    set -euo pipefail
-    just --unstable _build-vm-image "{{ image_spec }}" "raw" "{{ output_dir }}" "{{ variant }}" "{{ base_image }}" "{{ build_script }}" "0"
-
-# Aliases for build-qcow2 / build-raw (force rebuild container image)
-[group('Build Virtual Machine Image')]
-rebuild-qcow2 $image_spec="" $base_image=base_image $build_script=image_build_script $variant="" $output_dir="":
-    #!/usr/bin/env bash
-    set -euo pipefail
-    just --unstable _build-vm-image "{{ image_spec }}" "qcow2" "{{ output_dir }}" "{{ variant }}" "{{ base_image }}" "{{ build_script }}" "1"
-
-[group('Build Virtual Machine Image')]
-rebuild-raw $image_spec="" $base_image=base_image $build_script=image_build_script $variant="" $output_dir="":
-    #!/usr/bin/env bash
-    set -euo pipefail
-    just --unstable _build-vm-image "{{ image_spec }}" "raw" "{{ output_dir }}" "{{ variant }}" "{{ base_image }}" "{{ build_script }}" "1"
-
-# Rebuild QCOW2 VM image from bazzite-nix-cachyos:latest
-[group('Build Virtual Machine Image')]
-rebuild-qcow2-cachyos:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    just --unstable rebuild-qcow2 "bazzite-nix-cachyos:latest" "ghcr.io/ublue-os/bazzite:testing" "build-cachyos.sh" "cachyos"
-
-# Rebuild QCOW2 VM image from bazzite-nix:testing
-[group('Build Virtual Machine Image')]
-rebuild-qcow2-testing:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    just --unstable rebuild-qcow2 "bazzite-nix:testing" "ghcr.io/ublue-os/bazzite:testing"
-
-# Rebuild RAW VM image from bazzite-nix-cachyos:latest
-[group('Build Virtual Machine Image')]
-rebuild-raw-cachyos:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    just --unstable rebuild-raw "bazzite-nix-cachyos:latest" "ghcr.io/ublue-os/bazzite:testing" "build-cachyos.sh" "cachyos"
-
-# Rebuild RAW VM image from bazzite-nix:testing
-[group('Build Virtual Machine Image')]
-rebuild-raw-testing:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    just --unstable rebuild-raw "bazzite-nix:testing" "ghcr.io/ublue-os/bazzite:testing"
-
-# Build RAW VM image from bazzite-nix-cachyos:latest
-[group('Build Virtual Machine Image')]
-build-raw-cachyos:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    just --unstable build-raw "bazzite-nix-cachyos:latest" "ghcr.io/ublue-os/bazzite:testing" "build-cachyos.sh" "cachyos"
-
-# Build RAW VM image from bazzite-nix:testing
-[group('Build Virtual Machine Image')]
-build-raw-testing:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    just --unstable build-raw "bazzite-nix:testing" "ghcr.io/ublue-os/bazzite:testing"
+rebuild-raw $variant_or_spec="{{ default_tag }}" $output_dir="":
+    just --unstable build-raw "{{ variant_or_spec }}" "{{ output_dir }}" "1"
 
 # Run a QCOW2 VM
 
-# Usage: just run-vm-qcow2 [image:tag] [output_dir] [force_pull] [clean]
+# Usage: just run-vm-qcow2 [variant-name | image:tag] [output_dir] [force_pull] [clean]
 [group('Run Virtual Machine')]
-run-vm-qcow2 $image_spec="" $output_dir="" $force_pull="0" $clean="0":
-    just --unstable _run-vm-wrapper "{{ image_spec }}" "qcow2" "{{ output_dir }}" "{{ force_pull }}" "{{ clean }}"
+run-vm-qcow2 $variant_or_spec="{{ default_tag }}" $output_dir="" $force_pull="0" $clean="0":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    eval "$(just --unstable _resolve-variant "{{ variant_or_spec }}")"
+    just --unstable _run-vm "$TARGET_IMAGE" "$TAG" "qcow2" "image.toml" "{{ output_dir }}" "{{ force_pull }}" "{{ clean }}"
 
 # Run a RAW VM
 
-# Usage: just run-vm-raw [image:tag] [output_dir] [force_pull] [clean]
+# Usage: just run-vm-raw [variant-name | image:tag] [output_dir] [force_pull] [clean]
 [group('Run Virtual Machine')]
-run-vm-raw $image_spec="" $output_dir="" $force_pull="0" $clean="0":
-    just --unstable _run-vm-wrapper "{{ image_spec }}" "raw" "{{ output_dir }}" "{{ force_pull }}" "{{ clean }}"
-
-# --- Private helpers --------------------------------------------------------
-
-# Run VM wrapper (shared helper for run-vm-qcow2 and run-vm-raw)
-[private]
-_run-vm-wrapper $image_spec $type $output_dir $force_pull $clean:
+run-vm-raw $variant_or_spec="{{ default_tag }}" $output_dir="" $force_pull="0" $clean="0":
     #!/usr/bin/env bash
     set -euo pipefail
-    eval "$(just --unstable _parse-image-spec-vm "{{ image_spec }}")"
-    just --unstable _run-vm "$TARGET_IMAGE" "$TAG" "$type" "image.toml" "{{ output_dir }}" "{{ force_pull }}" "{{ clean }}"
+    eval "$(just --unstable _resolve-variant "{{ variant_or_spec }}")"
+    just --unstable _run-vm "$TARGET_IMAGE" "$TAG" "raw" "image.toml" "{{ output_dir }}" "{{ force_pull }}" "{{ clean }}"
+
+# --- Private helpers --------------------------------------------------------
+# Resolve a variant name from variant.json into image_spec/base_image/build_script
+# Emits shell variable assignments suitable for eval
+
+# Usage: eval "$(just --unstable _resolve-variant testing)"
+[private]
+_resolve-variant $variant_or_spec="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    VARIANT_JSON="./.github/variants.json"
+    spec="{{ variant_or_spec }}"
+
+    # If it looks like an explicit image:tag or image ref, pass it through unchanged
+    if [[ "$spec" == *"/"* ]] || [[ "$spec" == *":"* ]]; then
+        tag="${spec##*:}"
+        # Use image_name as the local target for consistency with named-variant resolution
+        build_script=$(jq -r --arg bi "$spec" '
+            .variants[] | select(.base_image == $bi and (.disabled // false) == false)
+            | (.build_script // "build.sh")
+        ' "$VARIANT_JSON" | head -1)
+        [[ -z "$build_script" ]] && build_script="build.sh"
+        echo "TARGET_IMAGE=\"localhost/{{ image_name }}\""
+        echo "TAG=\"$tag\""
+        echo "BASE_IMAGE=\"$spec\""
+        echo "BUILD_SCRIPT=\"$build_script\""
+        echo "VARIANT_NAME=\"$tag\""
+        exit 0
+    fi
+
+    # Look up variant by name
+    row=$(jq -r --arg n "$spec" '
+        .variants[]
+        | select(.name == $n and (.disabled // false) == false)
+    ' "$VARIANT_JSON")
+
+    if [[ -z "$row" ]]; then
+        echo "ERROR: Unknown or disabled variant: $spec" >&2
+        echo "Available variants:" >&2
+        jq -r '.variants[] | select((.disabled // false) == false) | "  " + .name' "$VARIANT_JSON" >&2
+        exit 1
+    fi
+
+    base_image=$(echo "$row" | jq -r '.base_image')
+    build_script=$(echo "$row" | jq -r '.build_script // "build.sh"')
+    suffix=$(echo "$row" | jq -r '.suffix // ""')
+    image_name_resolved="{{ image_name }}${suffix}"
+    tag="${base_image##*:}"   # e.g. "testing", "stable"
+
+    echo "TARGET_IMAGE=\"localhost/${image_name_resolved}\""
+    echo "TAG=\"${tag}\""
+    echo "BASE_IMAGE=\"${base_image}\""
+    echo "BUILD_SCRIPT=\"${build_script}\""
+    echo "VARIANT_NAME=\"${spec}\""
 
 # Build VM image (shared helper for build-qcow2 and build-raw)
 [private]
-_build-vm-image $image_spec $type $output_dir="" $variant="" $base_image=base_image $build_script=image_build_script $force_rebuild="0":
+_build-vm-image $image_spec $type $output_dir="" $force_rebuild="0":
     #!/usr/bin/env bash
     set -euo pipefail
-    eval "$(just --unstable _parse-image-spec-vm "{{ image_spec }}")"
-    if [[ -z "{{ variant }}" ]]; then
-        variant="${TAG}"
-    fi
+    eval "$(just --unstable _resolve-variant "{{ image_spec }}")"
     if [[ "{{ force_rebuild }}" == "1" ]]; then
         echo "Force rebuilding container image..."
         sudo podman rmi "${TARGET_IMAGE}:${TAG}" 2>/dev/null || true
-        just --unstable _build-rootful "$TARGET_IMAGE" "$TAG" "$variant" "{{ base_image }}" "{{ build_script }}" "0" "0" "0"
+        just --unstable _build-rootful "$TARGET_IMAGE" "$TAG" "$VARIANT_NAME" "$BASE_IMAGE" "$BUILD_SCRIPT" "0" "0" "0"
     else
         if sudo podman image exists "${TARGET_IMAGE}:${TAG}" 2>/dev/null; then
             echo "Container image ${TARGET_IMAGE}:${TAG} already exists, skipping build"
         else
-            just --unstable _build-rootful "$TARGET_IMAGE" "$TAG" "$variant" "{{ base_image }}" "{{ build_script }}" "0" "0" "0"
+            just --unstable _build-rootful "$TARGET_IMAGE" "$TAG" "$VARIANT_NAME" "$BASE_IMAGE" "$BUILD_SCRIPT" "0" "0" "0"
         fi
     fi
     just --unstable _build-bib "$TARGET_IMAGE" "$TAG" "$type" "image.toml" "{{ output_dir }}"
-
-# Parse image_spec into TARGET_IMAGE and TAG
-
-# $1 = image_spec, $2 = prefix (localhost or ghcr.io/{{ repo_organization }})
-[private]
-_parse-image-spec $image_spec="" $prefix="localhost/{{ image_name }}":
-    #!/usr/bin/env bash
-    set -euo pipefail
-    image_spec="{{ image_spec }}"
-    prefix="{{ prefix }}"
-    default_target="${prefix}"
-    default_tag="{{ default_tag }}"
-    if [[ -n "$image_spec" ]]; then
-        if [[ "$image_spec" == *":"* ]]; then
-            target_image="${image_spec%:*}"
-            tag="${image_spec#*:}"
-        else
-            target_image="$image_spec"
-            tag="$default_tag"
-        fi
-        [[ "$target_image" != *"/"* ]] && target_image="${prefix%/*}/${target_image}"
-    else
-        target_image="$default_target"
-        tag="$default_tag"
-    fi
-    echo "TARGET_IMAGE=\"$target_image\""
-    echo "TAG=\"$tag\""
-
-# Parse image_spec into TARGET_IMAGE and TAG for local (localhost/) images
-
-# Deprecated: use _parse-image-spec with prefix instead
-[private]
-_parse-image-spec-vm $image_spec="":
-    just --unstable _parse-image-spec "{{ image_spec }}" "localhost/{{ image_name }}"
 
 [private]
 _build-rootful $target_image $tag $variant $base_image=base_image $build_script=image_build_script $dx="0" $hwe="0" $gdx="0":
@@ -348,29 +236,22 @@ _build-rootful $target_image $tag $variant $base_image=base_image $build_script=
         echo "Warning: Could not extract valid version from ${base_image}, falling back to branch tag"
         canonical="${base_image_tag}"
     fi
-    if [[ "$canonical" == "${base_image_tag}-"* ]]; then
-        canonical="${canonical#"${base_image_tag}"-}"
-    fi
+    [[ "$canonical" == "${base_image_tag}-"* ]] && canonical="${canonical#"${base_image_tag}"-}"
 
     echo "Variant: ${variant}, Canonical tag: ${canonical}"
 
-    BUILD_ARGS=()
-    BUILD_ARGS+=("--build-arg" "MAJOR_VERSION={{ centos_version }}")
-    BUILD_ARGS+=("--build-arg" "IMAGE_NAME=${target_image}")
-    BUILD_ARGS+=("--build-arg" "IMAGE_VENDOR={{ repo_organization }}")
-    BUILD_ARGS+=("--build-arg" "ENABLE_DX=${dx}")
-    BUILD_ARGS+=("--build-arg" "ENABLE_HWE=${hwe}")
-    BUILD_ARGS+=("--build-arg" "ENABLE_GDX=${gdx}")
-    BUILD_ARGS+=("--build-arg" "BASE_IMAGE=${base_image}")
-    BUILD_ARGS+=("--build-arg" "BUILD_SCRIPT=${build_script}")
-    BUILD_ARGS+=("--build-arg" "VARIANT=${variant}")
-    BUILD_ARGS+=("--build-arg" "CANONICAL_TAG=${canonical}")
-    if [[ -z "$(git status -s)" ]]; then
-        BUILD_ARGS+=("--build-arg" "SHA_HEAD_SHORT=$(git rev-parse --short HEAD)")
-    fi
-
     sudo podman build \
-        "${BUILD_ARGS[@]}" \
+        --build-arg MAJOR_VERSION="{{ centos_version }}" \
+        --build-arg IMAGE_NAME="${target_image}" \
+        --build-arg IMAGE_VENDOR="{{ repo_organization }}" \
+        --build-arg ENABLE_DX="${dx}" \
+        --build-arg ENABLE_HWE="${hwe}" \
+        --build-arg ENABLE_GDX="${gdx}" \
+        --build-arg BASE_IMAGE="${base_image}" \
+        --build-arg BUILD_SCRIPT="${build_script}" \
+        --build-arg VARIANT="${variant}" \
+        --build-arg CANONICAL_TAG="${canonical}" \
+        $( [[ -z "$(git status -s)" ]] && echo "--build-arg SHA_HEAD_SHORT=$(git rev-parse --short HEAD)" ) \
         --pull=newer \
         --security-opt label=disable \
         --tag "${target_image}:${tag}" \
@@ -441,7 +322,7 @@ _build-bib $target_image $tag $type $config $output_dir="":
 [private]
 _run-vm $target_image $tag $type $config $output_dir="" $force_pull="0" $clean="0":
     #!/usr/bin/bash
-    set -e
+    set -euo pipefail
 
     OUTPUT_DIR="${output_dir}"
     [[ -z "$OUTPUT_DIR" ]] && OUTPUT_DIR="{{ cache_dir }}"
@@ -468,7 +349,7 @@ _run-vm $target_image $tag $type $config $output_dir="" $force_pull="0" $clean="
         if [[ "$is_local" == "true" ]]; then
             if ! sudo podman image exists "${target_image}:${tag}" 2>/dev/null; then
                 echo "Image ${target_image}:${tag} not found in rootful storage."
-                echo "   Build it first with: just build-{{ type }} ${target_image}:${tag}"
+                echo "   Build it first with: just build-${type} ${target_image}:${tag}"
                 exit 1
             fi
         else
