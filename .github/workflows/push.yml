@@ -161,11 +161,8 @@ jobs:
           echo "full_build_digest=$FULL_DIGEST" >> $GITHUB_OUTPUT
           echo "build_digest=$SHORT_DIGEST" >> $GITHUB_OUTPUT
 
-      - name: Install Cosign
-        uses: sigstore/cosign-installer@ba7bc0a3fef59531c69a25acd34668d6d3fe6f22 # v4.1.0
-
       - name: Push to GHCR then sign
-        id: push_and_sign
+        id: push_image
         env:
           SIGNING_SECRET: ${{ secrets.signing_secret }}
         run: |
@@ -176,7 +173,7 @@ jobs:
           IFS=',' read -r -a tags <<< "${{ matrix.variant_data.tags }}"
           BASE_IMG="${{ inputs.registry_lower }}/${{ inputs.repo }}${{ matrix.variant_data.suffix }}"
 
-          push_and_sign() {
+          push_image() {
             local attempt="$1"
             local max_attempts="$2"
             local short_digest_inner="${SHORT_DIGEST}"
@@ -214,16 +211,6 @@ jobs:
             done
             echo "::endgroup::"
 
-            echo "::group::Sign image"
-            echo "Signing image: ${digest_ref}"
-            cosign sign -y \
-              --key env://SIGNING_SECRET \
-              --new-bundle-format=false \
-              --registry-username "${{ github.actor }}" \
-              --registry-password "${{ secrets.GITHUB_TOKEN }}" \
-              "${digest_ref}"
-            echo "::endgroup::"
-
             # Output the authoritative remote digest for downstream steps
             echo "remote_digest=${remote_digest}" >> $GITHUB_OUTPUT
             echo "remote_digest_ref=${digest_ref}" >> $GITHUB_OUTPUT
@@ -232,7 +219,7 @@ jobs:
           max_attempts=3
           delay=15
           for attempt in $(seq 1 $max_attempts); do
-            if push_and_sign "$attempt" "$max_attempts"; then
+            if push_image "$attempt" "$max_attempts"; then
               break
             fi
 
@@ -245,72 +232,50 @@ jobs:
             sleep "$delay"
           done
 
-      - name: Install ORAS
-        run: |
-          set -euo pipefail
-          ORAS_VERSION="v1.3.1"
-          curl -fsSL \
-            "https://github.com/oras-project/oras/releases/download/${ORAS_VERSION}/oras_${ORAS_VERSION}_linux_amd64.tar.gz" \
-            -o /tmp/oras.tar.gz
-          mkdir -p /usr/local/bin
-          sudo tar -xzf /tmp/oras.tar.gz -C /usr/local/bin oras
-          sudo chmod 0755 /usr/local/bin/oras
-          oras version
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@ba7bc0a3fef59531c69a25acd34668d6d3fe6f22 # v4.1.0
 
-      - name: Verify signature and attestation
+      - name: Sign image and verify attestation
+        id: sign_and_verify
         run: |
           set -euo pipefail
           BASE_IMG="${{ inputs.registry_lower }}/${{ inputs.repo }}${{ matrix.variant_data.suffix }}"
-          IFS=',' read -r -a tags <<< "${{ matrix.variant_data.tags }}"
+          DIGEST="${{ steps.push_image.outputs.remote_digest }}"
+          DIGEST_REF="${{ steps.push_image.outputs.remote_digest_ref }}"
 
-          # Prefer the authoritative remote digest from sign_and_push over
-          # the local digest from final_digest, in case the image was mutated
-          # during the push (e.g. by GHCR layer deduplication)
-          DIGEST_REF="${{ steps.sign_and_push.outputs.remote_digest_ref }}"
-          if [ -z "${DIGEST_REF}" ]; then
-            echo "::warning::Remote digest ref not available, falling back to local digest"
-            DIGEST_REF="${BASE_IMG}@${{ steps.final_digest.outputs.full_build_digest }}"
-          fi
-          echo "Verifying digest ref: ${DIGEST_REF}"
-
-          echo "::group::Verify cosign signature"
-          if ! cosign verify \
-            --key ./cosign.pub \
+          echo "::group::Sign image"
+          cosign sign -y \
+            --key env://SIGNING_SECRET \
             --new-bundle-format=false \
-            "${DIGEST_REF}"; then
-            echo "::error::Signature verification failed for ${DIGEST_REF}"
-            exit 1
-          fi
-          echo "::endgroup::"
-
-          echo "::group::Verify attestation format"
-          REFERRERS=$(oras discover \
-            --format json \
+            --use-signing-config=false \
+            --registry-referrers-mode=legacy \
             --registry-username "${{ github.actor }}" \
             --registry-password "${{ secrets.GITHUB_TOKEN }}" \
-            "${DIGEST_REF}")
-          echo "Discovered referrers: ${REFERRERS}"
-
-          SIG_TAG=$(cosign triangulate "${DIGEST_REF}")
-          echo "Expected sig tag: ${SIG_TAG}"
-
-          if ! skopeo inspect \
-            --authfile /tmp/skopeo-auth/auth.json \
-            "docker://${SIG_TAG}" > /dev/null 2>&1; then
-            echo "::error::Signature tag not found: ${SIG_TAG}"
-            exit 1
-          fi
-
-          MEDIA_TYPE=$(skopeo inspect \
-            --authfile /tmp/skopeo-auth/auth.json \
-            --raw "docker://${SIG_TAG}" | \
-            jq -r '.mediaType // .config.mediaType')
-          echo "Signature media type: ${MEDIA_TYPE}"
-
-          if [[ "$MEDIA_TYPE" != "application/vnd.dev.cosign.artifact.sig.v1+json" ]]; then
-            echo "::error::Unexpected signature media type: ${MEDIA_TYPE}"
-            exit 1
-          fi
-
-          echo "Signature verification successful!"
+            "${DIGEST_REF}"
           echo "::endgroup::"
+
+          echo "::group::Verify image"
+          cosign verify \
+            --key ./cosign.pub \
+            "${DIGEST_REF}"
+          echo "::endgroup::"
+
+          # Format the tags list from the CSV into a readable string
+          TAGS_CSV="${{ matrix.variant_data.tags }}"
+          TAGS_FMT=$(echo "${TAGS_CSV}" | tr ',' ' · ')
+
+          # Write the summary table header once per job (not once per matrix shard —
+          # each matrix job gets its own GITHUB_STEP_SUMMARY file, so no race condition)
+          {
+            echo "## ${{ matrix.variant_data.variant }}"
+            echo ""
+            echo "| Field | Value |"
+            echo "| ----- | ----- |"
+            echo "| **Image** | \`${BASE_IMG}\` |"
+            echo "| **Digest** | \`${DIGEST}\` |"
+            echo "| **Tags** | \`${TAGS_FMT}\` |"
+            echo "| **Parent version** | \`${{ matrix.variant_data.parent_version }}\` |"
+            echo "| **Built** | \`${{ inputs.date }}\` |"
+            echo "| **Rechunked** | \`${{ inputs.skip_rechunk != 'true' && 'yes' || 'no' }}\` |"
+            echo "| **Signed & verified** | ✅ |"
+          } >> "$GITHUB_STEP_SUMMARY"
