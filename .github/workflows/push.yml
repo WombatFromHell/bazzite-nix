@@ -186,6 +186,8 @@ jobs:
             # Push by tag first, then derive the canonical digest ref from the remote
             sudo skopeo copy \
               --authfile /tmp/skopeo-auth/auth.json \
+              --dest-compress-format=gzip \
+              --dest-compress-level=5 \
               "${SOURCE_REF}" "docker://${BASE_IMG}:${attempt_tags[0]}"
 
             echo "Fetching remote digest..."
@@ -205,6 +207,8 @@ jobs:
               echo "Pushing tag: ${BASE_IMG}:${tag}"
               sudo skopeo copy \
                 --authfile /tmp/skopeo-auth/auth.json \
+                --dest-compress-format=gzip \
+                --dest-compress-level=5 \
                 --preserve-digests \
                 --all \
                 "docker://${digest_ref}" "docker://${BASE_IMG}:${tag}"
