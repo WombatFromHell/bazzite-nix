@@ -207,8 +207,6 @@ jobs:
               echo "Pushing tag: ${BASE_IMG}:${tag}"
               sudo skopeo copy \
                 --authfile /tmp/skopeo-auth/auth.json \
-                --dest-compress-format=gzip \
-                --dest-compress-level=5 \
                 --preserve-digests \
                 --all \
                 "docker://${digest_ref}" "docker://${BASE_IMG}:${tag}"
