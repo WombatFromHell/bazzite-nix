@@ -96,14 +96,21 @@ runs:
         while IFS= read -r line; do
           [ -n "$line" ] && LABEL_ARGS+=(--label "$line")
         done < "${{ steps.labels.outputs.labels_file }}"
+
+        # Initialize OCI layout on host (shared into container via the volume)
+        sudo mkdir -p /var/lib/containers/oci
+        echo '{"imageLayoutVersion":"1.0.0"}' | sudo tee /var/lib/containers/oci/oci-layout > /dev/null
+        echo '{"schemaVersion":2,"manifests":[]}' | sudo tee /var/lib/containers/oci/index.json > /dev/null
+
         sudo podman run --rm --privileged \
           --volume /var/lib/containers:/var/lib/containers \
           quay.io/centos-bootc/centos-bootc:stream10 \
           rpm-ostree compose build-chunked-oci \
           --bootc --max-layers 128 --format-version 2 \
           --from localhost/raw-img \
-          --output containers-storage:localhost/chunked-img \
+          --output oci:/var/lib/containers/oci:latest \
           "${LABEL_ARGS[@]}"
+
         sudo podman image exists localhost/raw-img && \
           sudo podman rmi localhost/raw-img
 
@@ -126,12 +133,19 @@ runs:
         set -euo pipefail
         if [ "${{ inputs.skip_rechunk }}" = "true" ]; then
           SOURCE_REF="containers-storage:localhost/raw-img"
+          sudo skopeo inspect "$SOURCE_REF" > /dev/null || \
+            { echo "::error::Expected image ${SOURCE_REF} not found after build"; exit 1; }
+          FULL_DIGEST=$(sudo skopeo inspect --format='{{.Digest}}' "$SOURCE_REF")
         else
-          SOURCE_REF="containers-storage:localhost/chunked-img"
+          SOURCE_REF="oci:/var/lib/containers/oci:latest"
+          sudo skopeo inspect --raw "$SOURCE_REF" > /dev/null || \
+            { echo "::error::Expected OCI layout ${SOURCE_REF} not found after rechunk"; exit 1; }
+          FULL_DIGEST=$(sudo skopeo inspect --raw "$SOURCE_REF" | jq -r '.config.digest // empty')
+          # Fall back to manifest digest if config digest unavailable
+          if [ -z "$FULL_DIGEST" ]; then
+            FULL_DIGEST=$(sudo sha256sum /var/lib/containers/oci/index.json | awk '{print "sha256:"$1}')
+          fi
         fi
-        sudo skopeo inspect "$SOURCE_REF" > /dev/null || \
-          { echo "::error::Expected image ${SOURCE_REF} not found after build"; exit 1; }
-        FULL_DIGEST=$(sudo skopeo inspect --format='{{.Digest}}' "$SOURCE_REF")
         SHORT_DIGEST="${FULL_DIGEST#sha256:}"
         echo "source_ref=$SOURCE_REF"         >> "$GITHUB_OUTPUT"
         echo "full_build_digest=$FULL_DIGEST" >> "$GITHUB_OUTPUT"

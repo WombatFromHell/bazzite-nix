@@ -120,7 +120,7 @@ jobs:
             #
             sudo skopeo copy \
               --authfile /tmp/skopeo-auth/auth.json \
-              ${compress_flags[@]+"${compress_flags[@]}"} \
+              "${compress_flags[@]}" \
               "${SOURCE_REF}" "docker://${BASE_IMG}:${TAGS[0]}"
 
             local remote_digest
@@ -181,6 +181,9 @@ jobs:
             echo "::group::Sign image (attempt ${attempt}/${MAX_ATTEMPTS})"
             if cosign sign -y \
               --key env://SIGNING_SECRET \
+              --new-bundle-format=false \
+              --use-signing-config=false \
+              --registry-referrers-mode=legacy \
               --registry-username "${{ github.actor }}" \
               --registry-password "${{ secrets.GITHUB_TOKEN }}" \
               "${DIGEST_REF}"; then
@@ -210,7 +213,7 @@ jobs:
           REMOTE_DIGEST="${{ steps.push_image.outputs.remote_digest }}"
           TAGS_FMT=$(echo "${{ matrix.variant_data.tags }}" | tr ',' ' · ')
 
-          RECHUNKED="${{ inputs.skip_rechunk == 'false' && 'yes' || 'no' }}"
+          RECHUNKED="$([[ "${{ inputs.skip_rechunk }}" == "false" ]] && echo "yes" || echo "no")"
           {
             echo "## ${{ matrix.variant_data.variant }}"
             echo ""
