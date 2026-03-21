@@ -136,7 +136,7 @@ jobs:
 
       - name: Sign and verify image
         env:
-          SIGNING_SECRET: ${{ secrets.signing_secret }}
+          SIGNING_SECRET: ${{ secrets.SIGNING_SECRET }}
           BASE_IMG: ${{ matrix.variant_data.target_image }}
           DIGEST: ${{ steps.resolve.outputs.digest }}
           BASE_TAG: ${{ steps.resolve.outputs.lookup_tag }}

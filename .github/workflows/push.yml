@@ -49,21 +49,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Login for Skopeo (for push operations)
-        id: skopeo_login
+      - name: Login for Podman (for push operations)
+        id: podman_login
         run: |
           set -euo pipefail
-          skopeo_login() {
-            mkdir -p /tmp/skopeo-auth
+          podman_login() {
+            mkdir -p /tmp/podman-auth
             echo "${{ secrets.GITHUB_TOKEN }}" | \
-            skopeo login ghcr.io -u ${{ github.actor }} \
+            podman login ghcr.io -u ${{ github.actor }} \
               --password-stdin \
-              --authfile /tmp/skopeo-auth/auth.json
+              --authfile /tmp/podman-auth/auth.json
           }
           max_attempts=3
           delay=15
           for attempt in $(seq 1 $max_attempts); do
-            if skopeo_login; then
+            if podman_login; then
               break
             fi
             if [ "$attempt" -ge "$max_attempts" ]; then
@@ -161,10 +161,8 @@ jobs:
           echo "full_build_digest=$FULL_DIGEST" >> $GITHUB_OUTPUT
           echo "build_digest=$SHORT_DIGEST" >> $GITHUB_OUTPUT
 
-      - name: Push to GHCR then sign
+      - name: Push to GHCR
         id: push_image
-        env:
-          SIGNING_SECRET: ${{ secrets.signing_secret }}
         run: |
           set -euo pipefail
           SOURCE_REF="${{ steps.final_digest.outputs.source_ref }}"
@@ -173,49 +171,47 @@ jobs:
           IFS=',' read -r -a tags <<< "${{ matrix.variant_data.tags }}"
           BASE_IMG="${{ inputs.registry_lower }}/${{ inputs.repo }}${{ matrix.variant_data.suffix }}"
 
+          REMOTE_DIGEST=""
+          REMOTE_DIGEST_REF=""
+
           push_image() {
             local attempt="$1"
             local max_attempts="$2"
-            local short_digest_inner="${SHORT_DIGEST}"
             local attempt_tags=("${tags[@]}")
 
             echo "::group::Push primary image (attempt ${attempt}/${max_attempts})"
             echo "Source ref: ${SOURCE_REF}"
             echo "Base image: ${BASE_IMG}"
 
-            # Push by tag first, then derive the canonical digest ref from the remote
-            sudo skopeo copy \
-              --authfile /tmp/skopeo-auth/auth.json \
-              --dest-compress-format=gzip \
-              --dest-compress-level=5 \
+            sudo podman push \
+              --authfile /tmp/podman-auth/auth.json \
+              --compression-format zstd:chunked \
+              --compression-level 10 \
               "${SOURCE_REF}" "docker://${BASE_IMG}:${attempt_tags[0]}"
 
             echo "Fetching remote digest..."
             local remote_digest
             remote_digest=$(sudo skopeo inspect --format='{{.Digest}}' "docker://${BASE_IMG}:${attempt_tags[0]}")
             local digest_ref="${BASE_IMG}@${remote_digest}"
-            short_digest_inner=$(echo "$remote_digest" | sed 's/sha256://')
 
             echo "Remote digest: ${remote_digest}"
             echo "Digest ref: ${digest_ref}"
             echo "::endgroup::"
 
             echo "::group::Push remaining tags"
-            # Skip the first tag since we already pushed it above
-            attempt_tags+=("$short_digest_inner")
+            # Add the digest-based tag to the list
+            attempt_tags+=("${remote_digest#sha256:}")
             for tag in "${attempt_tags[@]:1}"; do
               echo "Pushing tag: ${BASE_IMG}:${tag}"
               sudo skopeo copy \
-                --authfile /tmp/skopeo-auth/auth.json \
-                --preserve-digests \
-                --all \
+                --authfile /tmp/podman-auth/auth.json \
                 "docker://${digest_ref}" "docker://${BASE_IMG}:${tag}"
             done
             echo "::endgroup::"
 
-            # Output the authoritative remote digest for downstream steps
-            echo "remote_digest=${remote_digest}" >> $GITHUB_OUTPUT
-            echo "remote_digest_ref=${digest_ref}" >> $GITHUB_OUTPUT
+            # Set module-level variables for output after function returns
+            REMOTE_DIGEST="${remote_digest}"
+            REMOTE_DIGEST_REF="${digest_ref}"
           }
 
           max_attempts=3
@@ -234,11 +230,17 @@ jobs:
             sleep "$delay"
           done
 
+          # Write outputs after the function completes (not inside the function)
+          echo "remote_digest=${REMOTE_DIGEST}" >> $GITHUB_OUTPUT
+          echo "remote_digest_ref=${REMOTE_DIGEST_REF}" >> $GITHUB_OUTPUT
+
       - name: Install Cosign
         uses: sigstore/cosign-installer@ba7bc0a3fef59531c69a25acd34668d6d3fe6f22 # v4.1.0
 
       - name: Sign image and verify attestation
         id: sign_and_verify
+        env:
+          SIGNING_SECRET: ${{ secrets.SIGNING_SECRET }}
         run: |
           set -euo pipefail
           BASE_IMG="${{ inputs.registry_lower }}/${{ inputs.repo }}${{ matrix.variant_data.suffix }}"
