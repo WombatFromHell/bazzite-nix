@@ -115,13 +115,12 @@ jobs:
                 --dest-compress-level=6
               )
             else
-              compress_flags=(--preserve-digests)
-              echo "Compression : none (pass-through) — zstd:chunked layers preserved"
+              compress_flags=()
             fi
             #
             sudo skopeo copy \
               --authfile /tmp/skopeo-auth/auth.json \
-              "${compress_flags[@]}" \
+              ${compress_flags[@]+"${compress_flags[@]}"} \
               "${SOURCE_REF}" "docker://${BASE_IMG}:${TAGS[0]}"
 
             local remote_digest
@@ -143,6 +142,7 @@ jobs:
               echo "  → ${BASE_IMG}:${tag}"
               sudo skopeo copy \
                 --authfile /tmp/skopeo-auth/auth.json \
+                --preserve-digests \
                 "docker://${digest_ref}" "docker://${BASE_IMG}:${tag}"
             done
             echo "::endgroup::"

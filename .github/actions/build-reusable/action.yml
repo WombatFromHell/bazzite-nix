@@ -71,24 +71,21 @@ runs:
         set -euo pipefail
         KERNEL_VERSION=$(sudo podman run --rm localhost/raw-img \
           cat /usr/share/ublue-os/kernel-version)
-        LABELS=$(cat <<EOF
-        org.opencontainers.image.created=${{ inputs.date }}
-        org.opencontainers.image.description="${{ inputs.image_desc }}"
-        org.opencontainers.image.documentation=https://raw.githubusercontent.com/${{ inputs.repository_owner }}/${{ inputs.repository_name }}/refs/heads/main/README.md
-        org.opencontainers.image.source=https://github.com/${{ inputs.repository_owner }}/${{ inputs.repository_name }}/blob/main/Containerfile
-        org.opencontainers.image.title=${{ inputs.variant }}
-        org.opencontainers.image.url=https://github.com/${{ inputs.repository_owner }}/${{ inputs.repository_name }}
-        org.opencontainers.image.vendor=${{ inputs.repository_owner }}
-        org.opencontainers.image.version=${{ inputs.parent_version }}
-        org.opencontainers.image.kernel-version=${KERNEL_VERSION}
-        containers.bootc=1
-        EOF
-        )
-        LABELS=$(echo "$LABELS" | sed 's/^[[:space:]]*//')
         echo "kernel_version=${KERNEL_VERSION}" >> "$GITHUB_OUTPUT"
-        echo "labels<<EOF"                      >> "$GITHUB_OUTPUT"
-        echo "$LABELS"                          >> "$GITHUB_OUTPUT"
-        echo "EOF"                              >> "$GITHUB_OUTPUT"
+        LABELS=(
+          "org.opencontainers.image.created=${{ inputs.date }}"
+          "org.opencontainers.image.description=${{ inputs.image_desc }}"
+          "org.opencontainers.image.documentation=https://raw.githubusercontent.com/${{ inputs.repository_owner }}/${{ inputs.repository_name }}/refs/heads/main/README.md"
+          "org.opencontainers.image.source=https://github.com/${{ inputs.repository_owner }}/${{ inputs.repository_name }}/blob/main/Containerfile"
+          "org.opencontainers.image.title=${{ inputs.variant }}"
+          "org.opencontainers.image.url=https://github.com/${{ inputs.repository_owner }}/${{ inputs.repository_name }}"
+          "org.opencontainers.image.vendor=${{ inputs.repository_owner }}"
+          "org.opencontainers.image.version=${{ inputs.parent_version }}"
+          "org.opencontainers.image.kernel-version=${KERNEL_VERSION}"
+          "containers.bootc=1"
+        )
+        printf '%s\n' "${LABELS[@]}" > "${RUNNER_TEMP}/labels.txt"
+        echo "labels_file=${RUNNER_TEMP}/labels.txt" >> "$GITHUB_OUTPUT"
 
     - name: Rechunk image
       if: inputs.skip_rechunk != 'true'
@@ -98,7 +95,7 @@ runs:
         LABEL_ARGS=()
         while IFS= read -r line; do
           [ -n "$line" ] && LABEL_ARGS+=(--label "$line")
-        done <<< "${{ steps.labels.outputs.labels }}"
+        done < "${{ steps.labels.outputs.labels_file }}"
         sudo podman run --rm --privileged \
           --volume /var/lib/containers:/var/lib/containers \
           quay.io/centos-bootc/centos-bootc:stream10 \
@@ -119,7 +116,7 @@ runs:
         sudo buildah config --label "-" "$container"
         while IFS= read -r line; do
           [ -n "$line" ] && sudo buildah config --label "$line" "$container"
-        done <<< "${{ steps.labels.outputs.labels }}"
+        done < "${{ steps.labels.outputs.labels_file }}"
         sudo buildah commit --identity-label=false --rm "$container" localhost/raw-img
 
     - name: Extract final image ref
