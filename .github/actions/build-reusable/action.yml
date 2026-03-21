@@ -1,0 +1,141 @@
+name: Build Reusable
+description: Build, rechunk, and extract digest for a single image variant
+
+inputs:
+  base_image:
+    description: "Base image to build from"
+    required: true
+  build_script:
+    description: "Build script to use"
+    required: false
+    default: "build.sh"
+  canonical_tag:
+    description: "Canonical tag for the image"
+    required: true
+  variant:
+    description: "Variant name"
+    required: true
+  parent_version:
+    description: "Parent image version for OCI labels"
+    required: true
+  date:
+    description: "ISO 8601 timestamp"
+    required: true
+  image_desc:
+    description: "Image description for OCI labels"
+    required: true
+  repository_owner:
+    description: "GitHub repository owner"
+    required: true
+  repository_name:
+    description: "GitHub repository name"
+    required: true
+  skip_rechunk:
+    description: "Skip rechunk step"
+    required: false
+    default: "false"
+
+outputs:
+  source_ref:
+    description: "Container storage ref for the final image"
+    value: ${{ steps.final_ref.outputs.source_ref }}
+  full_build_digest:
+    description: "Full sha256 digest of the built image"
+    value: ${{ steps.final_ref.outputs.full_build_digest }}
+  build_digest:
+    description: "Short digest (without sha256: prefix)"
+    value: ${{ steps.final_ref.outputs.build_digest }}
+  kernel_version:
+    description: "Kernel version extracted from the built image"
+    value: ${{ steps.labels.outputs.kernel_version }}
+
+runs:
+  using: composite
+  steps:
+    - name: Build image
+      shell: bash
+      run: |
+        set -euo pipefail
+        sudo podman build \
+          --tag localhost/raw-img \
+          --build-arg BASE_IMAGE="${{ inputs.base_image }}" \
+          --build-arg BUILD_SCRIPT="${{ inputs.build_script }}" \
+          --build-arg CANONICAL_TAG="${{ inputs.canonical_tag }}" \
+          --build-arg VARIANT="${{ inputs.variant }}" \
+          --file ./Containerfile .
+
+    - name: Assemble image labels
+      id: labels
+      shell: bash
+      run: |
+        set -euo pipefail
+        KERNEL_VERSION=$(sudo podman run --rm localhost/raw-img \
+          cat /usr/share/ublue-os/kernel-version)
+        LABELS=$(cat <<EOF
+        org.opencontainers.image.created=${{ inputs.date }}
+        org.opencontainers.image.description="${{ inputs.image_desc }}"
+        org.opencontainers.image.documentation=https://raw.githubusercontent.com/${{ inputs.repository_owner }}/${{ inputs.repository_name }}/refs/heads/main/README.md
+        org.opencontainers.image.source=https://github.com/${{ inputs.repository_owner }}/${{ inputs.repository_name }}/blob/main/Containerfile
+        org.opencontainers.image.title=${{ inputs.variant }}
+        org.opencontainers.image.url=https://github.com/${{ inputs.repository_owner }}/${{ inputs.repository_name }}
+        org.opencontainers.image.vendor=${{ inputs.repository_owner }}
+        org.opencontainers.image.version=${{ inputs.parent_version }}
+        org.opencontainers.image.kernel-version=${KERNEL_VERSION}
+        containers.bootc=1
+        EOF
+        )
+        LABELS=$(echo "$LABELS" | sed 's/^[[:space:]]*//')
+        echo "kernel_version=${KERNEL_VERSION}" >> "$GITHUB_OUTPUT"
+        echo "labels<<EOF"                      >> "$GITHUB_OUTPUT"
+        echo "$LABELS"                          >> "$GITHUB_OUTPUT"
+        echo "EOF"                              >> "$GITHUB_OUTPUT"
+
+    - name: Rechunk image
+      if: inputs.skip_rechunk != 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        LABEL_ARGS=()
+        while IFS= read -r line; do
+          [ -n "$line" ] && LABEL_ARGS+=(--label "$line")
+        done <<< "${{ steps.labels.outputs.labels }}"
+        sudo podman run --rm --privileged \
+          --volume /var/lib/containers:/var/lib/containers \
+          quay.io/centos-bootc/centos-bootc:stream10 \
+          rpm-ostree compose build-chunked-oci \
+          --bootc --max-layers 128 --format-version 2 \
+          --from localhost/raw-img \
+          --output containers-storage:localhost/chunked-img \
+          "${LABEL_ARGS[@]}"
+        sudo podman image exists localhost/raw-img && \
+          sudo podman rmi localhost/raw-img
+
+    - name: Normalize labels on raw image
+      if: inputs.skip_rechunk == 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        container=$(sudo buildah from localhost/raw-img)
+        sudo buildah config --label "-" "$container"
+        while IFS= read -r line; do
+          [ -n "$line" ] && sudo buildah config --label "$line" "$container"
+        done <<< "${{ steps.labels.outputs.labels }}"
+        sudo buildah commit --identity-label=false --rm "$container" localhost/raw-img
+
+    - name: Extract final image ref
+      id: final_ref
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [ "${{ inputs.skip_rechunk }}" = "true" ]; then
+          SOURCE_REF="containers-storage:localhost/raw-img"
+        else
+          SOURCE_REF="containers-storage:localhost/chunked-img"
+        fi
+        sudo skopeo inspect "$SOURCE_REF" > /dev/null || \
+          { echo "::error::Expected image ${SOURCE_REF} not found after build"; exit 1; }
+        FULL_DIGEST=$(sudo skopeo inspect --format='{{.Digest}}' "$SOURCE_REF")
+        SHORT_DIGEST="${FULL_DIGEST#sha256:}"
+        echo "source_ref=$SOURCE_REF"         >> "$GITHUB_OUTPUT"
+        echo "full_build_digest=$FULL_DIGEST" >> "$GITHUB_OUTPUT"
+        echo "build_digest=$SHORT_DIGEST"     >> "$GITHUB_OUTPUT"

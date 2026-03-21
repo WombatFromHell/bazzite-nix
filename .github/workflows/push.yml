@@ -33,7 +33,7 @@ on:
 
 jobs:
   build_push:
-    name: Build ${{ matrix.variant_data.variant }}
+    name: Build & Push ${{ matrix.variant_data.variant }}
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -45,218 +45,153 @@ jobs:
       packages: write
       id-token: write
 
+    env:
+      # Centralise the base image ref so all steps reference it identically
+      BASE_IMG: >-
+        ${{ inputs.registry_lower }}/${{ inputs.repo }}${{ matrix.variant_data.suffix }}
+      MAX_ATTEMPTS: 3
+      RETRY_DELAY: 15
+
     steps:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Login for Podman (for push operations)
-        id: podman_login
+      - name: Login to GHCR
+        # Extracted into its own named step for clarity; retry logic kept
         run: |
           set -euo pipefail
-          podman_login() {
-            mkdir -p /tmp/podman-auth
-            echo "${{ secrets.GITHUB_TOKEN }}" | \
-            podman login ghcr.io -u ${{ github.actor }} \
-              --password-stdin \
-              --authfile /tmp/podman-auth/auth.json
-          }
-          max_attempts=3
-          delay=15
-          for attempt in $(seq 1 $max_attempts); do
-            if podman_login; then
-              break
+          mkdir -p /tmp/skopeo-auth
+          for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
+            if echo "${{ secrets.GITHUB_TOKEN }}" | \
+               skopeo login ghcr.io \
+                 -u "${{ github.actor }}" \
+                 --password-stdin \
+                 --authfile /tmp/skopeo-auth/auth.json; then
+              exit 0
             fi
-            if [ "$attempt" -ge "$max_attempts" ]; then
-              echo "::error::All ${max_attempts} attempts failed."
-              exit 1
-            fi
-            echo "::warning::Attempt ${attempt} failed. Retrying in ${delay}s..."
-            sleep "$delay"
+            [ "$attempt" -ge "$MAX_ATTEMPTS" ] && \
+              { echo "::error::All ${MAX_ATTEMPTS} login attempts failed."; exit 1; }
+            echo "::warning::Login attempt ${attempt} failed. Retrying in ${RETRY_DELAY}s..."
+            sleep "$RETRY_DELAY"
           done
 
       - name: Build image
-        id: build_image
-        run: |
-          set -euo pipefail
-          SKOPEO_TAG="localhost/raw-img"
-          sudo podman build \
-              --tag "${SKOPEO_TAG}" \
-              --build-arg BASE_IMAGE="${{ matrix.variant_data.base_image }}" \
-              --build-arg BUILD_SCRIPT="${{ matrix.variant_data.build_script || 'build.sh' }}" \
-              --build-arg CANONICAL_TAG="${{ matrix.variant_data.canonical_tag }}" \
-              --build-arg VARIANT="${{ matrix.variant_data.variant }}" \
-              --file ./Containerfile . && \
-              echo "skopeo_ref=containers-storage:${SKOPEO_TAG}" >> $GITHUB_OUTPUT
-
-      - name: Assemble image labels
-        id: labels
-        run: |
-          set -euo pipefail
-          # Extract kernel version from the built image
-          KERNEL_VERSION=$(sudo podman run --rm localhost/raw-img cat /usr/share/ublue-os/kernel-version)
-          LABELS=$(cat <<EOF
-          org.opencontainers.image.created=${{ inputs.date }}
-          org.opencontainers.image.description=${{ inputs.image_desc }}
-          org.opencontainers.image.documentation=https://raw.githubusercontent.com/${{ github.repository_owner }}/${{ github.event.repository.name }}/refs/heads/main/README.md
-          org.opencontainers.image.source=https://github.com/${{ github.repository_owner }}/${{ github.event.repository.name }}/blob/main/Containerfile
-          org.opencontainers.image.title=${{ matrix.variant_data.variant }}
-          org.opencontainers.image.url=https://github.com/${{ github.repository_owner }}/${{ github.event.repository.name }}
-          org.opencontainers.image.vendor=${{ github.repository_owner }}
-          org.opencontainers.image.version=${{ matrix.variant_data.parent_version }}
-          org.opencontainers.image.kernel-version=${KERNEL_VERSION}
-          containers.bootc=1
-          EOF
-          )
-          LABELS=$(echo "$LABELS" | sed 's/^[[:space:]]*//')
-          echo "labels<<EOF" >> $GITHUB_OUTPUT
-          echo "$LABELS" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-
-      - name: Run Rechunker
-        if: inputs.skip_rechunk != 'true'
-        id: rechunk
-        run: |
-          LABEL_ARGS=()
-          while IFS= read -r line; do
-            [ -n "$line" ] && LABEL_ARGS+=(--label "$line")
-          done <<< "${{ steps.labels.outputs.labels }}"
-
-          # we normalize labels on our rechunked image directly in the rechunk step
-          sudo podman run --rm --privileged \
-              --volume /var/lib/containers:/var/lib/containers \
-              quay.io/centos-bootc/centos-bootc:stream10 \
-              rpm-ostree compose build-chunked-oci \
-              --bootc --max-layers 200 --format-version 2 \
-              --from localhost/raw-img \
-              --output containers-storage:localhost/chunked-img \
-              "${LABEL_ARGS[@]}"
-
-          sudo podman image exists localhost/raw-img && \
-            sudo podman rmi localhost/raw-img
-          echo "ref=containers-storage:localhost/chunked-img" >> "$GITHUB_OUTPUT"
-
-      - name: Normalize labels on raw image
-        if: inputs.skip_rechunk == 'true'
-        run: |
-          set -euo pipefail
-          container=$(sudo buildah from localhost/raw-img)
-          sudo buildah config --label "-" "$container"
-          while IFS= read -r line; do
-            [ -n "$line" ] && sudo buildah config --label "$line" "$container"
-          done <<< "${{ steps.labels.outputs.labels }}"
-          sudo buildah commit --identity-label=false --rm "$container" localhost/raw-img
-
-      - name: Extract final image digest
-        id: final_digest
-        run: |
-          set -euo pipefail
-          if [ "${{ inputs.skip_rechunk }}" = "true" ]; then
-            SOURCE_REF="containers-storage:localhost/raw-img"
-          else
-            SOURCE_REF="containers-storage:localhost/chunked-img"
-          fi
-          FULL_DIGEST=$(sudo skopeo inspect --format='{{.Digest}}' "$SOURCE_REF")
-          SHORT_DIGEST=$(echo "$FULL_DIGEST" | sed 's/sha256://')
-          echo "source_ref=$SOURCE_REF" >> $GITHUB_OUTPUT
-          echo "full_build_digest=$FULL_DIGEST" >> $GITHUB_OUTPUT
-          echo "build_digest=$SHORT_DIGEST" >> $GITHUB_OUTPUT
+        uses: ./.github/actions/build-reusable
+        id: build
+        with:
+          base_image: ${{ matrix.variant_data.base_image }}
+          build_script: ${{ matrix.variant_data.build_script || 'build.sh' }}
+          canonical_tag: ${{ matrix.variant_data.canonical_tag }}
+          variant: ${{ matrix.variant_data.variant }}
+          parent_version: ${{ matrix.variant_data.parent_version }}
+          date: ${{ inputs.date }}
+          image_desc: ${{ inputs.image_desc }}
+          repository_owner: ${{ github.repository_owner }}
+          repository_name: ${{ github.event.repository.name }}
+          skip_rechunk: ${{ inputs.skip_rechunk }}
 
       - name: Push to GHCR
         id: push_image
         run: |
           set -euo pipefail
-          SOURCE_REF="${{ steps.final_digest.outputs.source_ref }}"
-          IMAGE_DIGEST="${{ steps.final_digest.outputs.full_build_digest }}"
-          SHORT_DIGEST="${{ steps.final_digest.outputs.build_digest }}"
-          IFS=',' read -r -a tags <<< "${{ matrix.variant_data.tags }}"
-          BASE_IMG="${{ inputs.registry_lower }}/${{ inputs.repo }}${{ matrix.variant_data.suffix }}"
+          SOURCE_REF="${{ steps.build.outputs.source_ref }}"
+          IFS=',' read -r -a TAGS <<< "${{ matrix.variant_data.tags }}"
 
           REMOTE_DIGEST=""
           REMOTE_DIGEST_REF=""
 
           push_image() {
             local attempt="$1"
-            local max_attempts="$2"
-            local attempt_tags=("${tags[@]}")
+            echo "::group::Push primary image (attempt ${attempt}/${MAX_ATTEMPTS})"
+            echo "Source ref : ${SOURCE_REF}"
+            echo "Base image : ${BASE_IMG}"
+            echo "First tag  : ${TAGS[0]}"
 
-            echo "::group::Push primary image (attempt ${attempt}/${max_attempts})"
-            echo "Source ref: ${SOURCE_REF}"
-            echo "Base image: ${BASE_IMG}"
+            # Push the primary image digest
+            local -a compress_flags=()
+            if [[ "${{ inputs.skip_rechunk }}" == "true" ]]; then
+              compress_flags=(
+                --dest-compress-format=zstd
+                --dest-compress-level=6
+              )
+            else
+              compress_flags=(--preserve-digests)
+              echo "Compression : none (pass-through) — zstd:chunked layers preserved"
+            fi
+            #
+            sudo skopeo copy \
+              --authfile /tmp/skopeo-auth/auth.json \
+              "${compress_flags[@]}" \
+              "${SOURCE_REF}" "docker://${BASE_IMG}:${TAGS[0]}"
 
-            sudo podman push \
-              --authfile /tmp/podman-auth/auth.json \
-              --compression-format zstd:chunked \
-              --compression-level 10 \
-              "${SOURCE_REF}" "docker://${BASE_IMG}:${attempt_tags[0]}"
-
-            echo "Fetching remote digest..."
             local remote_digest
-            remote_digest=$(sudo skopeo inspect --format='{{.Digest}}' "docker://${BASE_IMG}:${attempt_tags[0]}")
-            local digest_ref="${BASE_IMG}@${remote_digest}"
+            remote_digest=$(sudo skopeo inspect \
+              --format='{{.Digest}}' \
+              "docker://${BASE_IMG}:${TAGS[0]}")
 
-            echo "Remote digest: ${remote_digest}"
-            echo "Digest ref: ${digest_ref}"
+            local short_digest="${remote_digest#sha256:}"
+            local digest_ref="${BASE_IMG}@${remote_digest}"
+            echo "Remote digest : ${remote_digest}"
+            echo "Digest ref    : ${digest_ref}"
             echo "::endgroup::"
 
-            echo "::group::Push remaining tags"
-            # Add the digest-based tag to the list
-            attempt_tags+=("${remote_digest#sha256:}")
-            for tag in "${attempt_tags[@]:1}"; do
-              echo "Pushing tag: ${BASE_IMG}:${tag}"
+            echo "::group::Push additional tags (including short digest)"
+            # Append the short digest as an extra tag so every image is
+            # pinnable by content even without a dedicated tag for it.
+            local extra_tags=("${TAGS[@]:1}" "$short_digest")
+            for tag in "${extra_tags[@]}"; do
+              echo "  → ${BASE_IMG}:${tag}"
               sudo skopeo copy \
-                --authfile /tmp/podman-auth/auth.json \
+                --authfile /tmp/skopeo-auth/auth.json \
                 "docker://${digest_ref}" "docker://${BASE_IMG}:${tag}"
             done
             echo "::endgroup::"
 
-            # Set module-level variables for output after function returns
-            REMOTE_DIGEST="${remote_digest}"
-            REMOTE_DIGEST_REF="${digest_ref}"
+            # Write to outer-scope variables — these survive the function call
+            REMOTE_DIGEST="$remote_digest"
+            REMOTE_DIGEST_REF="$digest_ref"
           }
 
-          max_attempts=3
-          delay=15
-          for attempt in $(seq 1 $max_attempts); do
-            if push_image "$attempt" "$max_attempts"; then
-              break
-            fi
-
-            if [ "$attempt" -ge "$max_attempts" ]; then
-              echo "::error::All ${max_attempts} attempts failed."
-              exit 1
-            fi
-
-            echo "::warning::Attempt ${attempt} failed. Retrying in ${delay}s..."
-            sleep "$delay"
+          for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
+            if push_image "$attempt"; then break; fi
+            [ "$attempt" -ge "$MAX_ATTEMPTS" ] && \
+              { echo "::error::All ${MAX_ATTEMPTS} push attempts failed."; exit 1; }
+            echo "::warning::Push attempt ${attempt} failed. Retrying in ${RETRY_DELAY}s..."
+            sleep "$RETRY_DELAY"
           done
 
-          # Write outputs after the function completes (not inside the function)
-          echo "remote_digest=${REMOTE_DIGEST}" >> $GITHUB_OUTPUT
-          echo "remote_digest_ref=${REMOTE_DIGEST_REF}" >> $GITHUB_OUTPUT
+          [[ -z "$REMOTE_DIGEST" ]] && \
+            { echo "::error::REMOTE_DIGEST is empty after push loop."; exit 1; }
+
+          echo "remote_digest=${REMOTE_DIGEST}"         >> "$GITHUB_OUTPUT"
+          echo "remote_digest_ref=${REMOTE_DIGEST_REF}" >> "$GITHUB_OUTPUT"
 
       - name: Install Cosign
         uses: sigstore/cosign-installer@ba7bc0a3fef59531c69a25acd34668d6d3fe6f22 # v4.1.0
 
-      - name: Sign image and verify attestation
+      - name: Sign and verify image
         id: sign_and_verify
         env:
-          SIGNING_SECRET: ${{ secrets.SIGNING_SECRET }}
+          SIGNING_SECRET: ${{ secrets.signing_secret }}
         run: |
           set -euo pipefail
-          BASE_IMG="${{ inputs.registry_lower }}/${{ inputs.repo }}${{ matrix.variant_data.suffix }}"
-          DIGEST="${{ steps.push_image.outputs.remote_digest }}"
           DIGEST_REF="${{ steps.push_image.outputs.remote_digest_ref }}"
 
-          echo "::group::Sign image"
-          cosign sign -y \
-            --key env://SIGNING_SECRET \
-            --new-bundle-format=false \
-            --use-signing-config=false \
-            --registry-referrers-mode=legacy \
-            --registry-username "${{ github.actor }}" \
-            --registry-password "${{ secrets.GITHUB_TOKEN }}" \
-            "${DIGEST_REF}"
-          echo "::endgroup::"
+          for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
+            echo "::group::Sign image (attempt ${attempt}/${MAX_ATTEMPTS})"
+            if cosign sign -y \
+              --key env://SIGNING_SECRET \
+              --registry-username "${{ github.actor }}" \
+              --registry-password "${{ secrets.GITHUB_TOKEN }}" \
+              "${DIGEST_REF}"; then
+              echo "::endgroup::"
+              break
+            fi
+            echo "::endgroup::"
+            [ "$attempt" -ge "$MAX_ATTEMPTS" ] && \
+              { echo "::error::Signing failed after ${MAX_ATTEMPTS} attempts."; exit 1; }
+            sleep "$RETRY_DELAY"
+          done
 
           echo "::group::Verify image"
           cosign verify \
@@ -264,22 +199,29 @@ jobs:
             "${DIGEST_REF}"
           echo "::endgroup::"
 
-          # Format the tags list from the CSV into a readable string
-          TAGS_CSV="${{ matrix.variant_data.tags }}"
-          TAGS_FMT=$(echo "${TAGS_CSV}" | tr ',' ' · ')
+          echo "::group::Inspect layer sizes"
+          TOTAL_MB=$(sudo skopeo inspect --raw \
+            --creds "${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}" \
+            "docker://${DIGEST_REF}" | \
+            jq '([.layers[].size] | add) / 1024 / 1024 | round')
+          echo "Total compressed size: ${TOTAL_MB} MB"
+          echo "::endgroup::"
 
-          # Write the summary table header once per job (not once per matrix shard —
-          # each matrix job gets its own GITHUB_STEP_SUMMARY file, so no race condition)
+          REMOTE_DIGEST="${{ steps.push_image.outputs.remote_digest }}"
+          TAGS_FMT=$(echo "${{ matrix.variant_data.tags }}" | tr ',' ' · ')
+
+          RECHUNKED="${{ inputs.skip_rechunk == 'false' && 'yes' || 'no' }}"
           {
             echo "## ${{ matrix.variant_data.variant }}"
             echo ""
             echo "| Field | Value |"
             echo "| ----- | ----- |"
-            echo "| **Image** | \`${BASE_IMG}\` |"
-            echo "| **Digest** | \`${DIGEST}\` |"
-            echo "| **Tags** | \`${TAGS_FMT}\` |"
+            echo "| **Image**          | \`${BASE_IMG}\` |"
+            echo "| **Digest**         | \`${REMOTE_DIGEST}\` |"
+            echo "| **Tags**           | \`${TAGS_FMT}\` |"
             echo "| **Parent version** | \`${{ matrix.variant_data.parent_version }}\` |"
-            echo "| **Built** | \`${{ inputs.date }}\` |"
-            echo "| **Rechunked** | \`${{ inputs.skip_rechunk != 'true' && 'yes' || 'no' }}\` |"
+            echo "| **Built**          | \`${{ inputs.date }}\` |"
+            echo "| **Image size**     | \`${TOTAL_MB} MB\` |"
+            echo "| **Rechunked**      | \`${RECHUNKED}\` |"
             echo "| **Signed & verified** | ✅ |"
           } >> "$GITHUB_STEP_SUMMARY"
