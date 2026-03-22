@@ -1,0 +1,129 @@
+name: Check Variants
+description: Check which image variants need rebuilding
+
+inputs:
+  force_build:
+    description: "Force build even if digest unchanged"
+    required: false
+    default: "false"
+  variants_config:
+    description: "Path to variants.json config file"
+    required: true
+  registry:
+    description: "Image registry (e.g., ghcr.io/owner)"
+    required: true
+  repo:
+    description: "Image repository name"
+    required: true
+  image_desc:
+    description: "Image description"
+    required: true
+  date:
+    description: "Build date timestamp"
+    required: true
+
+outputs:
+  variants_to_build:
+    description: "JSON array of variants that need building"
+    value: ${{ steps.aggregate.outputs.variants_to_build }}
+  any_builds_needed:
+    description: "Whether any variants need building"
+    value: ${{ steps.aggregate.outputs.any_builds_needed }}
+
+runs:
+  using: composite
+  steps:
+    - name: Checkout
+      uses: actions/checkout@v6
+
+    - name: Run check-variants script
+      id: check_variants
+      shell: bash
+      env:
+        REGISTRY: ${{ inputs.registry }}
+        REPO: ${{ inputs.repo }}
+        IMAGE_DESC: ${{ inputs.image_desc }}
+        DATE: ${{ inputs.date }}
+        FORCE_BUILD: ${{ inputs.force_build }}
+        VARIANTS_CONFIG: ${{ inputs.variants_config }}
+      run: |
+        .github/actions/check-variants/check-variants.sh
+
+    - name: Aggregate results
+      id: aggregate
+      shell: bash
+      run: |
+        results_file="/tmp/variants_results.json"
+
+        if [ ! -f "$results_file" ]; then
+          echo "::error::Variant results file not found - check job may have failed"
+          exit 1
+        fi
+
+        if [ ! -s "$results_file" ]; then
+          echo "::error::Variant results file is empty - check job may have failed silently"
+          echo "::notice::Treating as no builds needed to allow workflow to continue"
+          echo "variants_to_build=[]" >> "$GITHUB_OUTPUT"
+          echo "any_builds_needed=false" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        results=$(cat "$results_file")
+
+        if ! echo "$results" | jq empty 2>/dev/null; then
+          echo "::error::Invalid JSON in results file - check job may have produced corrupt output"
+          exit 1
+        fi
+
+        any_builds_needed=false
+        variants_to_build=$(echo "$results" | jq -c '[.[] | select(.needs_build == true) | del(.needs_build)]')
+
+        count=$(echo "$variants_to_build" | jq 'length')
+        if [ "$count" -gt 0 ]; then
+          any_builds_needed=true
+        fi
+
+        if [ "$any_builds_needed" = false ]; then
+          echo "::notice::No variants need building"
+          echo "## ⚠️ Build Skipped" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Reason:** No variants have changes" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "### 🚫 Skipped Variants" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Variant | Target Image | Tags |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---------|--------------|------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "$results" | jq -c '.[]' | while read -r variant; do
+            name=$(echo "$variant" | jq -r '.variant')
+            suffix=$(echo "$variant" | jq -r '.suffix // ""')
+            tags=$(echo "$variant" | jq -r '.tags')
+            collision=$(echo "$variant" | jq -r '.collision_detected // false')
+            target_image="${{ inputs.registry }}/${{ inputs.repo }}${suffix}"
+            if [ "$collision" = "true" ]; then
+              echo "| \`${name}\` | \`${target_image}\` | \`${tags}\` ⚠️ |" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "| \`${name}\` | \`${target_image}\` | \`${tags}\` |" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
+          echo "variants_to_build=[]" >> "$GITHUB_OUTPUT"
+        else
+          echo "variants_to_build=${variants_to_build}" >> "$GITHUB_OUTPUT"
+
+          echo "## 📦 Variants to Build" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Variant | Target Image | Tags |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---------|--------------|------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "$variants_to_build" | jq -c '.[]' | while read -r variant; do
+            name=$(echo "$variant" | jq -r '.variant')
+            suffix=$(echo "$variant" | jq -r '.suffix // ""')
+            tags=$(echo "$variant" | jq -r '.tags')
+            collision=$(echo "$variant" | jq -r '.collision_detected // false')
+            target_image="${{ inputs.registry }}/${{ inputs.repo }}${suffix}"
+            if [ "$collision" = "true" ]; then
+              echo "| \`${name}\` | \`${target_image}\` | \`${tags}\` ⚠️ |" >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "| \`${name}\` | \`${target_image}\` | \`${tags}\` |" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
+        fi
+
+        echo "any_builds_needed=${any_builds_needed}" >> "$GITHUB_OUTPUT"

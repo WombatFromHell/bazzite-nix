@@ -25,7 +25,8 @@ env:
   # Image metadata
   IMAGE_NAME: "${{ github.event.repository.name }}"
   IMAGE_DESC: "Customized Bazzite image with Nix mount support and other sugar"
-  IMAGE_REGISTRY: "ghcr.io/${{ github.repository_owner }}"
+  # GHCR requires lowercase - use lower() to ensure owner name is lowercase
+  IMAGE_REGISTRY: "ghcr.io/${{ lower(github.repository_owner) }}"
 
   # Variant configuration file path
   # Edit .github/variants.json to add, remove, or modify build variants
@@ -38,22 +39,85 @@ concurrency:
 jobs:
   # Check upstream images, determine which variants need rebuilding, and aggregate results
   check_and_aggregate:
-    uses: ./.github/workflows/check.yml
-    with:
-      force_build: ${{ github.event.inputs.force_build == 'true' }}
-      variants_config: ".github/variants.json"
+    runs-on: ubuntu-24.04
+    outputs:
+      variants_to_build: ${{ steps.check.outputs.variants_to_build }}
+      any_builds_needed: ${{ steps.check.outputs.any_builds_needed }}
+      date: ${{ steps.date.outputs.date }}
+      registry: ${{ env.IMAGE_REGISTRY }}
+      repo: ${{ env.IMAGE_NAME }}
+      image_desc: ${{ env.IMAGE_DESC }}
+    steps:
+      - name: Set build date
+        id: date
+        run: |
+          echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
-  # Build, sign, and push each variant that needs updating
+      - name: Check variants
+        id: check
+        uses: ./.github/actions/check-variants
+        with:
+          force_build: ${{ github.event.inputs.force_build == 'true' }}
+          variants_config: ".github/variants.json"
+          registry: ${{ env.IMAGE_REGISTRY }}
+          repo: ${{ env.IMAGE_NAME }}
+          image_desc: ${{ env.IMAGE_DESC }}
+          date: ${{ steps.date.outputs.date }}
+
+  # Build, push, sign, and verify each variant that needs updating
   build_push:
     needs: check_and_aggregate
     if: needs.check_and_aggregate.outputs.any_builds_needed == 'true'
-    uses: ./.github/workflows/push.yml
-    with:
-      variants_to_build: ${{ needs.check_and_aggregate.outputs.variants_to_build }}
-      date: ${{ needs.check_and_aggregate.outputs.date }}
-      registry_lower: ${{ needs.check_and_aggregate.outputs.registry }}
-      repo: ${{ needs.check_and_aggregate.outputs.repo }}
-      image_desc: ${{ needs.check_and_aggregate.outputs.image_desc }}
-      skip_rechunk: ${{ github.event.inputs.skip_rechunk == 'true' }}
-    secrets:
-      signing_secret: ${{ secrets.SIGNING_SECRET }}
+    name: Build & Push ${{ matrix.variant_data.variant }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        variant_data: ${{ fromJson(needs.check_and_aggregate.outputs.variants_to_build) }}
+
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+
+    env:
+      # Centralise the base image ref so all steps reference it identically
+      BASE_IMG: >-
+        ${{ needs.check_and_aggregate.outputs.registry }}/${{ needs.check_and_aggregate.outputs.repo }}${{ matrix.variant_data.suffix }}
+      MAX_ATTEMPTS: 3
+      RETRY_DELAY: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Build image
+        uses: ./.github/actions/build-reusable
+        id: build
+        with:
+          base_image: ${{ matrix.variant_data.base_image }}
+          build_script: ${{ matrix.variant_data.build_script || 'build.sh' }}
+          canonical_tag: ${{ matrix.variant_data.canonical_tag }}
+          variant: ${{ matrix.variant_data.variant }}
+          parent_version: ${{ matrix.variant_data.parent_version }}
+          date: ${{ needs.check_and_aggregate.outputs.date }}
+          image_desc: ${{ needs.check_and_aggregate.outputs.image_desc }}
+          repository_owner: ${{ github.repository_owner }}
+          repository_name: ${{ github.event.repository.name }}
+          skip_rechunk: ${{ github.event.inputs.skip_rechunk == 'true' }}
+
+      - name: Push, sign, and verify image
+        uses: ./.github/actions/push-reusable
+        with:
+          source_ref: ${{ steps.build.outputs.source_ref }}
+          variant_name: ${{ matrix.variant_data.variant }}
+          tags: ${{ matrix.variant_data.tags }}
+          skip_rechunk: ${{ github.event.inputs.skip_rechunk == 'true' }}
+          signing_secret: ${{ secrets.SIGNING_SECRET }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          github_actor: ${{ github.actor }}
+          registry: ${{ needs.check_and_aggregate.outputs.registry }}
+          repo: ${{ needs.check_and_aggregate.outputs.repo }}
+          suffix: ${{ matrix.variant_data.suffix }}
+          date: ${{ needs.check_and_aggregate.outputs.date }}
+          parent_version: ${{ matrix.variant_data.parent_version }}

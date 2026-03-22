@@ -5,8 +5,10 @@
 # Usage: ./check-variants.sh
 #
 # Environment Variables:
-#   REGISTRY_OWNER     - GitHub repository owner (e.g., "ublue-os")
-#   IMAGE_NAME         - Repository name (e.g., "bazzite-nix")
+#   REGISTRY           - Full registry URL (e.g., "ghcr.io/ublue-os")
+#   REPO               - Repository name (e.g., "bazzite-nix")
+#   IMAGE_DESC         - Image description
+#   DATE               - Build date timestamp
 #   FORCE_BUILD        - "true" to force rebuild regardless of digest
 #   VARIANTS_CONFIG    - Path to variants.json config file
 #
@@ -27,13 +29,13 @@ MAX_RETRIES=3
 RETRY_DELAY=10
 
 # Validate required environment variables
-if [ -z "${REGISTRY_OWNER+x}" ]; then
-	echo "::error::REGISTRY_OWNER environment variable must be set"
+if [ -z "${REGISTRY+x}" ]; then
+	echo "::error::REGISTRY environment variable must be set"
 	exit 1
 fi
 
-if [ -z "${IMAGE_NAME+x}" ]; then
-	echo "::error::IMAGE_NAME environment variable must be set"
+if [ -z "${REPO+x}" ]; then
+	echo "::error::REPO environment variable must be set"
 	exit 1
 fi
 
@@ -50,6 +52,9 @@ if [ ! -f "$VARIANTS_CONFIG" ]; then
 	echo "::error::Variants config file not found: $VARIANTS_CONFIG"
 	exit 1
 fi
+
+# Ensure registry is lowercase (GHCR requirement)
+REGISTRY=$(echo "$REGISTRY" | tr '[:upper:]' '[:lower:]')
 
 # Load variants from config file
 # Initialize results array
@@ -440,9 +445,9 @@ for ((i = 0; i < variant_count; i++)); do
 	base_image_tag="${base_image##*:}"
 
 	# Standardized image reference components (matching workflow convention)
-	# Note: GHCR normalizes owner names to lowercase
-	output_image="${IMAGE_NAME}${suffix}"
-	registry="ghcr.io/$(echo "${REGISTRY_OWNER}" | tr '[:upper:]' '[:lower:]')"
+	# Note: REGISTRY is already lowercased at script start
+	output_image="${REPO}${suffix}"
+	registry="${REGISTRY}"
 	prefix="${registry}/${output_image}"
 
 	# Compute canonical tag (returns "canonical collision_detected")
