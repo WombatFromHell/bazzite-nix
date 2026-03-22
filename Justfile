@@ -258,6 +258,70 @@ _build-rootful $target_image $tag $variant $base_image=base_image $build_script=
         --tag "${target_image}:${canonical}" \
         .
 
+# Rechunk a built image to OCI layout with bootc chunking
+# Usage: just rechunk [variant-name | image:tag]
+
+# Example: just rechunk testing
+[group('Build Container Image')]
+rechunk $variant_or_spec="{{ default_tag }}":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    eval "$(just --unstable _resolve-variant "{{ variant_or_spec }}")"
+    just --unstable _rechunk "$TARGET_IMAGE" "$TAG" "$VARIANT_NAME"
+
+[private]
+_rechunk $target_image $tag $variant:
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    # Assemble image labels (mirrors .github/actions/build-reusable/action.yml)
+    KERNEL_VERSION=$(sudo podman run --rm --privileged \
+        --security-opt label=disable \
+        "${target_image}:${tag}" \
+        cat /usr/share/ublue-os/kernel-version
+    )
+
+    LABELS=(
+        "org.opencontainers.image.created=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        "org.opencontainers.image.description=${variant}"
+        "org.opencontainers.image.documentation=https://raw.githubusercontent.com/{{ repo_organization }}/{{ image_name }}/refs/heads/main/README.md"
+        "org.opencontainers.image.source=https://github.com/{{ repo_organization }}/{{ image_name }}/blob/main/Containerfile"
+        "org.opencontainers.image.title=${variant}"
+        "org.opencontainers.image.url=https://github.com/{{ repo_organization }}/{{ image_name }}"
+        "org.opencontainers.image.vendor={{ repo_organization }}"
+        "org.opencontainers.image.version=${tag}"
+        "org.opencontainers.image.kernel-version=${KERNEL_VERSION}"
+        "containers.bootc=1"
+    )
+
+    # Initialize OCI layout on host
+    sudo rm -rf /var/lib/containers/oci
+    sudo mkdir -p /var/lib/containers/oci
+    echo '{"imageLayoutVersion":"1.0.0"}' | sudo tee /var/lib/containers/oci/oci-layout > /dev/null
+    echo '{"schemaVersion":2,"manifests":[]}' | sudo tee /var/lib/containers/oci/index.json > /dev/null
+
+    # Build LABEL_ARGS array
+    LABEL_ARGS=()
+    for line in "${LABELS[@]}"; do
+        [ -n "$line" ] && LABEL_ARGS+=(--label "$line")
+    done
+
+    # Run rechunk using centos-bootc image (same as GitHub action)
+    sudo podman run --rm --privileged \
+        --volume /var/lib/containers:/var/lib/containers \
+        quay.io/centos-bootc/centos-bootc:{{ centos_version }} \
+        rpm-ostree compose build-chunked-oci \
+        --bootc --max-layers 128 --format-version 2 \
+        --from "${target_image}:${tag}" \
+        --output "oci:/var/lib/containers/oci:${tag}" \
+        "${LABEL_ARGS[@]}"
+
+    # Clean up raw image
+    sudo podman image exists "${target_image}:${tag}" && \
+        sudo podman rmi "${target_image}:${tag}"
+
+    echo "Rechunked image available at: oci:/var/lib/containers/oci:${tag}"
+
 [private]
 _build-bib $target_image $tag $type $config $output_dir="":
     #!/usr/bin/env bash
