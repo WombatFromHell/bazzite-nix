@@ -30,10 +30,6 @@ inputs:
   repository_name:
     description: "GitHub repository name"
     required: true
-  skip_rechunk:
-    description: "Skip rechunk step"
-    required: false
-    default: "false"
 
 outputs:
   source_ref:
@@ -88,7 +84,6 @@ runs:
         echo "labels_file=${RUNNER_TEMP}/labels.txt" >> "$GITHUB_OUTPUT"
 
     - name: Rechunk image
-      if: inputs.skip_rechunk != 'true'
       shell: bash
       run: |
         set -euo pipefail
@@ -114,37 +109,18 @@ runs:
         sudo podman image exists localhost/raw-img && \
           sudo podman rmi localhost/raw-img
 
-    - name: Normalize labels on raw image
-      if: inputs.skip_rechunk == 'true'
-      shell: bash
-      run: |
-        set -euo pipefail
-        container=$(sudo buildah from localhost/raw-img)
-        sudo buildah config --label "-" "$container"
-        while IFS= read -r line; do
-          [ -n "$line" ] && sudo buildah config --label "$line" "$container"
-        done < "${{ steps.labels.outputs.labels_file }}"
-        sudo buildah commit --identity-label=false --rm "$container" localhost/raw-img
-
     - name: Extract final image ref
       id: final_ref
       shell: bash
       run: |
         set -euo pipefail
-        if [ "${{ inputs.skip_rechunk }}" = "true" ]; then
-          SOURCE_REF="containers-storage:localhost/raw-img"
-          sudo skopeo inspect "$SOURCE_REF" > /dev/null || \
-            { echo "::error::Expected image ${SOURCE_REF} not found after build"; exit 1; }
-          FULL_DIGEST=$(sudo skopeo inspect --format='{{.Digest}}' "$SOURCE_REF")
-        else
-          SOURCE_REF="oci:/var/lib/containers/oci:latest"
-          sudo skopeo inspect --raw "$SOURCE_REF" > /dev/null || \
-            { echo "::error::Expected OCI layout ${SOURCE_REF} not found after rechunk"; exit 1; }
-          FULL_DIGEST=$(sudo skopeo inspect --raw "$SOURCE_REF" | jq -r '.config.digest // empty')
-          # Fall back to manifest digest if config digest unavailable
-          if [ -z "$FULL_DIGEST" ]; then
-            FULL_DIGEST=$(sudo sha256sum /var/lib/containers/oci/index.json | awk '{print "sha256:"$1}')
-          fi
+        SOURCE_REF="oci:/var/lib/containers/oci:latest"
+        sudo skopeo inspect --raw "$SOURCE_REF" > /dev/null || \
+          { echo "::error::Expected OCI layout ${SOURCE_REF} not found after rechunk"; exit 1; }
+        FULL_DIGEST=$(sudo skopeo inspect --raw "$SOURCE_REF" | jq -r '.config.digest // empty')
+        # Fall back to manifest digest if config digest unavailable
+        if [ -z "$FULL_DIGEST" ]; then
+          FULL_DIGEST=$(sudo sha256sum /var/lib/containers/oci/index.json | awk '{print "sha256:"$1}')
         fi
         SHORT_DIGEST="${FULL_DIGEST#sha256:}"
         echo "source_ref=$SOURCE_REF"         >> "$GITHUB_OUTPUT"

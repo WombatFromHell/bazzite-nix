@@ -10,11 +10,6 @@ on:
         required: false
         default: false
         type: boolean
-      skip_rechunk:
-        description: "Skip rechunk step (faster build, larger layers)"
-        required: false
-        default: false
-        type: boolean
 
 permissions:
   contents: read
@@ -25,8 +20,6 @@ env:
   # Image metadata
   IMAGE_NAME: "${{ github.event.repository.name }}"
   IMAGE_DESC: "Customized Bazzite image with Nix mount support and other sugar"
-  # GHCR requires lowercase - use lower() to ensure owner name is lowercase
-  IMAGE_REGISTRY: "ghcr.io/${{ lower(github.repository_owner) }}"
 
   # Variant configuration file path
   # Edit .github/variants.json to add, remove, or modify build variants
@@ -44,10 +37,15 @@ jobs:
       variants_to_build: ${{ steps.check.outputs.variants_to_build }}
       any_builds_needed: ${{ steps.check.outputs.any_builds_needed }}
       date: ${{ steps.date.outputs.date }}
-      registry: ${{ env.IMAGE_REGISTRY }}
+      registry: ${{ steps.lowercase_owner.outputs.registry }}
       repo: ${{ env.IMAGE_NAME }}
       image_desc: ${{ env.IMAGE_DESC }}
     steps:
+      - name: Lowercase repository owner
+        id: lowercase_owner
+        run: |
+          echo "registry=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+
       - name: Set build date
         id: date
         run: |
@@ -59,7 +57,7 @@ jobs:
         with:
           force_build: ${{ github.event.inputs.force_build == 'true' }}
           variants_config: ".github/variants.json"
-          registry: ${{ env.IMAGE_REGISTRY }}
+          registry: ${{ steps.lowercase_owner.outputs.registry }}
           repo: ${{ env.IMAGE_NAME }}
           image_desc: ${{ env.IMAGE_DESC }}
           date: ${{ steps.date.outputs.date }}
@@ -104,7 +102,6 @@ jobs:
           image_desc: ${{ needs.check_and_aggregate.outputs.image_desc }}
           repository_owner: ${{ github.repository_owner }}
           repository_name: ${{ github.event.repository.name }}
-          skip_rechunk: ${{ github.event.inputs.skip_rechunk == 'true' }}
 
       - name: Push, sign, and verify image
         uses: ./.github/actions/push-reusable
@@ -112,7 +109,6 @@ jobs:
           source_ref: ${{ steps.build.outputs.source_ref }}
           variant_name: ${{ matrix.variant_data.variant }}
           tags: ${{ matrix.variant_data.tags }}
-          skip_rechunk: ${{ github.event.inputs.skip_rechunk == 'true' }}
           signing_secret: ${{ secrets.SIGNING_SECRET }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
           github_actor: ${{ github.actor }}

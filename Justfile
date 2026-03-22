@@ -61,12 +61,14 @@ clean-vm:
 # Run shellcheck on all Bash scripts
 [group('Utility')]
 lint:
-    /usr/bin/find . -iname "*.sh" -type f -exec shellcheck "{}" \;
+    @/usr/bin/find . -iname "*.sh" -type f -exec shellcheck "{}" \;
+    @/usr/bin/find ./.github/workflows/ -iname "*.yml" -type f -exec actionlint "{}" \;
 
 # Run shfmt on all Bash scripts
 [group('Utility')]
 format:
-    /usr/bin/find . -iname "*.sh" -type f -exec shfmt --write "{}" \;
+    @/usr/bin/find . -iname "*.sh" -type f -exec shfmt --write -i 2 "{}" \;
+    @/usr/bin/find . -iname "*.yml" -type f -exec prettier -w "{}" \;
 
 # Build a container image
 # Usage: just build [variant-name | image:tag] [base_image]

@@ -11,9 +11,6 @@ inputs:
   tags:
     description: "Comma-separated list of tags"
     required: true
-  skip_rechunk:
-    description: "Whether rechunk was skipped"
-    required: true
   signing_secret:
     description: "Cosign signing secret"
     required: true
