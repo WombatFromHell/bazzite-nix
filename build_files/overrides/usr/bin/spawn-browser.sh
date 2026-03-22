@@ -11,23 +11,42 @@ DESKTOP_FILE="$(xdg-settings get default-web-browser 2>/dev/null)" || {
   exit 1
 }
 
-# Search standard locations for the .desktop file (including flatpak exports)
-DESKTOP_PATH="$(find \
-  "$HOME/.local/share/applications" \
-  "$HOME/.local/share/flatpak/exports/share/applications" \
-  /var/lib/flatpak/exports/share/applications \
-  /usr/local/share/applications \
-  /usr/share/applications \
-  -name "$DESKTOP_FILE" 2>/dev/null | head -n1)"
+# Search for .desktop file - check flatpak paths first for common flatpak browser IDs
+# Flatpak app IDs follow reverse-DNS pattern (e.g., com.brave.Browser.desktop)
+if [[ "$DESKTOP_FILE" =~ ^[a-z][a-z0-9]*\.[a-z][a-z0-9.-]*\.[a-z][a-z0-9.-]*\.desktop$ ]]; then
+  # Likely a flatpak app - check flatpak paths first
+  DESKTOP_PATH="$(
+    for dir in \
+      "$HOME/.local/share/flatpak/exports/share/applications" \
+      /var/lib/flatpak/exports/share/applications \
+      "$HOME/.local/share/applications" \
+      /usr/local/share/applications \
+      /usr/share/applications; do
+      [[ -f "$dir/$DESKTOP_FILE" ]] && { echo "$dir/$DESKTOP_FILE"; break; }
+    done
+  )"
+else
+  # Native app - check standard paths first
+  DESKTOP_PATH="$(
+    for dir in \
+      "$HOME/.local/share/applications" \
+      /usr/local/share/applications \
+      /usr/share/applications \
+      "$HOME/.local/share/flatpak/exports/share/applications" \
+      /var/lib/flatpak/exports/share/applications; do
+      [[ -f "$dir/$DESKTOP_FILE" ]] && { echo "$dir/$DESKTOP_FILE"; break; }
+    done
+  )"
+fi
 
 [[ -z "$DESKTOP_PATH" ]] && {
   echo "Error: .desktop file not found for '$DESKTOP_FILE'" >&2
   exit 1
 }
 
-# Extract the Exec= line, strip field codes (%u %U %f %F etc.) and quotes
+# Extract the Exec= line, strip field codes (%u %U %f %F etc.), @@ markers, and quotes
 EXEC_LINE="$(grep -m1 '^Exec=' "$DESKTOP_PATH" |
-  sed 's/^Exec=//; s/%[a-zA-Z]//g; s/^ *//; s/ *$//')"
+  sed 's/^Exec=//; s/%[a-zA-Z]//g; s/@@[^ ]*//g; s/^ *//; s/ *$//')"
 
 # Helper: extract browser name and spawn based on launcher type
 spawn_browser() {
@@ -92,18 +111,12 @@ spawn_browser() {
 
 # Check if this is a flatpak run command
 if [[ "$EXEC_LINE" =~ ^(/usr/bin/)?flatpak[[:space:]]+run ]]; then
-  # Extract flatpak app ID and clean up desktop-specific args
-  # Remove flatpak options (--branch=, --arch=, --command=, --file-forwarding) and @@ markers
-  FLATPAK_APP_ID="$(echo "$EXEC_LINE" |
-    sed 's/@@[^ ]*//g' | # Remove @@u, @@, etc.
-    awk '{
-      for(i=1;i<=NF;i++) {
-        if($i !~ /^--/ && $i !~ /^flatpak$/ && $i !~ /^run$/) {
-          # Check if previous arg was --command= (inline form)
-          if($(i-1) !~ /^--command=/) print $i
-        }
-      }
-    }' | grep -E '^[a-z][a-z0-9]*\.[a-z][a-z0-9.-]*\.[a-z][a-z0-9.-]*' | head -n1)"
+  # Extract flatpak app ID - it's the first argument after 'flatpak run' that matches reverse-DNS pattern
+  # Strip @@ markers and options first
+  CLEAN_EXEC="$(echo "$EXEC_LINE" | sed 's/@@[^ ]*//g')"
+
+  # Extract app ID: first token after 'flatpak run' matching reverse-DNS pattern (case-insensitive)
+  FLATPAK_APP_ID="$(echo "$CLEAN_EXEC" | grep -oiE '[a-z][a-z0-9]*\.[a-z][a-z0-9.-]*\.[a-z][a-z0-9.-]*' | head -n1)"
 
   [[ -z "$FLATPAK_APP_ID" ]] && {
     echo "Error: could not determine flatpak app ID from '$EXEC_LINE'" >&2
