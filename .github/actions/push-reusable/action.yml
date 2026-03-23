@@ -63,12 +63,14 @@ runs:
       id: login
       shell: bash
       env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        GITHUB_TOKEN: ${{ inputs.github_token }}
       run: |
+        mkdir -p /tmp/skopeo-auth
         echo "${GITHUB_TOKEN}" | \
           skopeo login ghcr.io \
-            --username "${{ github.actor }}" \
-            --password-stdin
+            --username "${{ inputs.github_actor }}" \
+            --password-stdin \
+            --authfile /tmp/skopeo-auth/auth.json
 
     - name: Push to GHCR
       id: push_image
@@ -78,79 +80,50 @@ runs:
         GITHUB_ACTOR: ${{ inputs.github_actor }}
         SOURCE_REF: ${{ inputs.source_ref }}
         TAGS: ${{ inputs.tags }}
-        SKIP_RECHUNK: ${{ inputs.skip_rechunk }}
         MAX_ATTEMPTS: ${{ inputs.max_attempts }}
         RETRY_DELAY: ${{ inputs.retry_delay }}
         BASE_IMG: ${{ inputs.registry }}/${{ inputs.repo }}${{ inputs.suffix }}
       run: |
         set -euo pipefail
+        # shellcheck source=helpers.sh
+        source "${GITHUB_ACTION_PATH}/helpers.sh"
+
         IFS=',' read -r -a TAGS_ARR <<< "${TAGS}"
 
-        REMOTE_DIGEST=""
-        REMOTE_DIGEST_REF=""
+        echo "::group::Push primary tag (${TAGS_ARR[0]})"
+        echo "Source ref : ${SOURCE_REF}"
+        echo "Target     : docker://${BASE_IMG}:${TAGS_ARR[0]}"
+        skopeo_copy_with_retry \
+          "${SOURCE_REF}" \
+          "docker://${BASE_IMG}:${TAGS_ARR[0]}"
+        echo "::endgroup::"
 
-        push_image() {
-          local attempt="$1"
-          echo "::group::Push primary image (attempt ${attempt}/${MAX_ATTEMPTS})"
-          echo "Source ref : ${SOURCE_REF}"
-          echo "Base image : ${BASE_IMG}"
-          echo "First tag  : ${TAGS_ARR[0]}"
-
-          # Push the primary image digest
-          local -a compress_flags=()
-          if [[ "${SKIP_RECHUNK}" == "true" ]]; then
-            compress_flags=(
-              --dest-compress-format=zstd
-              --dest-compress-level=6
-            )
-          else
-            compress_flags=()
-          fi
-
-          sudo skopeo copy \
-            --authfile /tmp/skopeo-auth/auth.json \
-            "${compress_flags[@]}" \
-            "${SOURCE_REF}" "docker://${BASE_IMG}:${TAGS_ARR[0]}"
-
-          local remote_digest
-          remote_digest=$(sudo skopeo inspect \
-            --format='{{.Digest}}' \
-            "docker://${BASE_IMG}:${TAGS_ARR[0]}")
-
-          local short_digest="${remote_digest#sha256:}"
-          local digest_ref="${BASE_IMG}@${remote_digest}"
-          echo "Remote digest : ${remote_digest}"
-          echo "Digest ref    : ${digest_ref}"
-          echo "::endgroup::"
-
-          echo "::group::Push additional tags (including short digest)"
-          # Append the short digest as an extra tag so every image is
-          # pinnable by content even without a dedicated tag for it.
-          local extra_tags=("${TAGS_ARR[@]:1}" "$short_digest")
-          for tag in "${extra_tags[@]}"; do
-            echo "  → ${BASE_IMG}:${tag}"
-            sudo skopeo copy \
-              --authfile /tmp/skopeo-auth/auth.json \
-              --preserve-digests \
-              "docker://${digest_ref}" "docker://${BASE_IMG}:${tag}"
-          done
-          echo "::endgroup::"
-
-          # Write to outer-scope variables — these survive the function call
-          REMOTE_DIGEST="$remote_digest"
-          REMOTE_DIGEST_REF="$digest_ref"
-        }
-
-        for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
-          if push_image "$attempt"; then break; fi
-          [ "$attempt" -ge "$MAX_ATTEMPTS" ] && \
-            { echo "::error::All ${MAX_ATTEMPTS} push attempts failed."; exit 1; }
-          echo "::warning::Push attempt ${attempt} failed. Retrying in ${RETRY_DELAY}s..."
-          sleep "$RETRY_DELAY"
-        done
+        echo "::group::Inspect + verify primary digest"
+        REMOTE_DIGEST=$(sudo skopeo inspect \
+          --authfile /tmp/skopeo-auth/auth.json \
+          --format='{{.Digest}}' \
+          "docker://${BASE_IMG}:${TAGS_ARR[0]}")
 
         [[ -z "$REMOTE_DIGEST" ]] && \
-          { echo "::error::REMOTE_DIGEST is empty after push loop."; exit 1; }
+          { echo "::error::inspect returned empty digest"; exit 1; }
+
+        verify_digest "${BASE_IMG}:${TAGS_ARR[0]}" "$REMOTE_DIGEST"
+
+        SHORT_DIGEST="${REMOTE_DIGEST#sha256:}"
+        REMOTE_DIGEST_REF="${BASE_IMG}@${REMOTE_DIGEST}"
+        echo "Digest     : ${REMOTE_DIGEST}"
+        echo "Digest ref : ${REMOTE_DIGEST_REF}"
+        echo "::endgroup::"
+
+        echo "::group::Push additional tags"
+        for tag in "${TAGS_ARR[@]:1}" "$SHORT_DIGEST"; do
+          echo "  → ${BASE_IMG}:${tag}"
+          skopeo_copy_with_retry \
+            "docker://${REMOTE_DIGEST_REF}" \
+            "docker://${BASE_IMG}:${tag}" \
+            --preserve-digests
+        done
+        echo "::endgroup::"
 
         echo "remote_digest=${REMOTE_DIGEST}"         >> "$GITHUB_OUTPUT"
         echo "remote_digest_ref=${REMOTE_DIGEST_REF}" >> "$GITHUB_OUTPUT"
@@ -168,7 +141,6 @@ runs:
         DIGEST_REF: ${{ steps.push_image.outputs.remote_digest_ref }}
         VARIANT_NAME: ${{ inputs.variant_name }}
         TAGS: ${{ inputs.tags }}
-        SKIP_RECHUNK: ${{ inputs.skip_rechunk }}
         DATE: ${{ inputs.date }}
         PARENT_VERSION: ${{ inputs.parent_version }}
         REGISTRY: ${{ inputs.registry }}
@@ -178,57 +150,50 @@ runs:
         RETRY_DELAY: ${{ inputs.retry_delay }}
       run: |
         set -euo pipefail
+        # shellcheck source=helpers.sh
+        source "${GITHUB_ACTION_PATH}/helpers.sh"
 
-        for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
-          echo "::group::Sign image (attempt ${attempt}/${MAX_ATTEMPTS})"
-          if cosign sign -y \
+        echo "::group::Sign image"
+        run_with_retry "cosign sign ${DIGEST_REF}" \
+          cosign sign -y \
             --key env://SIGNING_SECRET \
             --new-bundle-format=false \
             --use-signing-config=false \
             --registry-referrers-mode=legacy \
             --registry-username "${GITHUB_ACTOR}" \
             --registry-password "${GITHUB_TOKEN}" \
-            "${DIGEST_REF}"; then
-            echo "::endgroup::"
-            break
-          fi
-          echo "::endgroup::"
-          [ "$attempt" -ge "$MAX_ATTEMPTS" ] && \
-            { echo "::error::Signing failed after ${MAX_ATTEMPTS} attempts."; exit 1; }
-          sleep "$RETRY_DELAY"
-        done
+            "${DIGEST_REF}"
+        echo "::endgroup::"
 
         echo "::group::Verify image"
-        cosign verify \
-          --key ./cosign.pub \
-          "${DIGEST_REF}"
+        run_with_retry "cosign verify ${DIGEST_REF}" \
+          cosign verify \
+            --key ./cosign.pub \
+            "${DIGEST_REF}"
         echo "::endgroup::"
 
         echo "::group::Inspect layer sizes"
         TOTAL_MB=$(sudo skopeo inspect --raw \
-          --creds "${GITHUB_ACTOR}:${GITHUB_TOKEN}" \
+          --authfile /tmp/skopeo-auth/auth.json \
           "docker://${DIGEST_REF}" | \
           jq '([.layers[].size] | add) / 1024 / 1024 | round')
         echo "Total compressed size: ${TOTAL_MB} MB"
         echo "::endgroup::"
 
-        # Extract digest from digest_ref (format: registry/repo@sha256:digest)
         REMOTE_DIGEST="${DIGEST_REF#*@sha256:}"
         TAGS_FMT=$(echo "${TAGS}" | tr ',' ' · ')
 
-        RECHUNKED="$([[ "${SKIP_RECHUNK}" == "false" ]] && echo "yes" || echo "no")"
         {
           echo "## ${VARIANT_NAME}"
           echo ""
           echo "| Field | Value |"
           echo "| ----- | ----- |"
-          echo "| **Image**          | \`${REGISTRY}/${REPO}${SUFFIX}\` |"
-          echo "| **Digest**         | \`${REMOTE_DIGEST}\` |"
-          echo "| **Tags**           | \`${TAGS_FMT}\` |"
-          echo "| **Parent version** | \`${PARENT_VERSION}\` |"
-          echo "| **Built**          | \`${DATE}\` |"
-          echo "| **Image size**     | \`${TOTAL_MB} MB\` |"
-          echo "| **Rechunked**      | \`${RECHUNKED}\` |"
+          echo "| **Image**             | \`${REGISTRY}/${REPO}${SUFFIX}\` |"
+          echo "| **Digest**            | \`${REMOTE_DIGEST}\` |"
+          echo "| **Tags**              | \`${TAGS_FMT}\` |"
+          echo "| **Parent version**    | \`${PARENT_VERSION}\` |"
+          echo "| **Built**             | \`${DATE}\` |"
+          echo "| **Image size**        | \`${TOTAL_MB} MB\` |"
           echo "| **Signed & verified** | ✅ |"
         } >> "$GITHUB_STEP_SUMMARY"
 
