@@ -14,6 +14,7 @@ is_transient_error() {
 }
 
 # ── per-call retry wrapper for skopeo copy ──────────────────────────────────
+# Streams output on success, captures only on failure (like run_with_retry).
 
 skopeo_copy_with_retry() {
   local src="$1"
@@ -21,21 +22,29 @@ skopeo_copy_with_retry() {
   shift 2
   local extra_flags=("$@")
 
-  local attempt output exit_code
+  local attempt exit_code tmpfile
   for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
     echo "  copy ${src} → ${dst} (attempt ${attempt}/${MAX_ATTEMPTS})"
 
+    tmpfile=$(mktemp)
     set +e
-    output=$(sudo skopeo copy \
+    # shellcheck disable=SC2024
+    sudo skopeo copy \
       --authfile /tmp/skopeo-auth/auth.json \
       "${extra_flags[@]}" \
-      "${src}" "${dst}" 2>&1)
+      "${src}" "${dst}" >"$tmpfile" 2>&1
     exit_code=$?
     set -e
 
     if [[ $exit_code -eq 0 ]]; then
+      cat "$tmpfile"
+      rm -f "$tmpfile"
       return 0
     fi
+
+    local output
+    output=$(cat "$tmpfile")
+    rm -f "$tmpfile"
 
     echo "  ✗ skopeo exited ${exit_code}: $(echo "$output" | tail -3)"
 
@@ -53,6 +62,7 @@ skopeo_copy_with_retry() {
       echo "::error::Output: ${output}"
       return 1
     fi
+    exit_code=0
   done
 }
 
@@ -74,14 +84,23 @@ verify_digest() {
 }
 
 # ── generic retry wrapper for arbitrary commands ────────────────────────────
-# Usage: run_with_retry <label> <cmd> [args...]
+# Usage: run_with_retry <label> [--stdin-data <data>] <cmd> [args...]
 # Applies the same transient-error classification and exponential backoff.
 # The command's combined stdout+stderr is captured only on failure — on
 # success it streams directly so callers see live output.
+#
+# Optional --stdin-data flag pipes the provided string to the command's stdin.
 
 run_with_retry() {
   local label="$1"
   shift
+
+  local stdin_data=""
+  if [[ "${1:-}" == "--stdin-data" ]]; then
+    stdin_data="$2"
+    shift 2
+  fi
+
   local cmd=("$@")
 
   local attempt output exit_code tmpfile
@@ -90,7 +109,11 @@ run_with_retry() {
 
     tmpfile=$(mktemp)
     set +e
-    "${cmd[@]}" >"$tmpfile" 2>&1
+    if [[ -n "$stdin_data" ]]; then
+      printf '%s' "$stdin_data" | "${cmd[@]}" >"$tmpfile" 2>&1
+    else
+      "${cmd[@]}" >"$tmpfile" 2>&1
+    fi
     exit_code=$?
     set -e
 

@@ -64,11 +64,19 @@ runs:
       shell: bash
       env:
         GITHUB_TOKEN: ${{ inputs.github_token }}
+        GITHUB_ACTOR: ${{ inputs.github_actor }}
+        MAX_ATTEMPTS: ${{ inputs.max_attempts }}
+        RETRY_DELAY: ${{ inputs.retry_delay }}
       run: |
+        set -euo pipefail
+        # shellcheck source=helpers.sh
+        source "${GITHUB_ACTION_PATH}/helpers.sh"
+
         mkdir -p /tmp/skopeo-auth
-        echo "${GITHUB_TOKEN}" | \
+        run_with_retry "skopeo login ghcr.io" \
+          --stdin-data "${GITHUB_TOKEN}" \
           skopeo login ghcr.io \
-            --username "${{ inputs.github_actor }}" \
+            --username "${GITHUB_ACTOR}" \
             --password-stdin \
             --authfile /tmp/skopeo-auth/auth.json
 
@@ -120,8 +128,7 @@ runs:
           echo "  → ${BASE_IMG}:${tag}"
           skopeo_copy_with_retry \
             "docker://${REMOTE_DIGEST_REF}" \
-            "docker://${BASE_IMG}:${tag}" \
-            --preserve-digests
+            "docker://${BASE_IMG}:${tag}"
         done
         echo "::endgroup::"
 
