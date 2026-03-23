@@ -33,9 +33,6 @@ outputs:
 runs:
   using: composite
   steps:
-    - name: Checkout
-      uses: actions/checkout@v6
-
     - name: Run check-variants script
       id: check_variants
       shell: bash

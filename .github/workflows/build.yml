@@ -41,6 +41,9 @@ jobs:
       repo: ${{ env.IMAGE_NAME }}
       image_desc: ${{ env.IMAGE_DESC }}
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
       - name: Lowercase repository owner
         id: lowercase_owner
         run: |

@@ -113,6 +113,7 @@ spawn_browser() {
 if [[ "$EXEC_LINE" =~ ^(/usr/bin/)?flatpak[[:space:]]+run ]]; then
   # Extract flatpak app ID - it's the first argument after 'flatpak run' that matches reverse-DNS pattern
   # Strip @@ markers and options first
+  # shellcheck disable=SC2001
   CLEAN_EXEC="$(echo "$EXEC_LINE" | sed 's/@@[^ ]*//g')"
 
   # Extract app ID: first token after 'flatpak run' matching reverse-DNS pattern (case-insensitive)
