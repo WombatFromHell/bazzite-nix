@@ -10,6 +10,15 @@ on:
         required: false
         default: false
         type: boolean
+      generate_release:
+        description: "Generate GitHub release after build"
+        required: false
+        default: false
+        type: boolean
+      handwritten:
+        description: "Small changelog about changes in this build"
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -81,6 +90,10 @@ jobs:
       packages: write
       id-token: write
 
+    outputs:
+      variant_name: ${{ matrix.variant_data.variant }}
+      target_branch: ${{ matrix.variant_data.variant }}
+
     env:
       # Centralise the base image ref so all steps reference it identically
       BASE_IMG: >-
@@ -120,3 +133,18 @@ jobs:
           suffix: ${{ matrix.variant_data.suffix }}
           date: ${{ needs.check_and_aggregate.outputs.date }}
           parent_version: ${{ matrix.variant_data.parent_version }}
+
+  # Generate GitHub releases for each target branch that was built
+  generate_releases:
+    needs: [check_and_aggregate, build_push]
+    if: >
+      needs.check_and_aggregate.outputs.any_builds_needed == 'true' &&
+      (github.event.inputs.generate_release == 'true' || github.event_name == 'schedule')
+    name: Generate Release
+    uses: ./.github/workflows/generate_release.yml
+    with:
+      handwritten: ${{ github.event.inputs.handwritten || '' }}
+      target: ${{ github.ref_name }}
+    secrets: inherit
+    permissions:
+      contents: write
