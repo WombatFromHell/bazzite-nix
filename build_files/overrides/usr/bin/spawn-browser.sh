@@ -22,7 +22,10 @@ if [[ "$DESKTOP_FILE" =~ ^[a-z][a-z0-9]*\.[a-z][a-z0-9.-]*\.[a-z][a-z0-9.-]*\.de
       "$HOME/.local/share/applications" \
       /usr/local/share/applications \
       /usr/share/applications; do
-      [[ -f "$dir/$DESKTOP_FILE" ]] && { echo "$dir/$DESKTOP_FILE"; break; }
+      [[ -f "$dir/$DESKTOP_FILE" ]] && {
+        echo "$dir/$DESKTOP_FILE"
+        break
+      }
     done
   )"
 else
@@ -34,7 +37,10 @@ else
       /usr/share/applications \
       "$HOME/.local/share/flatpak/exports/share/applications" \
       /var/lib/flatpak/exports/share/applications; do
-      [[ -f "$dir/$DESKTOP_FILE" ]] && { echo "$dir/$DESKTOP_FILE"; break; }
+      [[ -f "$dir/$DESKTOP_FILE" ]] && {
+        echo "$dir/$DESKTOP_FILE"
+        break
+      }
     done
   )"
 fi
@@ -45,8 +51,24 @@ fi
 }
 
 # Extract the Exec= line, strip field codes (%u %U %f %F etc.), @@ markers, and quotes
-EXEC_LINE="$(grep -m1 '^Exec=' "$DESKTOP_PATH" |
-  sed 's/^Exec=//; s/%[a-zA-Z]//g; s/@@[^ ]*//g; s/^ *//; s/ *$//')"
+# But preserve the full command structure for wrapper scripts
+RAW_EXEC_LINE="$(grep -m1 '^Exec=' "$DESKTOP_PATH" | sed 's/^Exec=//')"
+
+# Check for wrapper scripts that should be exec'd directly
+if [[ "$RAW_EXEC_LINE" =~ chromium-flags\.sh|brave-wrapper\.sh ]]; then
+  # Wrapper script detected - exec directly with URL substituted for %U
+  if [[ -n "$URL" ]]; then
+    # Replace %U/%u with the URL using | as delimiter to avoid issues with URLs
+    FINAL_CMD="$(echo "$RAW_EXEC_LINE" | sed "s|%U|$URL|g; s|%u|$URL|g; s|%[a-zA-Z]||g; s|@@[^ ]*||g")"
+  else
+    FINAL_CMD="$(echo "$RAW_EXEC_LINE" | sed 's|%[a-zA-Z]||g; s|@@[^ ]*||g')"
+  fi
+  # Execute via bash to handle the full command line
+  exec bash -c "$FINAL_CMD"
+fi
+
+# Legacy path: extract browser binary and spawn via spawn_browser()
+EXEC_LINE="$(echo "$RAW_EXEC_LINE" | sed 's/%[a-zA-Z]//g; s/@@[^ ]*//g; s/^ *//; s/ *$//')"
 
 # Helper: extract browser name and spawn based on launcher type
 spawn_browser() {
