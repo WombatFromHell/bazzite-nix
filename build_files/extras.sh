@@ -11,10 +11,10 @@ dnf5 -y copr enable avengemedia/dms-git &&
     niri dms danksearch dgop fuzzel kanshi cava matugen cups-pk-helper xdg-desktop-portal-kde qt6ct-kde \
     ghostty
 
-# include some extra hyprland tools for wlroots desktops
+# include hyprpicker so we get a magnifying glass with our color picker
 dnf5 -y copr enable solopasha/hyprland &&
   dnf5 -y copr disable solopasha/hyprland &&
-  dnf5 -y install --enable-repo="*solopasha*" hyprpicker grim slurp
+  dnf5 -y install --enable-repo="*solopasha*" hyprpicker
 
 OVERRIDES_ROOT="/ctx/overrides"
 # use our niri-portals.conf override customized for KDE
@@ -25,7 +25,6 @@ install -Z -b -m 644 \
 install -Z -m 755 \
   "$OVERRIDES_ROOT"/usr/bin/chromium-flags.sh \
   "$OVERRIDES_ROOT"/usr/bin/spawn-browser.sh \
-  "$OVERRIDES_ROOT"/usr/bin/grimshot.sh \
   "$OVERRIDES_ROOT"/usr/bin/hyprpicker.sh \
   /usr/bin/
 # use our niri config override as well

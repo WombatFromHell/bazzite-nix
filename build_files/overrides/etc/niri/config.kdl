@@ -314,6 +314,12 @@ window-rule {
     open-floating true
 }
 
+// float deletion progress dialogs of Dolphin like Transfers
+window-rule {
+    match app-id="org.kde.dolphin" title="^Deleting"
+    open-floating true
+}
+
 // Make the wallpaper stationary, rather than moving with workspaces.
 layer-rule {
     // This is for swaybg; change for other wallpaper tools.
@@ -391,10 +397,10 @@ binds {
     // Mod+Alt+D hotkey-overlay-title="Open DSearch" { spawn "dsearch"; }
     Mod+Alt+F hotkey-overlay-title="Open Dolphin" { spawn "dolphin"; }
     //
-    Super+Shift+S hotkey-overlay-title="Grimshot Active Window" { spawn "grimshot.sh" "--" "active"; }
-    Super+Ctrl+Shift+S hotkey-overlay-title="Grimshot Window" { spawn "grimshot.sh" "--" "window"; }
-    Super+Ctrl+Shift+R hotkey-overlay-title="Grimshot Region" { spawn "grimshot.sh" "--" "region"; }
-    Super+Ctrl+Shift+Alt+S hotkey-overlay-title="Grimshot Screen" { spawn "grimshot.sh" "--" "screen"; }
+    Super+Shift+S hotkey-overlay-title="Screenshot Window" { spawn-sh "niri msg action screenshot-window"; }
+    Super+Ctrl+Shift+S hotkey-overlay-title="Screenshot Screen" { spawn-sh "niri msg action screenshot-screen"; }
+    Super+Ctrl+Shift+Alt+S hotkey-overlay-title="Screenshot Interactive" { spawn-sh "niri msg action screenshot"; }
+    //
     Super+Ctrl+Shift+P hotkey-overlay-title="Hyprpicker" { spawn "hyprpicker.sh"; }
     //
     Mod+Shift+L hotkey-overlay-title="Lock Screen" { spawn "dms" "ipc" "call" "lock" "lock"; }
