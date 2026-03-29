@@ -15,12 +15,13 @@ from typing import Any
 from collections import defaultdict
 
 # Configuration - loaded from environment (set by workflow/caller)
-# REGISTRY: Full registry path (e.g., "ghcr.io/wombatfromhell")
-# REPO: Repository name (e.g., "bazzite-nix")
-REGISTRY_BASE = os.environ.get("REGISTRY", "ghcr.io").lower()
-REPO_OWNER = os.environ.get("GITHUB_REPOSITORY_OWNER", "wombatfromhell").lower()
-REPO = os.environ.get("REPO", os.environ.get("IMAGE_NAME", "bazzite-nix")).lower()
-REGISTRY = f"docker://{REGISTRY_BASE}/{REPO_OWNER}"
+# IMAGE_PREFIX: Full registry path without suffix (e.g., "ghcr.io/owner/bazzite-nix")
+IMAGE_PREFIX = os.environ.get("IMAGE_PREFIX", "ghcr.io/wombatfromhell/bazzite-nix").lower()
+REGISTRY = f"docker://{IMAGE_PREFIX}"
+
+# For GitHub commit URLs, extract owner/repo from environment
+GITHUB_REPOSITORY = os.environ.get("GITHUB_REPOSITORY", "wombatfromhell/bazzite-nix")
+REPO_OWNER, REPO = GITHUB_REPOSITORY.rsplit("/", 1)
 
 RETRIES = 3
 RETRY_WAIT = 5
@@ -153,8 +154,9 @@ def get_manifests_for_target(
     enabled_variants = [v for v in variants if not v.get("disabled", False)]
 
     for i, variant in enumerate(enabled_variants):
-        # Build image reference using registry from push-reusable action
-        image_ref = f"{REGISTRY}/{REPO}{variant['suffix']}:{target}"
+        # Build image reference using IMAGE_PREFIX from environment
+        # IMAGE_PREFIX is already the full path (e.g., ghcr.io/owner/bazzite-nix)
+        image_ref = f"{IMAGE_PREFIX}{variant['suffix']}:{target}"
         manifest = get_manifest(image_ref)
         if manifest:
             manifests[variant["name"]] = manifest
@@ -216,7 +218,7 @@ def get_tags_from_manifests(
             # Convert template patterns to regex
             # {branch} -> target, {canonical} -> version number
             regex_pattern = pattern
-            regex_pattern = regex_pattern.replace("{branch}", target)
+            regex_pattern = regex_pattern.replace("{branch}", re.escape(target))
             regex_pattern = regex_pattern.replace("{canonical}", r"\d+\.\d+(?:\.\d+)?")
             regex_pattern = f"^{regex_pattern}$"
 
@@ -228,7 +230,7 @@ def get_tags_from_manifests(
     # Fallback: match target or target-version patterns
     if not versioned_tags:
         print(f"::warning::No versioned tags found for target '{target}'. Using fallback.")
-        target_pattern = re.compile(rf"^{target}(?:-\d+\.\d+(?:\.\d+)?)?$")
+        target_pattern = re.compile(rf"^{re.escape(target)}(?:-\d+\.\d+(?:\.\d+)?)?$")
         for tag in all_tags:
             if tag.endswith(".0"):
                 continue
@@ -384,7 +386,7 @@ def get_commits(
             parts = commit.split("|")
             if len(parts) < 4:
                 continue
-            commit_hash, short, author, subject = parts
+            commit_hash, short, author, subject = parts[0], parts[1], parts[2], "|".join(parts[3:])
 
             # Skip merge commits
             if subject.lower().startswith("merge"):
@@ -430,9 +432,10 @@ def generate_changelog(
     # Get kernel version from first manifest
     kernel_version = get_kernel_version(next(iter(manifests.values())))
 
-    # Get base image info
+    # Get base image info from first manifest
+    first_manifest = next(iter(manifests.values()))
     base_image = (
-        manifests.get("stable", {})
+        first_manifest
         .get("Labels", {})
         .get("org.opencontainers.image.base.digest", "Unknown")[:19]
     )  # Shorten digest
@@ -445,20 +448,21 @@ def generate_changelog(
 
     title = CHANGELOG_TITLE.format_map(defaultdict(str, tag=curr_tag, pretty=pretty))
 
-    # Build changelog
-    changelog = CHANGELOG_FORMAT
-
-    changelog = (
-        changelog.replace(
-            "{handwritten}", handwritten if handwritten else HANDWRITTEN_PLACEHOLDER
-        )
-        .replace("{target}", target)
-        .replace("{prev}", prev_tag)
-        .replace("{curr}", curr_tag)
-        .replace("{base_image}", base_image)
-        .replace("{kernel_version}", kernel_version)
-        .replace("{build_date}", time.strftime("%Y-%m-%d %H:%M UTC"))
+    # Resolve handwritten placeholder if needed
+    resolved_handwritten = (
+        handwritten if handwritten
+        else HANDWRITTEN_PLACEHOLDER.replace("{curr}", curr_tag)
     )
+
+    # Build changelog text - replace all placeholders
+    text = CHANGELOG_FORMAT
+    text = text.replace("{handwritten}", resolved_handwritten)
+    text = text.replace("{target}", target)
+    text = text.replace("{prev}", prev_tag)
+    text = text.replace("{curr}", curr_tag)
+    text = text.replace("{base_image}", base_image)
+    text = text.replace("{kernel_version}", kernel_version)
+    text = text.replace("{build_date}", time.strftime("%Y-%m-%d %H:%M UTC"))
 
     # Build changes section
     changes = ""
@@ -475,9 +479,16 @@ def generate_changelog(
     if pkg_changes:
         changes += CHANGELOG_SECTIONS["common"].format(changes=pkg_changes)
 
-    changelog = changelog.replace("{changes}", changes)
+    # Substitute changes block: if non-empty, preserve the surrounding blank
+    # line; if empty, collapse to a single newline so the build-date table
+    # and "### How to rebase" are separated by exactly one blank line rather
+    # than producing a triple newline gap.
+    if changes:
+        text = text.replace("\n\n{changes}\n", "\n\n" + changes.rstrip("\n") + "\n")
+    else:
+        text = text.replace("\n\n{changes}\n", "\n")
 
-    return title, changelog
+    return title, text
 
 
 def main():
@@ -497,6 +508,13 @@ def main():
         help="Path to variants.json config",
         default=".github/variants.json",
     )
+    parser.add_argument(
+        "--built-variants",
+        help="JSON array of variant_data objects that were built (informational; "
+             "changelog.py derives all variant details from --variants-config and "
+             "the registry rather than from this list).",
+        default="[]",
+    )
     args = parser.parse_args()
 
     # Clean target (remove refs/heads/, refs/tags/, etc.)
@@ -505,8 +523,7 @@ def main():
         target = "stable"
 
     print(f"Generating changelog for target: {target}")
-    print(f"Registry: {REGISTRY}")
-    print(f"Repo: {REPO}")
+    print(f"Image prefix: {IMAGE_PREFIX}")
 
     # Load variants (including disabled for validation)
     all_variants = get_variants(args.variants_config, include_disabled=True)
@@ -542,13 +559,13 @@ def main():
         # Build previous image ref
         variant = next((v for v in enabled_variants if v["name"] == variant_name), None)
         if variant:
-            image_ref = f"{REGISTRY}/{REPO}{variant['suffix']}:{prev_tag}"
+            image_ref = f"{IMAGE_PREFIX}{variant['suffix']}:{prev_tag}"
             manifest = get_manifest(image_ref)
             if manifest:
                 prev_manifests[variant_name] = manifest
 
     # Generate changelog
-    title, changelog = generate_changelog(
+    title, changelog_text = generate_changelog(
         args.handwritten,
         target,
         args.pretty,
@@ -560,18 +577,18 @@ def main():
 
     print("\n=== Changelog ===")
     print(f"# {title}")
-    print(changelog)
+    print(changelog_text)
     print("\n=== Output ===")
     print(f'TITLE="{title}"')
     print(f"TAG={curr_tag}")
 
     # Write changelog
     with open(args.changelog, "w") as f:
-        f.write(changelog)
+        f.write(changelog_text)
 
     # Write output env file
     with open(args.output, "w") as f:
-        f.write(f"TITLE={title}\nTAG={curr_tag}\n")
+        f.write(f"TITLE='{title}'\nTAG={curr_tag}\n")
 
 
 if __name__ == "__main__":

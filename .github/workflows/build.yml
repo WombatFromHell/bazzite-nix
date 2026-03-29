@@ -2,7 +2,7 @@ name: Build Custom Image
 
 on:
   schedule:
-    - cron: "1 6 * * 1,3,5" # 06:01 UTC (Mon/Wed/Fri)
+    - cron: "1 6 * * 1" # 06:01 UTC (Mon,Fri)
   workflow_dispatch:
     inputs:
       force_build:
@@ -134,17 +134,24 @@ jobs:
           date: ${{ needs.check_and_aggregate.outputs.date }}
           parent_version: ${{ matrix.variant_data.parent_version }}
 
-  # Generate GitHub releases for each target branch that was built
-  generate_releases:
+  generate_release:
     needs: [check_and_aggregate, build_push]
-    if: >
+    if: |
       needs.check_and_aggregate.outputs.any_builds_needed == 'true' &&
       (github.event.inputs.generate_release == 'true' || github.event_name == 'schedule')
-    name: Generate Release
-    uses: ./.github/workflows/generate_release.yml
-    with:
-      handwritten: ${{ github.event.inputs.handwritten || '' }}
-      target: ${{ github.ref_name }}
-    secrets: inherit
+    name: Generate Release ${{ matrix.variant_data.variant }}
     permissions:
       contents: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        variant_data: ${{ fromJson(needs.check_and_aggregate.outputs.variants_to_build) }}
+
+    uses: ./.github/workflows/generate_release.yml
+    with:
+      variant: ${{ matrix.variant_data.variant }}
+      handwritten: ${{ github.event.inputs.handwritten || '' }}
+      registry: ${{ needs.check_and_aggregate.outputs.registry }}
+      repo: ${{ needs.check_and_aggregate.outputs.repo }}
+    secrets: inherit

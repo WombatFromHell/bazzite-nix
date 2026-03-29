@@ -3,23 +3,33 @@ name: Generate Release
 on:
   workflow_call:
     inputs:
+      variant:
+        description: "Variant name to generate release for (e.g., testing, unstable)"
+        type: string
+        required: true
       handwritten:
         description: "Small changelog about changes in this build"
         type: string
         required: false
-      target:
-        description: "Release Branch (e.g., testing, unstable). Defaults to branch name."
+      registry:
+        description: "Container registry (e.g., ghcr.io/owner)"
         type: string
         required: false
-        default: ""
+        default: "ghcr.io/${{ github.repository_owner }}"
+      repo:
+        description: "Repository name"
+        type: string
+        required: false
+        # Full image prefix will be: {registry}/{repo} (e.g., ghcr.io/owner/bazzite-nix)
+        default: "${{ github.repository }}"
   workflow_dispatch:
     inputs:
+      variant:
+        description: "Variant name to generate release for (e.g., testing, unstable)"
+        type: string
+        required: true
       handwritten:
         description: "Small changelog about changes in this build"
-        type: string
-        required: false
-      target:
-        description: "Release Branch (e.g., testing, unstable). Defaults to branch name."
         type: string
         required: false
 
@@ -43,7 +53,8 @@ jobs:
       - name: Get target
         id: get-target
         run: |
-          TARGET="${{ github.event.inputs.target || github.ref_name }}"
+          # Use variant input directly as the target
+          TARGET="${{ inputs.variant }}"
           TARGET="${TARGET##*/}"
           if [ "$TARGET" = "main" ]; then
             TARGET="stable"
@@ -54,9 +65,9 @@ jobs:
       - name: Generate Release Text
         id: generate-release
         env:
-          REGISTRY: "ghcr.io/${{ github.repository_owner }}"
-          REPO: ${{ github.event.repository.name }}
-          GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
+          IMAGE_PREFIX: "${{ inputs.registry }}/${{ inputs.repo }}"
+          GITHUB_REPOSITORY: "${{ github.repository }}"
+          GITHUB_REPOSITORY_OWNER: "${{ github.repository_owner }}"
         run: |
           python3 .github/workflows/changelog.py \
             "${{ steps.get-target.outputs.target }}" \
