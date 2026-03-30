@@ -837,10 +837,10 @@ class TestGenerateChangelog:
         assert len(title) > 0
 
         # Check changelog sections
-        assert "Base Image Information" in changelog_text
+        assert "### Base Image" in changelog_text
         assert "Kernel" in changelog_text
         assert "How to rebase" in changelog_text
-        assert "bazzite-rollback-helper" in changelog_text
+        assert "rpm-ostree rebase" in changelog_text
 
     def test_includes_handwritten_text(
         self, sample_variants, sample_manifests_prev, sample_manifests_curr
@@ -982,6 +982,49 @@ class TestGetPkgrelTable:
         # Versions should not contain .fc41 suffix
         assert ".fc41" not in table_rows
 
+    def test_shows_change_indicator_when_version_changed(
+        self, sample_manifests_prev, sample_manifests_curr
+    ):
+        """Should show 'prev ➡️ new' format when package version changed."""
+        table_rows = changelog.get_pkgrel_table(
+            sample_manifests_curr, sample_manifests_prev
+        )
+
+        # Mesa changed from 25.0.0-1 to 25.0.1-1
+        assert "**Mesa**" in table_rows
+        assert "25.0.0-1 ➡️ 25.0.1-1" in table_rows
+
+        # Bazaar changed from 1.2.0-1 to 1.2.1-1
+        assert "**Bazaar**" in table_rows
+        assert "1.2.0-1 ➡️ 1.2.1-1" in table_rows
+
+    def test_shows_unchanged_version_when_no_change(
+        self, sample_manifests_prev, sample_manifests_curr
+    ):
+        """Should show just version when package unchanged."""
+        table_rows = changelog.get_pkgrel_table(
+            sample_manifests_curr, sample_manifests_prev
+        )
+
+        # Gamescope unchanged at 3.16.0
+        assert "**Gamescope**" in table_rows
+        # Should have version but not change indicator
+        assert "3.16.0" in table_rows
+        # Should not have ➡️ for unchanged packages
+        gamescope_line = [
+            line for line in table_rows.split("\n") if "**Gamescope**" in line
+        ][0]
+        assert "➡️" not in gamescope_line
+
+    def test_handles_missing_prev_manifests(self, sample_manifests_curr):
+        """Should show just current version when no previous manifests provided."""
+        table_rows = changelog.get_pkgrel_table(sample_manifests_curr, None)
+
+        # Should show versions without change indicators
+        assert "**Mesa**" in table_rows
+        assert "25.0.1" in table_rows
+        assert "➡️" not in table_rows
+
     def test_returns_empty_string_for_no_packages(self):
         """Should return empty string when no pkgrel packages found."""
         manifests = {
@@ -1078,27 +1121,22 @@ class TestBaseImageExtraction:
     def test_extracts_base_image_from_variants_config(
         self, sample_manifests_curr, sample_variants
     ):
-        """Should extract base_image from variants config, not manifest labels.
+        """Should extract base_image from variants config using target name.
 
         Regression test for bug where code looked for
         org.opencontainers.image.base.digest label which doesn't exist.
         """
-        # Get base image using the same pattern as generate_changelog
-        first_variant_name = next(iter(sample_manifests_curr.keys()))
-        variant_config = next(
-            (v for v in sample_variants if v["name"] == first_variant_name), None
-        )
+        # Get base image using the same pattern as generate_changelog (using target)
+        target = "testing"
+        variant_config = next((v for v in sample_variants if v["name"] == target), None)
         base_image = variant_config["base_image"] if variant_config else "Unknown"
 
         # Should extract from variants config, not return "Unknown"
         assert base_image != "Unknown"
-        assert "bazzite:testing" in base_image
+        assert base_image == "ghcr.io/ublue-os/bazzite:testing"
 
     def test_extracts_base_image_for_unstable_variant(self, sample_manifests_curr):
         """Should extract base_image for unstable variant from config."""
-        manifests = {
-            "unstable": sample_manifests_curr["unstable"],
-        }
         variants = [
             {
                 "name": "unstable",
@@ -1108,10 +1146,8 @@ class TestBaseImageExtraction:
             },
         ]
 
-        first_variant_name = next(iter(manifests.keys()))
-        variant_config = next(
-            (v for v in variants if v["name"] == first_variant_name), None
-        )
+        target = "unstable"
+        variant_config = next((v for v in variants if v["name"] == target), None)
         base_image = variant_config["base_image"] if variant_config else "Unknown"
 
         # Should work for any variant
@@ -1119,9 +1155,6 @@ class TestBaseImageExtraction:
 
     def test_returns_unknown_for_missing_variant_config(self, sample_manifests_curr):
         """Should return 'Unknown' if variant not found in config."""
-        manifests = {
-            "unknown-variant": sample_manifests_curr["testing"],
-        }
         variants = [
             {
                 "name": "testing",
@@ -1131,10 +1164,8 @@ class TestBaseImageExtraction:
             },
         ]
 
-        first_variant_name = next(iter(manifests.keys()))
-        variant_config = next(
-            (v for v in variants if v["name"] == first_variant_name), None
-        )
+        target = "nonexistent"
+        variant_config = next((v for v in variants if v["name"] == target), None)
         base_image = variant_config["base_image"] if variant_config else "Unknown"
 
         # Should return Unknown when variant config doesn't match
@@ -1257,9 +1288,9 @@ class TestSingleVariantChangelog:
         )
 
         # Base image should be extracted from variants config (not "Unknown")
-        assert "Base Image" in changelog_text
-        assert "**Base Image** | Unknown" not in changelog_text
-        assert "**Base Image** | ghcr.io/ublue-os/bazzite:testing" in changelog_text
+        assert "### Base Image" in changelog_text
+        assert "**Base** | Unknown" not in changelog_text
+        assert "**Base** | ghcr.io/ublue-os/bazzite:testing" in changelog_text
 
     def test_single_variant_has_pkgrel_table(
         self, sample_manifests_prev, sample_manifests_curr
@@ -1518,7 +1549,7 @@ class TestIntegration:
         # Verify all components
         assert "Test release notes" in changelog_text
         assert "Test Release v1.0" in title
-        assert "Base Image Information" in changelog_text
+        assert "### Base Image" in changelog_text
         assert "Commits" in changelog_text
         assert "Update test file" in changelog_text
 
@@ -1740,7 +1771,7 @@ class TestChangelogFormat:
         assert "```bash" in changelog_text
         assert "```" in changelog_text
         # Commands should be inside code blocks
-        assert "bazzite-rollback-helper" in changelog_text
+        assert "rpm-ostree rebase" in changelog_text
 
     def test_changelog_links_are_valid_markdown(
         self,

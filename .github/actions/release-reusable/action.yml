@@ -1,0 +1,118 @@
+name: "Release Reusable"
+description: "Generate GitHub release with changelog for a build variant"
+author: "bazzite-nix"
+
+inputs:
+  variant:
+    description: "Variant name to generate release for (e.g., testing, unstable)"
+    required: true
+  handwritten:
+    description: "Small changelog about changes in this build"
+    required: false
+    default: ""
+  registry:
+    description: "Container registry (e.g., ghcr.io/owner)"
+    required: false
+  repo:
+    description: "Repository name"
+    required: false
+  variants_config:
+    description: "Path to variants.json config"
+    required: false
+    default: ".github/variants.json"
+
+outputs:
+  title:
+    description: "Generated release title"
+    value: ${{ steps.generate-release.outputs.title }}
+  tag:
+    description: "Generated release tag"
+    value: ${{ steps.generate-release.outputs.tag }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Set default registry and repo
+      id: defaults
+      shell: bash
+      run: |
+        # Set defaults if not provided by caller
+        if [ -z "${{ inputs.registry }}" ]; then
+          echo "registry=ghcr.io/${{ github.repository_owner }}" >> "$GITHUB_OUTPUT"
+        else
+          echo "registry=${{ inputs.registry }}" >> "$GITHUB_OUTPUT"
+        fi
+
+        if [ -z "${{ inputs.repo }}" ]; then
+          echo "repo=${{ github.repository }}" >> "$GITHUB_OUTPUT"
+        else
+          echo "repo=${{ inputs.repo }}" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Validate variant input
+      id: validate-variant
+      shell: bash
+      run: |
+        set -euo pipefail
+        VARIANT="${{ inputs.variant }}"
+
+        # Check if variant exists in variants.json
+        FOUND=$(jq -r --arg v "$VARIANT" '.variants[] | select(.name == $v) | .name' "${{ inputs.variants_config }}")
+        if [ -z "$FOUND" ]; then
+          AVAILABLE=$(jq -r '.variants[].name' "${{ inputs.variants_config }}" | sort | paste -sd ', ' -)
+          echo "::error::Variant '$VARIANT' not found in variants.json. Available: $AVAILABLE"
+          exit 1
+        fi
+
+        # Check if variant is disabled
+        DISABLED=$(jq -r --arg v "$VARIANT" '.variants[] | select(.name == $v) | .disabled // false' "${{ inputs.variants_config }}")
+        if [ "$DISABLED" = "true" ]; then
+          echo "::error::Variant '$VARIANT' is disabled in variants.json. Enable it or use a different variant."
+          exit 1
+        fi
+
+        echo "variant=$VARIANT" >> "$GITHUB_OUTPUT"
+        echo "✅ Validated variant: $VARIANT"
+
+    - name: Get target
+      id: get-target
+      shell: bash
+      run: |
+        # Use validated variant input as the target
+        TARGET="${{ steps.validate-variant.outputs.variant }}"
+        TARGET="${TARGET##*/}"
+        if [ "$TARGET" = "main" ]; then
+          TARGET="stable"
+        fi
+        echo "target=$TARGET" >> "$GITHUB_OUTPUT"
+        echo "Using target: $TARGET"
+
+    - name: Generate Release Text
+      id: generate-release
+      shell: bash
+      env:
+        IMAGE_PREFIX: "${{ steps.defaults.outputs.registry }}/${{ steps.defaults.outputs.repo }}"
+        GITHUB_REPOSITORY: "${{ github.repository }}"
+        GITHUB_REPOSITORY_OWNER: "${{ github.repository_owner }}"
+      run: |
+        python3 "${{ github.action_path }}/changelog.py" \
+          "${{ steps.get-target.outputs.target }}" \
+          ./output.env \
+          ./changelog.md \
+          --workdir . \
+          --handwritten "${{ inputs.handwritten }}" \
+          --variants-config "${{ inputs.variants_config }}"
+
+        source ./output.env
+        echo "title=${TITLE}" >> "$GITHUB_OUTPUT"
+        echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+    - name: Create Release
+      uses: softprops/action-gh-release@v2
+      with:
+        name: ${{ steps.generate-release.outputs.title }}
+        tag_name: ${{ steps.generate-release.outputs.tag }}
+        body_path: ./changelog.md
+        make_latest: ${{ steps.get-target.outputs.target == 'stable' }}
+        prerelease: ${{ steps.get-target.outputs.target != 'stable' }}
+        generate_release_notes: false

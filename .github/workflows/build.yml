@@ -140,6 +140,7 @@ jobs:
       needs.check_and_aggregate.outputs.any_builds_needed == 'true' &&
       (github.event.inputs.generate_release == 'true' || github.event_name == 'schedule')
     name: Generate Release ${{ matrix.variant_data.variant }}
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
 
@@ -152,10 +153,15 @@ jobs:
       matrix:
         variant_data: ${{ fromJson(needs.check_and_aggregate.outputs.variants_to_build) }}
 
-    uses: ./.github/workflows/generate_release.yml
-    with:
-      variant: ${{ matrix.variant_data.variant }}
-      handwritten: ${{ github.event.inputs.handwritten || '' }}
-      registry: ${{ needs.check_and_aggregate.outputs.registry }}
-      repo: ${{ needs.check_and_aggregate.outputs.repo }}
-    secrets: inherit
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Generate release
+        id: release
+        uses: ./.github/actions/release-reusable
+        with:
+          variant: ${{ matrix.variant_data.variant }}
+          handwritten: ${{ github.event.inputs.handwritten || '' }}
+          registry: ${{ needs.check_and_aggregate.outputs.registry }}
+          repo: ${{ needs.check_and_aggregate.outputs.repo }}

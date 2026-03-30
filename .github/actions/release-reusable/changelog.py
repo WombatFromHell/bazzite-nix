@@ -53,10 +53,10 @@ CHANGELOG_FORMAT = """\
 
 From previous `{target}` version `{prev}` there have been the following changes.
 
-### Base Image Information
+### Base Image
 | Name | Version |
 | --- | --- |
-| **Base Image** | {base_image} |{pkgrel_table}
+| **Base** | {base_image} |{pkgrel_table}
 | **Kernel** | {kernel_version} |
 | **Build Date** | {build_date} |
 
@@ -65,9 +65,9 @@ From previous `{target}` version `{prev}` there have been the following changes.
 For current users, type the following to rebase to this version:
 ```bash
 # For this branch:
-bazzite-rollback-helper rebase {target}
+sudo rpm-ostree rebase ostree-image-signed:docker://ghcr.io/wombatfromhell/bazzite-nix:{target}
 # For this specific image:
-bazzite-rollback-helper rebase {curr}
+sudo rpm-ostree rebase ostree-image-signed:docker://ghcr.io/wombatfromhell/bazzite-nix:{curr}
 ```
 """
 
@@ -295,18 +295,22 @@ def get_kernel_version(manifest: dict[str, Any]) -> str:
     )
 
 
-def get_pkgrel_table(manifests: dict[str, Any]) -> str:
+def get_pkgrel_table(
+    manifests: dict[str, Any], prev_manifests: dict[str, Any] = None
+) -> str:
     """Generate package version table rows for changelog.
 
     Only includes packages that are actually present in the image.
+    Shows version changes (prev ➡️ new) for highlighted packages when they change.
 
     Args:
-        manifests: Dictionary of variant manifests
+        manifests: Dictionary of current variant manifests
+        prev_manifests: Dictionary of previous variant manifests (optional)
 
     Returns:
         Markdown table rows string
     """
-    # Packages to show in the Base Image Information table with display names
+    # Packages to show in the Base Image table with display names
     PKGREL_PACKAGES = {
         "atheros-firmware": "Firmware",
         "mesa-filesystem": "Mesa",
@@ -318,21 +322,37 @@ def get_pkgrel_table(manifests: dict[str, Any]) -> str:
         "nvidia-kmod-common-lts": "Nvidia LTS",
     }
 
-    # Collect all package versions from manifests
-    versions = {}
+    # Collect current package versions from manifests
+    curr_versions = {}
     for manifest in manifests.values():
         pkgs = get_packages(manifest)
         for pkg in PKGREL_PACKAGES.keys():
-            if pkg in pkgs and pkg not in versions:
-                # Clean Fedora version suffix
+            if pkg in pkgs and pkg not in curr_versions:
                 clean_version = re.sub(FEDORA_PATTERN, "", pkgs[pkg])
-                versions[pkg] = clean_version
+                curr_versions[pkg] = clean_version
+
+    # Collect previous package versions if provided
+    prev_versions = {}
+    if prev_manifests:
+        for manifest in prev_manifests.values():
+            pkgs = get_packages(manifest)
+            for pkg in PKGREL_PACKAGES.keys():
+                if pkg in pkgs and pkg not in prev_versions:
+                    clean_version = re.sub(FEDORA_PATTERN, "", pkgs[pkg])
+                    prev_versions[pkg] = clean_version
 
     # Build table rows only for packages that exist
     rows = ""
     for pkg, display_name in PKGREL_PACKAGES.items():
-        if pkg in versions:
-            rows += f"\n| **{display_name}** | {versions[pkg]} |"
+        if pkg in curr_versions:
+            curr_ver = curr_versions[pkg]
+            prev_ver = prev_versions.get(pkg)
+
+            # Show change indicator if version changed
+            if prev_ver and prev_ver != curr_ver:
+                rows += f"\n| **{display_name}** | {PATTERN_PKGREL_CHANGED.format(prev=prev_ver, new=curr_ver)} |"
+            else:
+                rows += f"\n| **{display_name}** | {PATTERN_PKGREL.format(version=curr_ver)} |"
 
     return rows
 
@@ -496,15 +516,12 @@ def generate_changelog(
     # Get kernel version from first manifest
     kernel_version = get_kernel_version(next(iter(manifests.values())))
 
-    # Get base image from variants config (more reliable than manifest labels)
-    first_variant_name = next(iter(manifests.keys()))
-    variant_config = next(
-        (v for v in variants if v["name"] == first_variant_name), None
-    )
+    # Get base image from variants config using the target variant name
+    variant_config = next((v for v in variants if v["name"] == target), None)
     base_image = variant_config["base_image"] if variant_config else "Unknown"
 
-    # Get pkgrel table rows (only packages that exist in the image)
-    pkgrel_table = get_pkgrel_table(manifests)
+    # Get pkgrel table rows with change indicators (only packages that exist in the image)
+    pkgrel_table = get_pkgrel_table(manifests, prev_manifests)
 
     # Generate pretty title if not provided
     if not pretty:
