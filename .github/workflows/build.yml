@@ -143,6 +143,10 @@ jobs:
     permissions:
       contents: write
 
+    concurrency:
+      group: generate-release-${{ matrix.variant_data.variant }}-${{ github.ref }}
+      cancel-in-progress: false
+
     strategy:
       fail-fast: false
       matrix:

@@ -1,5 +1,3 @@
-name: Generate Release
-
 on:
   workflow_call:
     inputs:
@@ -32,12 +30,6 @@ on:
         description: "Small changelog about changes in this build"
         type: string
         required: false
-
-permissions: {}
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: false
 
 jobs:
   generate-release:

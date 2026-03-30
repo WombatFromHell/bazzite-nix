@@ -252,13 +252,18 @@ def get_packages(manifest: dict[str, Any]) -> dict[str, str]:
     """Extract package versions from manifest labels."""
     packages = {}
     try:
-        # Try bazzite-nix specific label first
-        if "dev.hhd.rechunk.info" in manifest.get("Labels", {}):
-            rechunk_info = json.loads(manifest["Labels"]["dev.hhd.rechunk.info"])
+        # Try both known rechunk label names (ostree.rechunk.info is current,
+        # dev.hhd.rechunk.info is the legacy name used by older rechunk versions)
+        labels = manifest.get("Labels", {})
+        rechunk_label = next(
+            (k for k in ("ostree.rechunk.info", "dev.hhd.rechunk.info") if k in labels),
+            None,
+        )
+        if rechunk_label:
+            rechunk_info = json.loads(labels[rechunk_label])
             packages.update(rechunk_info.get("packages", {}))
 
         # Also check for custom bazzite-nix labels
-        labels = manifest.get("Labels", {})
         for key, value in labels.items():
             if key.startswith("io.github.bazzite-nix.pkg."):
                 pkg_name = key.replace("io.github.bazzite-nix.pkg.", "")
