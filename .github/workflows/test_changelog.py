@@ -69,6 +69,7 @@ def sample_manifest_prev():
                         "gamescope": "3.16.0-1.fc41",
                         "bazaar": "1.2.0-1.fc41",
                         "plasma-desktop": "6.3.0-1.fc41",
+                        "atheros-firmware": "20260209-1.fc41",
                         "some-package": "1.0.0-1.fc41",
                         "another-package": "2.0.0-1.fc41",
                     }
@@ -95,7 +96,6 @@ def sample_manifest_curr():
             "org.opencontainers.image.revision": "def789abc123",
             "org.opencontainers.image.created": "2026-02-21T06:00:00Z",
             "org.opencontainers.image.kernel-version": "6.13.1",
-            "org.opencontainers.image.base.digest": "sha256:abc123def456789012345678901234567890",
             "dev.hhd.rechunk.info": json.dumps(
                 {
                     "packages": {
@@ -104,6 +104,7 @@ def sample_manifest_curr():
                         "gamescope": "3.16.0-1.fc41",
                         "bazaar": "1.2.1-1.fc41",
                         "plasma-desktop": "6.3.0-1.fc41",
+                        "atheros-firmware": "20260309-1.fc41",
                         "some-package": "1.0.0-1.fc41",
                         "new-package": "3.0.0-1.fc41",
                         # another-package removed
@@ -947,55 +948,197 @@ class TestGenerateChangelog:
 
 
 # =============================================================================
+# Test: Pkgrel Table Generation
+# =============================================================================
+
+
+class TestGetPkgrelTable:
+    """Test get_pkgrel_table function."""
+
+    def test_generates_table_rows_for_present_packages(self, sample_manifests_curr):
+        """Should generate table rows only for packages present in the image."""
+        table_rows = changelog.get_pkgrel_table(sample_manifests_curr)
+
+        # Should contain rows for packages that exist
+        assert "**Firmware**" in table_rows  # atheros-firmware
+        assert "**Mesa**" in table_rows  # mesa-filesystem
+        assert "**Gamescope**" in table_rows  # gamescope
+        assert "**Bazaar**" in table_rows  # bazaar
+        assert "**KDE**" in table_rows  # plasma-desktop
+
+    def test_omits_missing_packages(self, sample_manifests_curr):
+        """Should omit packages not present in the image."""
+        table_rows = changelog.get_pkgrel_table(sample_manifests_curr)
+
+        # These packages are not in sample_manifests_curr
+        assert "**Gnome**" not in table_rows  # gnome-control-center-filesystem
+        assert "**Nvidia**" not in table_rows  # nvidia-kmod-common
+        assert "**Nvidia LTS**" not in table_rows  # nvidia-kmod-common-lts
+
+    def test_cleans_fedora_suffix_from_versions(self, sample_manifests_curr):
+        """Should clean Fedora version suffix from package versions."""
+        table_rows = changelog.get_pkgrel_table(sample_manifests_curr)
+
+        # Versions should not contain .fc41 suffix
+        assert ".fc41" not in table_rows
+
+    def test_returns_empty_string_for_no_packages(self):
+        """Should return empty string when no pkgrel packages found."""
+        manifests = {
+            "testing": {
+                "Name": "test",
+                "Labels": {
+                    "dev.hhd.rechunk.info": json.dumps(
+                        {"packages": {"other-pkg": "1.0.0"}}
+                    ),
+                },
+            }
+        }
+
+        table_rows = changelog.get_pkgrel_table(manifests)
+        assert table_rows == ""
+
+    def test_handles_missing_rechunk_label(self):
+        """Should handle manifests without rechunk label."""
+        manifests = {
+            "testing": {
+                "Name": "test",
+                "Labels": {},
+            }
+        }
+
+        table_rows = changelog.get_pkgrel_table(manifests)
+        assert table_rows == ""
+
+    def test_handles_multiple_variants(self, sample_manifests_curr):
+        """Should collect packages from multiple variant manifests."""
+        # Create manifests with different packages
+        manifests = {
+            "testing": {
+                "Name": "test-testing",
+                "Labels": {
+                    "dev.hhd.rechunk.info": json.dumps(
+                        {"packages": {"mesa-filesystem": "25.0.0-1.fc41"}}
+                    ),
+                },
+            },
+            "unstable": {
+                "Name": "test-unstable",
+                "Labels": {
+                    "dev.hhd.rechunk.info": json.dumps(
+                        {"packages": {"gamescope": "3.16.0-1.fc41"}}
+                    ),
+                },
+            },
+        }
+
+        table_rows = changelog.get_pkgrel_table(manifests)
+
+        # Should have both packages from different variants
+        assert "**Mesa**" in table_rows
+        assert "**Gamescope**" in table_rows
+
+    def test_uses_first_found_version(self, sample_manifests_curr):
+        """Should use the first found version when package exists in multiple variants."""
+        manifests = {
+            "testing": {
+                "Name": "test-testing",
+                "Labels": {
+                    "dev.hhd.rechunk.info": json.dumps(
+                        {"packages": {"mesa-filesystem": "25.0.0-1.fc41"}}
+                    ),
+                },
+            },
+            "unstable": {
+                "Name": "test-unstable",
+                "Labels": {
+                    "dev.hhd.rechunk.info": json.dumps(
+                        {"packages": {"mesa-filesystem": "25.0.1-1.fc41"}}
+                    ),
+                },
+            },
+        }
+
+        table_rows = changelog.get_pkgrel_table(manifests)
+
+        # Should contain Mesa (first found version)
+        assert "**Mesa**" in table_rows
+        # Should use first variant's version
+        assert "25.0.0" in table_rows
+
+
+# =============================================================================
 # Test: Base Image Extraction
 # =============================================================================
 
 
 class TestBaseImageExtraction:
-    """Test base_image extraction from manifests (regression test for bug fix)."""
+    """Test base_image extraction from variants config (regression test for bug fix)."""
 
-    def test_extracts_base_image_from_any_manifest_key(
-        self, sample_manifests_curr
+    def test_extracts_base_image_from_variants_config(
+        self, sample_manifests_curr, sample_variants
     ):
-        """Should extract base_image from first manifest regardless of key name.
-        
-        Regression test for bug where code used manifests.get("stable", {})
-        which always returned "Unknown" since manifests are keyed by variant name.
+        """Should extract base_image from variants config, not manifest labels.
+
+        Regression test for bug where code looked for
+        org.opencontainers.image.base.digest label which doesn't exist.
         """
-        # Manifests keyed by variant name, not "stable"
-        manifests = {
-            "testing": sample_manifests_curr["testing"],
-        }
-        
         # Get base image using the same pattern as generate_changelog
-        first_manifest = next(iter(manifests.values()))
-        base_image = (
-            first_manifest
-            .get("Labels", {})
-            .get("org.opencontainers.image.base.digest", "Unknown")[:19]
+        first_variant_name = next(iter(sample_manifests_curr.keys()))
+        variant_config = next(
+            (v for v in sample_variants if v["name"] == first_variant_name), None
         )
-        
-        # Should extract the digest, not return "Unknown"
-        assert base_image != "Unknown"
-        assert len(base_image) == 19  # Shortened digest length
+        base_image = variant_config["base_image"] if variant_config else "Unknown"
 
-    def test_extracts_base_image_from_unstable_variant(
-        self, sample_manifest_curr
-    ):
-        """Should extract base_image from unstable variant manifest."""
+        # Should extract from variants config, not return "Unknown"
+        assert base_image != "Unknown"
+        assert "bazzite:testing" in base_image
+
+    def test_extracts_base_image_for_unstable_variant(self, sample_manifests_curr):
+        """Should extract base_image for unstable variant from config."""
         manifests = {
-            "unstable": sample_manifest_curr,
+            "unstable": sample_manifests_curr["unstable"],
         }
-        
-        first_manifest = next(iter(manifests.values()))
-        base_image = (
-            first_manifest
-            .get("Labels", {})
-            .get("org.opencontainers.image.base.digest", "Unknown")[:19]
+        variants = [
+            {
+                "name": "unstable",
+                "base_image": "ghcr.io/ublue-os/bazzite:unstable",
+                "suffix": "",
+                "tags": {},
+            },
+        ]
+
+        first_variant_name = next(iter(manifests.keys()))
+        variant_config = next(
+            (v for v in variants if v["name"] == first_variant_name), None
         )
-        
-        # Should work for any variant, not just "stable"
-        assert base_image is not None
+        base_image = variant_config["base_image"] if variant_config else "Unknown"
+
+        # Should work for any variant
+        assert base_image == "ghcr.io/ublue-os/bazzite:unstable"
+
+    def test_returns_unknown_for_missing_variant_config(self, sample_manifests_curr):
+        """Should return 'Unknown' if variant not found in config."""
+        manifests = {
+            "unknown-variant": sample_manifests_curr["testing"],
+        }
+        variants = [
+            {
+                "name": "testing",
+                "base_image": "ghcr.io/ublue-os/bazzite:testing",
+                "suffix": "",
+                "tags": {},
+            },
+        ]
+
+        first_variant_name = next(iter(manifests.keys()))
+        variant_config = next(
+            (v for v in variants if v["name"] == first_variant_name), None
+        )
+        base_image = variant_config["base_image"] if variant_config else "Unknown"
+
+        # Should return Unknown when variant config doesn't match
+        assert base_image == "Unknown"
 
 
 # =============================================================================
@@ -1005,7 +1148,7 @@ class TestBaseImageExtraction:
 
 class TestSingleVariantChangelog:
     """Test changelog generation for individual variants.
-    
+
     Regression tests for workflow change: generate_release now calls
     changelog.py once per variant (testing, unstable separately) instead
     of all variants at once.
@@ -1022,7 +1165,7 @@ class TestSingleVariantChangelog:
         testing_prev = {
             "testing": sample_manifests_prev["testing"],
         }
-        
+
         # Load variants config
         variants = [
             {
@@ -1032,7 +1175,7 @@ class TestSingleVariantChangelog:
                 "tags": {"versioned": ["{branch}", "{branch}-{canonical}"]},
             },
         ]
-        
+
         title, changelog_text = changelog.generate_changelog(
             handwritten=None,
             target="testing",
@@ -1042,7 +1185,7 @@ class TestSingleVariantChangelog:
             prev_manifests=testing_prev,
             manifests=testing_manifests,
         )
-        
+
         # Should generate valid changelog
         assert title is not None
         assert len(changelog_text) > 0
@@ -1059,7 +1202,7 @@ class TestSingleVariantChangelog:
         unstable_prev = {
             "unstable": sample_manifests_prev["unstable"],
         }
-        
+
         variants = [
             {
                 "name": "unstable",
@@ -1068,7 +1211,7 @@ class TestSingleVariantChangelog:
                 "tags": {"versioned": ["{branch}", "{branch}-{canonical}"]},
             },
         ]
-        
+
         title, changelog_text = changelog.generate_changelog(
             handwritten=None,
             target="unstable",
@@ -1078,7 +1221,7 @@ class TestSingleVariantChangelog:
             prev_manifests=unstable_prev,
             manifests=unstable_manifests,
         )
-        
+
         # Should generate valid changelog for unstable
         assert title is not None
         assert len(changelog_text) > 0
@@ -1093,7 +1236,7 @@ class TestSingleVariantChangelog:
         testing_prev = {
             "testing": sample_manifests_prev["testing"],
         }
-        
+
         variants = [
             {
                 "name": "testing",
@@ -1102,7 +1245,7 @@ class TestSingleVariantChangelog:
                 "tags": {"versioned": ["{branch}", "{branch}-{canonical}"]},
             },
         ]
-        
+
         _, changelog_text = changelog.generate_changelog(
             handwritten=None,
             target="testing",
@@ -1112,11 +1255,53 @@ class TestSingleVariantChangelog:
             prev_manifests=testing_prev,
             manifests=testing_manifests,
         )
-        
-        # Base image should be extracted (not "Unknown")
+
+        # Base image should be extracted from variants config (not "Unknown")
         assert "Base Image" in changelog_text
-        # Should have some digest value, not "Unknown"
         assert "**Base Image** | Unknown" not in changelog_text
+        assert "**Base Image** | ghcr.io/ublue-os/bazzite:testing" in changelog_text
+
+    def test_single_variant_has_pkgrel_table(
+        self, sample_manifests_prev, sample_manifests_curr
+    ):
+        """Should include pkgrel table rows for packages present in the image."""
+        testing_manifests = {
+            "testing": sample_manifests_curr["testing"],
+        }
+        testing_prev = {
+            "testing": sample_manifests_prev["testing"],
+        }
+
+        variants = [
+            {
+                "name": "testing",
+                "base_image": "ghcr.io/ublue-os/bazzite:testing",
+                "suffix": "",
+                "tags": {"versioned": ["{branch}", "{branch}-{canonical}"]},
+            },
+        ]
+
+        _, changelog_text = changelog.generate_changelog(
+            handwritten=None,
+            target="testing",
+            pretty=None,
+            workdir=".",
+            variants=variants,
+            prev_manifests=testing_prev,
+            manifests=testing_manifests,
+        )
+
+        # Should have pkgrel table rows for packages that exist
+        assert "**Firmware**" in changelog_text
+        assert "**Mesa**" in changelog_text
+        assert "**Gamescope**" in changelog_text
+        assert "**Bazaar**" in changelog_text
+        assert "**KDE**" in changelog_text
+
+        # Should NOT have rows for packages that don't exist
+        assert "**Gnome** |" not in changelog_text
+        assert "**Nvidia** |" not in changelog_text
+        assert "**Nvidia LTS** |" not in changelog_text
 
 
 # =============================================================================
@@ -1694,7 +1879,10 @@ class TestChangelogFormat:
             "{prev}",
             "{curr}",
             "{changes}",
-            "{pkgrel:",
+            "{base_image}",
+            "{pkgrel_table}",
+            "{kernel_version}",
+            "{build_date}",
         ]:
             assert placeholder not in changelog_text, (
                 f"Unfilled placeholder: {placeholder}"

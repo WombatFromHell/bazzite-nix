@@ -16,7 +16,9 @@ from collections import defaultdict
 
 # Configuration - loaded from environment (set by workflow/caller)
 # IMAGE_PREFIX: Full registry path without suffix (e.g., "ghcr.io/owner/bazzite-nix")
-IMAGE_PREFIX = os.environ.get("IMAGE_PREFIX", "ghcr.io/wombatfromhell/bazzite-nix").lower()
+IMAGE_PREFIX = os.environ.get(
+    "IMAGE_PREFIX", "ghcr.io/wombatfromhell/bazzite-nix"
+).lower()
 REGISTRY = f"docker://{IMAGE_PREFIX}"
 
 # For GitHub commit URLs, extract owner/repo from environment
@@ -54,7 +56,7 @@ From previous `{target}` version `{prev}` there have been the following changes.
 ### Base Image Information
 | Name | Version |
 | --- | --- |
-| **Base Image** | {base_image} |
+| **Base Image** | {base_image} |{pkgrel_table}
 | **Kernel** | {kernel_version} |
 | **Build Date** | {build_date} |
 
@@ -81,7 +83,9 @@ HIGHLIGHT_PACKAGES = [
 ]
 
 
-def get_variants(variants_file: str, include_disabled: bool = False) -> list[dict[str, Any]]:
+def get_variants(
+    variants_file: str, include_disabled: bool = False
+) -> list[dict[str, Any]]:
     """Load variants from variants.json configuration.
 
     Args:
@@ -160,12 +164,16 @@ def get_manifests_for_target(
         manifest = get_manifest(image_ref)
         if manifest:
             manifests[variant["name"]] = manifest
-            print(f"✓ Got manifest for {variant['name']} ({i + 1}/{len(enabled_variants)})")
+            print(
+                f"✓ Got manifest for {variant['name']} ({i + 1}/{len(enabled_variants)})"
+            )
         else:
             print(f"✗ Failed to get manifest for {variant['name']}")
 
     if not manifests:
-        print(f"::warning::No manifests found for target '{target}'. Ensure variant is enabled and image exists.")
+        print(
+            f"::warning::No manifests found for target '{target}'. Ensure variant is enabled and image exists."
+        )
 
     return manifests
 
@@ -229,7 +237,9 @@ def get_tags_from_manifests(
 
     # Fallback: match target or target-version patterns
     if not versioned_tags:
-        print(f"::warning::No versioned tags found for target '{target}'. Using fallback.")
+        print(
+            f"::warning::No versioned tags found for target '{target}'. Using fallback."
+        )
         target_pattern = re.compile(rf"^{re.escape(target)}(?:-\d+\.\d+(?:\.\d+)?)?$")
         for tag in all_tags:
             if tag.endswith(".0"):
@@ -242,7 +252,9 @@ def get_tags_from_manifests(
     if len(versioned_tags) < 2:
         # Fallback: use target as previous
         if versioned_tags:
-            print(f"::notice::Only one versioned tag found. Using '{target}' as previous.")
+            print(
+                f"::notice::Only one versioned tag found. Using '{target}' as previous."
+            )
         return target, versioned_tags[0] if versioned_tags else target
 
     return versioned_tags[-2], versioned_tags[-1]
@@ -281,6 +293,48 @@ def get_kernel_version(manifest: dict[str, Any]) -> str:
         or labels.get("io.github.bazzite-nix.kernel-version", "")
         or "Unknown"
     )
+
+
+def get_pkgrel_table(manifests: dict[str, Any]) -> str:
+    """Generate package version table rows for changelog.
+
+    Only includes packages that are actually present in the image.
+
+    Args:
+        manifests: Dictionary of variant manifests
+
+    Returns:
+        Markdown table rows string
+    """
+    # Packages to show in the Base Image Information table with display names
+    PKGREL_PACKAGES = {
+        "atheros-firmware": "Firmware",
+        "mesa-filesystem": "Mesa",
+        "gamescope": "Gamescope",
+        "bazaar": "Bazaar",
+        "gnome-control-center-filesystem": "Gnome",
+        "plasma-desktop": "KDE",
+        "nvidia-kmod-common": "Nvidia",
+        "nvidia-kmod-common-lts": "Nvidia LTS",
+    }
+
+    # Collect all package versions from manifests
+    versions = {}
+    for manifest in manifests.values():
+        pkgs = get_packages(manifest)
+        for pkg in PKGREL_PACKAGES.keys():
+            if pkg in pkgs and pkg not in versions:
+                # Clean Fedora version suffix
+                clean_version = re.sub(FEDORA_PATTERN, "", pkgs[pkg])
+                versions[pkg] = clean_version
+
+    # Build table rows only for packages that exist
+    rows = ""
+    for pkg, display_name in PKGREL_PACKAGES.items():
+        if pkg in versions:
+            rows += f"\n| **{display_name}** | {versions[pkg]} |"
+
+    return rows
 
 
 def get_versions(manifests: dict[str, Any]) -> dict[str, str]:
@@ -391,7 +445,12 @@ def get_commits(
             parts = commit.split("|")
             if len(parts) < 4:
                 continue
-            commit_hash, short, author, subject = parts[0], parts[1], parts[2], "|".join(parts[3:])
+            commit_hash, short, author, subject = (
+                parts[0],
+                parts[1],
+                parts[2],
+                "|".join(parts[3:]),
+            )
 
             # Skip merge commits
             if subject.lower().startswith("merge"):
@@ -437,13 +496,15 @@ def generate_changelog(
     # Get kernel version from first manifest
     kernel_version = get_kernel_version(next(iter(manifests.values())))
 
-    # Get base image info from first manifest
-    first_manifest = next(iter(manifests.values()))
-    base_image = (
-        first_manifest
-        .get("Labels", {})
-        .get("org.opencontainers.image.base.digest", "Unknown")[:19]
-    )  # Shorten digest
+    # Get base image from variants config (more reliable than manifest labels)
+    first_variant_name = next(iter(manifests.keys()))
+    variant_config = next(
+        (v for v in variants if v["name"] == first_variant_name), None
+    )
+    base_image = variant_config["base_image"] if variant_config else "Unknown"
+
+    # Get pkgrel table rows (only packages that exist in the image)
+    pkgrel_table = get_pkgrel_table(manifests)
 
     # Generate pretty title if not provided
     if not pretty:
@@ -455,7 +516,8 @@ def generate_changelog(
 
     # Resolve handwritten placeholder if needed
     resolved_handwritten = (
-        handwritten if handwritten
+        handwritten
+        if handwritten
         else HANDWRITTEN_PLACEHOLDER.replace("{curr}", curr_tag)
     )
 
@@ -466,6 +528,7 @@ def generate_changelog(
     text = text.replace("{prev}", prev_tag)
     text = text.replace("{curr}", curr_tag)
     text = text.replace("{base_image}", base_image)
+    text = text.replace("{pkgrel_table}", pkgrel_table)
     text = text.replace("{kernel_version}", kernel_version)
     text = text.replace("{build_date}", time.strftime("%Y-%m-%d %H:%M UTC"))
 
@@ -516,8 +579,8 @@ def main():
     parser.add_argument(
         "--built-variants",
         help="JSON array of variant_data objects that were built (informational; "
-             "changelog.py derives all variant details from --variants-config and "
-             "the registry rather than from this list).",
+        "changelog.py derives all variant details from --variants-config and "
+        "the registry rather than from this list).",
         default="[]",
     )
     args = parser.parse_args()
@@ -539,9 +602,13 @@ def main():
     all_names = {v["name"] for v in all_variants}
 
     if target not in all_names:
-        print(f"::warning::Target '{target}' not found in variants config. Available: {', '.join(sorted(all_names))}")
+        print(
+            f"::warning::Target '{target}' not found in variants config. Available: {', '.join(sorted(all_names))}"
+        )
     elif target not in enabled_names:
-        print(f"::error::Target '{target}' is disabled in variants config. Enable it or use a different target.")
+        print(
+            f"::error::Target '{target}' is disabled in variants config. Enable it or use a different target."
+        )
         print(f"Enabled variants: {', '.join(sorted(enabled_names))}")
         exit(1)
 
