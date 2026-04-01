@@ -11,7 +11,9 @@ set -euo pipefail
 # -----------------------------------------------------------------------------
 readonly INSTALL_DIR="$HOME/AppImages"
 readonly SYMLINK_PATH="/usr/local/bin/nvim"
-readonly NIGHTLY_URL="https://github.com/neovim/neovim/releases/download/nightly/nvim-linux-x86_64.appimage"
+readonly BASE_URL="https://github.com/neovim/neovim/releases/download"
+readonly LATEST_RELEASE_URL="https://github.com/neovim/neovim/releases/latest"
+readonly NIGHTLY_URL="${BASE_URL}/nightly/nvim-linux-x86_64.appimage"
 
 # -----------------------------------------------------------------------------
 # Helper Functions
@@ -29,14 +31,15 @@ usage() {
 Usage: $(basename "$0") [OPTIONS]
 
 Options:
-  --install <version>    Install Neovim version (e.g., stable, nightly, v0.11.6)
+  --install <version>    Install Neovim version (e.g., stable, nightly)
   --uninstall <version>  Remove a specific Neovim version
   --help                 Show this help message
 
 Examples:
   $(basename "$0") --install stable
   $(basename "$0") --install nightly
-  $(basename "$0") --uninstall v0.10.0
+  $(basename "$0") --uninstall stable
+  $(basename "$0") --uninstall nightly
 EOF
 }
 
@@ -54,12 +57,24 @@ get_meta_path() {
   echo "${INSTALL_DIR}/nvim-${version}.meta"
 }
 
+get_stable_version() {
+  # Follow redirect from /releases/latest to get the current stable version tag
+  local redirect_url
+  redirect_url=$(curl --silent --location --write-out '%{url_effective}' --output /dev/null "$LATEST_RELEASE_URL")
+  # Extract version tag from URL (e.g., v0.12.0 from .../tag/v0.12.0)
+  basename "$redirect_url"
+}
+
 get_download_url() {
   local version="$1"
   if [[ "$version" == "nightly" ]]; then
     echo "$NIGHTLY_URL"
+  elif [[ "$version" == "stable" ]]; then
+    local stable_version
+    stable_version=$(get_stable_version)
+    echo "${BASE_URL}/${stable_version}/nvim-linux-x86_64.appimage"
   else
-    echo "https://github.com/neovim/neovim/releases/download/${version}/nvim-linux-x86_64.appimage"
+    echo "${BASE_URL}/${version}/nvim-linux-x86_64.appimage"
   fi
 }
 
@@ -270,15 +285,21 @@ main() {
 
   ensure_install_dir
 
+  # Resolve 'stable' alias to actual version tag for file naming
+  local resolved_version="$version"
+  if [[ "$version" == "stable" ]]; then
+    resolved_version=$(get_stable_version)
+  fi
+
   local file_path
-  file_path=$(get_file_path "$version")
+  file_path=$(get_file_path "$resolved_version")
 
   if [[ "$action" == "install" ]]; then
     local url
     url=$(get_download_url "$version")
 
     # download_version returns 0 if updated, 1 if already up-to-date
-    if download_version "$version" "$file_path" "$url"; then
+    if download_version "$resolved_version" "$file_path" "$url"; then
       log_info "Update downloaded successfully."
     else
       log_info "No new update found."
@@ -288,7 +309,7 @@ main() {
     update_symlink "$file_path"
 
   elif [[ "$action" == "uninstall" ]]; then
-    remove_version "$version"
+    remove_version "$resolved_version"
   fi
 }
 

@@ -65,9 +65,9 @@ From previous `{target}` version `{prev}` there have been the following changes.
 For current users, type the following to rebase to this version:
 ```bash
 # For this branch:
-sudo rpm-ostree rebase ostree-image-signed:docker://ghcr.io/wombatfromhell/bazzite-nix:{target}
+urh rebase {target}
 # For this specific image:
-sudo rpm-ostree rebase ostree-image-signed:docker://ghcr.io/wombatfromhell/bazzite-nix:{curr}
+urh rebase {curr}
 ```
 """
 

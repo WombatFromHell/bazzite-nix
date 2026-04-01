@@ -59,3 +59,8 @@ install -Z -m 0644 \
   "$OVERRIDES_ROOT"/usr/share/ublue-os/just/93-bazzite-nix-libvirt.just \
   "$OVERRIDES_ROOT"/usr/share/ublue-os/just/93-bazzite-nix-neovim.just \
   /usr/share/ublue-os/just/
+
+# include our 'urh.pyz' helper
+install -Z -m 0755 \
+  "$OVERRIDES_ROOT"/usr/bin/urh.pyz \
+  /usr/bin/urh
