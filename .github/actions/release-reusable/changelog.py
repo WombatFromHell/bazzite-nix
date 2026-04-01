@@ -1,400 +1,300 @@
-#!/usr/bin/env python3
-"""
-Changelog generator for bazzite-nix releases.
-
-Compares package versions between previous and current builds,
-generates a markdown changelog, and outputs release metadata.
-"""
-
 import subprocess
 import json
 import time
-import re
-import os
 from typing import Any
+import re
 from collections import defaultdict
+from pathlib import Path
 
-# Configuration - loaded from environment (set by workflow/caller)
-# IMAGE_PREFIX: Full registry path without suffix (e.g., "ghcr.io/owner/bazzite-nix")
-IMAGE_PREFIX = os.environ.get(
-    "IMAGE_PREFIX", "ghcr.io/wombatfromhell/bazzite-nix"
-).lower()
-REGISTRY = f"docker://{IMAGE_PREFIX}"
-
-# For GitHub commit URLs, extract owner/repo from environment
-GITHUB_REPOSITORY = os.environ.get("GITHUB_REPOSITORY", "wombatfromhell/bazzite-nix")
-REPO_OWNER, REPO = GITHUB_REPOSITORY.rsplit("/", 1)
+REGISTRY = "docker://ghcr.io/wombatfromhell/"
 
 RETRIES = 3
 RETRY_WAIT = 5
-FEDORA_PATTERN = re.compile(r"\.fc\d{2}")
+FEDORA_PATTERN = re.compile(r"(?<=[-0-9a-z])\.fc\d{2}(?![0-9])")
+STABLE_START_PATTERN = re.compile(r"\d+\.\d{8}(?:\.\d+)?$")
 
-# Changelog templates
+
+def other_start_pattern(target: str) -> re.Pattern:
+    """Return pattern matching non-stable tags: {target}-DD.YYYYMMDD[.nn]"""
+    return re.compile(rf"^{re.escape(target)}-\d+\.\d{{8}}(?:\.\d+)?$")
+
+
 PATTERN_ADD = "\n| ✨ | {name} | | {version} |"
 PATTERN_CHANGE = "\n| 🔄 | {name} | {prev} | {new} |"
 PATTERN_REMOVE = "\n| ❌ | {name} | {version} | |"
 PATTERN_PKGREL_CHANGED = "{prev} ➡️ {new}"
 PATTERN_PKGREL = "{version}"
-
-CHANGELOG_SECTIONS = {
-    "common": "### All Variants\n| | Name | Previous | New |\n| --- | --- | --- | --- |{changes}\n",
-    "testing": "### Testing Variant\n| | Name | Previous | New |\n| --- | --- | --- | --- |{changes}\n",
-    "unstable": "### Unstable Variant\n| | Name | Previous | New |\n| --- | --- | --- | --- |{changes}\n",
+COMMON_PAT = "### All Images\n| | Name | Previous | New |\n| --- | --- | --- | --- |{changes}\n\n"
+OTHER_NAMES = {
+    "desktop": "### Desktop Images\n| | Name | Previous | New |\n| --- | --- | --- | --- |{changes}\n\n",
+    "deck": "### Deck Images\n| | Name | Previous | New |\n| --- | --- | --- | --- |{changes}\n\n",
+    "kde": "### KDE Images\n| | Name | Previous | New |\n| --- | --- | --- | --- |{changes}\n\n",
+    "nvidia": "### Nvidia Images\n| | Name | Previous | New |\n| --- | --- | --- | --- |{changes}\n\n",
 }
 
 COMMITS_FORMAT = (
     "### Commits\n| Hash | Subject | Author |\n| --- | --- | --- |{commits}\n\n"
 )
-COMMIT_FORMAT = "\n| **[{short}](https://github.com/{owner}/{repo}/commit/{hash})** | {subject} | {author} |"
+COMMIT_FORMAT = "\n| **[{short}](https://github.com/wombatfromhell/bazzite-nix/commit/{hash})** | {subject} | {author} |"
 
 CHANGELOG_TITLE = "{tag}: {pretty}"
 CHANGELOG_FORMAT = """\
 {handwritten}
 
-From previous `{target}` version `{prev}` there have been the following changes.
+From previous `{target}` version `{prev}` there have been the following changes. **One package per new version shown.**
 
-### Base Image
+### Major packages
 | Name | Version |
 | --- | --- |
-| **Base** | {base_image} |{pkgrel_table}
-| **Kernel** | {kernel_version} |
-| **Build Date** | {build_date} |
+| **Kernel** | {pkgrel:kernel} |
+| **Firmware** | {pkgrel:atheros-firmware} |
+| **Mesa** | {pkgrel:mesa-filesystem} |
+| **Gamescope** | {pkgrel:terra-gamescope} |
+| **Bazaar** | {pkgrel:bazaar} |
+| **KDE** | {pkgrel:plasma-desktop} |{nvidia_row}
 
 {changes}
+
 ### How to rebase
 For current users, type the following to rebase to this version:
 ```bash
-# For this branch:
+# For this branch (if latest):
 urh rebase {target}
 # For this specific image:
 urh rebase {curr}
 ```
 """
-
 HANDWRITTEN_PLACEHOLDER = """\
 This is an automatically generated changelog for release `{curr}`."""
 
-# Packages to highlight (optional)
-HIGHLIGHT_PACKAGES = [
+BLACKLIST_VERSIONS = [
     "kernel",
     "mesa-filesystem",
-    "gamescope",
+    "terra-gamescope",
     "bazaar",
+    "gnome-control-center-filesystem",
+    "plasma-desktop",
+    "atheros-firmware",
+    "nvidia-kmod-common",
+    "nvidia-kmod-common-lts",
 ]
 
+PKG_ALIAS = {}
 
-def get_variants(
-    variants_file: str, include_disabled: bool = False
-) -> list[dict[str, Any]]:
-    """Load variants from variants.json configuration.
 
-    Args:
-        variants_file: Path to variants.json config file
-        include_disabled: If True, include disabled variants (for validation)
+def load_variants(variants_config: str | None) -> list[dict[str, Any]]:
+    """Load variant configuration from variants.json file."""
+    if not variants_config:
+        # Fallback to default images if no config provided
+        return [
+            {"name": "bazzite-nix", "suffix": ""},
+            {"name": "bazzite-nix-nvidia-open", "suffix": ""},
+        ]
 
-    Returns:
-        List of variant configurations (excluding disabled by default)
+    config_path = Path(variants_config)
+    if not config_path.exists():
+        raise FileNotFoundError(f"Variants config file not found: {variants_config}")
+
+    with open(config_path) as f:
+        data = json.load(f)
+
+    variants = data.get("variants", [])
+    # Filter out disabled variants
+    return [v for v in variants if not v.get("disabled", False)]
+
+
+def get_images(variants: list[dict[str, Any]]):
+    """Generate image names from variants config.
+
+    Yields tuples of (image_name, base_type, desktop_environment)
     """
-    if not os.path.exists(variants_file):
-        variants_file = os.path.join(os.path.dirname(__file__), "../variants.json")
-    if not os.path.exists(variants_file):
-        variants_file = ".github/variants.json"
+    for variant in variants:
+        name = variant["name"]
+        suffix = variant.get("suffix", "")
+        img = f"bazzite-nix{suffix}"
 
-    with open(variants_file, "r") as f:
-        config = json.load(f)
+        # Determine base type and DE from variant name/suffix
+        if "deck" in name or "deck" in suffix:
+            base = "deck"
+        else:
+            base = "desktop"
 
-    variants = []
-    for variant in config.get("variants", []):
-        if variant.get("disabled", False) and not include_disabled:
+        if "gnome" in name or "gnome" in suffix:
+            de = "gnome"
+        else:
+            de = "kde"
+
+        yield img, base, de
+
+
+def get_manifests(target: str, variants: list[dict[str, Any]]):
+    out = {}
+    imgs = list(get_images(variants))
+    for j, (img, _, _) in enumerate(imgs):
+        output = None
+        print(f"Getting {img}:{target} manifest ({j + 1}/{len(imgs)}).")
+        for i in range(RETRIES):
+            try:
+                output = subprocess.run(
+                    ["skopeo", "inspect", REGISTRY + img + ":" + target],
+                    check=True,
+                    stdout=subprocess.PIPE,
+                ).stdout
+                break
+            except subprocess.CalledProcessError:
+                print(
+                    f"Failed to get {img}:{target}, retrying in {RETRY_WAIT} seconds ({i + 1}/{RETRIES})"
+                )
+                time.sleep(RETRY_WAIT)
+        if output is None:
+            print(f"Failed to get {img}:{target}, skipping")
             continue
-        variants.append(
-            {
-                "name": variant["name"],
-                "base_image": variant["base_image"],
-                "suffix": variant.get("suffix", ""),
-                "tags": variant.get("tags", {}),
-                "disabled": variant.get("disabled", False),
-            }
-        )
-    return variants
+        out[img] = json.loads(output)
+    return out
 
 
-def get_manifest(image_ref: str) -> dict[str, Any] | None:
-    """Fetch manifest for a specific image reference."""
-    print(f"Getting manifest: {image_ref}")
-    for i in range(RETRIES):
-        try:
-            output = subprocess.run(
-                ["skopeo", "inspect", f"docker://{image_ref}"],
-                check=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-            ).stdout
-            return json.loads(output)
-        except subprocess.CalledProcessError as e:
-            print(
-                f"Failed to get {image_ref}, retrying in {RETRY_WAIT} seconds ({i + 1}/{RETRIES})"
-            )
-            print(f"Error: {e.stderr.decode('utf-8', errors='ignore')}")
-            time.sleep(RETRY_WAIT)
-    print(f"Failed to get {image_ref} after {RETRIES} attempts")
-    return None
+def get_tags(target: str, manifests: dict[str, Any]):
+    tags = set()
 
-
-def get_manifests_for_target(
-    target: str, variants: list[dict[str, Any]]
-) -> dict[str, Any]:
-    """Fetch manifests for all enabled variants of a target.
-
-    Args:
-        target: Target branch/tag name (e.g., "testing", "unstable")
-        variants: List of variant configurations
-
-    Returns:
-        Dictionary mapping variant names to their manifests
-    """
-    manifests = {}
-    # Filter to only enabled variants
-    enabled_variants = [v for v in variants if not v.get("disabled", False)]
-
-    for i, variant in enumerate(enabled_variants):
-        # Build image reference using IMAGE_PREFIX from environment
-        # IMAGE_PREFIX is already the full path (e.g., ghcr.io/owner/bazzite-nix)
-        image_ref = f"{IMAGE_PREFIX}{variant['suffix']}:{target}"
-        manifest = get_manifest(image_ref)
-        if manifest:
-            manifests[variant["name"]] = manifest
-            print(
-                f"✓ Got manifest for {variant['name']} ({i + 1}/{len(enabled_variants)})"
-            )
-        else:
-            print(f"✗ Failed to get manifest for {variant['name']}")
-
-    if not manifests:
-        print(
-            f"::warning::No manifests found for target '{target}'. Ensure variant is enabled and image exists."
-        )
-
-    return manifests
-
-
-def get_tags_from_manifests(
-    manifests: dict[str, Any], target: str, variants: list[dict[str, Any]]
-) -> tuple[str, str]:
-    """Extract previous and current tags from manifests using variant tag configuration.
-
-    Args:
-        manifests: Dictionary of variant manifests
-        target: Target branch name (e.g., "testing", "unstable")
-        variants: List of variant configurations
-
-    Returns:
-        Tuple of (previous_tag, current_tag)
-
-    Note:
-        For variants without explicit tags config, uses default pattern:
-        [{target}, {target}-{canonical}, {canonical}]
-    """
-    if not manifests:
-        raise ValueError("No manifests provided")
-
-    # Get tag patterns from variants config (only for enabled variants)
-    variant_tags = {}
-    enabled_variants = [v for v in variants if not v.get("disabled", False)]
-
-    for variant in enabled_variants:
-        tags_config = variant.get("tags", {})
-        if tags_config:
-            variant_tags[variant["name"]] = tags_config
-        else:
-            # Use default tag pattern for variants without explicit config
-            variant_tags[variant["name"]] = {
-                "versioned": [f"{target}", f"{target}-{{canonical}}", "{{canonical}}"]
-            }
-
-    # Use first manifest to get common tags
+    # Select random manifest to get reference tags from
     first = next(iter(manifests.values()))
-    all_tags = set(first.get("RepoTags", []))
+    for tag in first["RepoTags"]:
+        # Tags ending with .0 should not exist
+        if tag.endswith(".0"):
+            continue
+        if target != "stable":
+            if other_start_pattern(target).match(tag):
+                tags.add(tag)
+        else:
+            # For stable, match tags ending with the version pattern
+            if STABLE_START_PATTERN.search(tag):
+                tags.add(tag)
 
-    # Build tag patterns based on variant configuration
-    versioned_tags = set()
+    # Remove tags not present in all images
+    for manifest in manifests.values():
+        for tag in list(tags):
+            if tag not in manifest["RepoTags"]:
+                tags.remove(tag)
 
-    for tags_config in variant_tags.values():
-        # Check for versioned tag patterns
-        versioned_patterns = tags_config.get("versioned", [])
-        for pattern in versioned_patterns:
-            # Convert template patterns to regex
-            # {branch} -> target, {canonical} -> version number
-            regex_pattern = pattern
-            regex_pattern = regex_pattern.replace("{branch}", re.escape(target))
-            regex_pattern = regex_pattern.replace("{canonical}", r"\d+\.\d+(?:\.\d+)?")
-            regex_pattern = f"^{regex_pattern}$"
-
-            tag_regex = re.compile(regex_pattern)
-            for tag in all_tags:
-                if tag_regex.match(tag) and not tag.endswith(".0"):
-                    versioned_tags.add(tag)
-
-    # Fallback: match target or target-version patterns
-    if not versioned_tags:
-        print(
-            f"::warning::No versioned tags found for target '{target}'. Using fallback."
-        )
-        target_pattern = re.compile(rf"^{re.escape(target)}(?:-\d+\.\d+(?:\.\d+)?)?$")
-        for tag in all_tags:
-            if tag.endswith(".0"):
-                continue
-            if target_pattern.match(tag) or tag == target:
-                versioned_tags.add(tag)
-
-    versioned_tags = sorted(versioned_tags)
-
-    if len(versioned_tags) < 2:
-        # Fallback: use target as previous
-        if versioned_tags:
-            print(
-                f"::notice::Only one versioned tag found. Using '{target}' as previous."
-            )
-        return target, versioned_tags[0] if versioned_tags else target
-
-    return versioned_tags[-2], versioned_tags[-1]
+    tags = list(sorted(tags))
+    assert len(tags) > 2, "No current and previous tags found"
+    return tags[-2], tags[-1]
 
 
-def get_packages(manifest: dict[str, Any]) -> dict[str, str]:
-    """Extract package versions from manifest labels."""
+def get_packages(manifests: dict[str, Any]):
     packages = {}
-    try:
-        # Try both known rechunk label names (ostree.rechunk.info is current,
-        # dev.hhd.rechunk.info is the legacy name used by older rechunk versions)
-        labels = manifest.get("Labels", {})
-        rechunk_label = next(
-            (k for k in ("ostree.rechunk.info", "dev.hhd.rechunk.info") if k in labels),
-            None,
-        )
-        if rechunk_label:
-            rechunk_info = json.loads(labels[rechunk_label])
-            packages.update(rechunk_info.get("packages", {}))
-
-        # Also check for custom bazzite-nix labels
-        for key, value in labels.items():
-            if key.startswith("io.github.bazzite-nix.pkg."):
-                pkg_name = key.replace("io.github.bazzite-nix.pkg.", "")
-                packages[pkg_name] = value
-    except Exception as e:
-        print(f"Failed to extract packages from manifest: {e}")
+    for img, manifest in manifests.items():
+        try:
+            # Try newer ostree.rechunk.info label first, then fallback to dev.hhd.rechunk.info
+            rechunk_info = manifest["Labels"].get("ostree.rechunk.info") or manifest[
+                "Labels"
+            ].get("dev.hhd.rechunk.info")
+            if rechunk_info:
+                packages[img] = json.loads(rechunk_info)["packages"]
+            else:
+                packages[img] = {}
+        except Exception as e:
+            print(f"Failed to get packages for {img}:\n{e}")
+            packages[img] = {}
     return packages
 
 
-def get_kernel_version(manifest: dict[str, Any]) -> str:
-    """Extract kernel version from manifest."""
-    labels = manifest.get("Labels", {})
-    return (
-        labels.get("org.opencontainers.image.kernel-version", "")
-        or labels.get("io.github.bazzite-nix.kernel-version", "")
-        or "Unknown"
-    )
+def is_nvidia(img: str, lts: bool):
+    if lts:
+        return "nvidia" in img and "nvidia-open" not in img and "deck-nvidia" not in img
+    else:
+        return "nvidia-open" in img or "deck-nvidia" in img
 
 
-def get_pkgrel_table(
-    manifests: dict[str, Any], prev_manifests: dict[str, Any] = None
-) -> str:
-    """Generate package version table rows for changelog.
+def get_package_groups(
+    prev: dict[str, Any], manifests: dict[str, Any], variants: list[dict[str, Any]]
+):
+    common = set()
+    others = {k: set() for k in OTHER_NAMES.keys()}
 
-    Only includes packages that are actually present in the image.
-    Shows version changes (prev ➡️ new) for highlighted packages when they change.
+    npkg = get_packages(manifests)
+    ppkg = get_packages(prev)
 
-    Args:
-        manifests: Dictionary of current variant manifests
-        prev_manifests: Dictionary of previous variant manifests (optional)
+    keys = set(npkg.keys()) | set(ppkg.keys())
+    pkg = defaultdict(set)
+    for k in keys:
+        pkg[k] = set(npkg.get(k, {})) | set(ppkg.get(k, {}))
 
-    Returns:
-        Markdown table rows string
-    """
-    # Packages to show in the Base Image table with display names
-    PKGREL_PACKAGES = {
-        "atheros-firmware": "Firmware",
-        "mesa-filesystem": "Mesa",
-        "gamescope": "Gamescope",
-        "bazaar": "Bazaar",
-        "gnome-control-center-filesystem": "Gnome",
-        "plasma-desktop": "KDE",
-        "nvidia-kmod-common": "Nvidia",
-        "nvidia-kmod-common-lts": "Nvidia LTS",
-    }
+    # Find common packages
+    first = True
+    for img, base, de in get_images(variants):
+        if img not in pkg:
+            continue
 
-    # Collect current package versions from manifests
-    curr_versions = {}
-    for manifest in manifests.values():
-        pkgs = get_packages(manifest)
-        for pkg in PKGREL_PACKAGES.keys():
-            if pkg in pkgs and pkg not in curr_versions:
-                clean_version = re.sub(FEDORA_PATTERN, "", pkgs[pkg])
-                curr_versions[pkg] = clean_version
+        if first:
+            for p in pkg[img]:
+                common.add(p)
+        else:
+            for c in common.copy():
+                if c not in pkg[img]:
+                    common.remove(c)
 
-    # Collect previous package versions if provided
-    prev_versions = {}
-    if prev_manifests:
-        for manifest in prev_manifests.values():
-            pkgs = get_packages(manifest)
-            for pkg in PKGREL_PACKAGES.keys():
-                if pkg in pkgs and pkg not in prev_versions:
-                    clean_version = re.sub(FEDORA_PATTERN, "", pkgs[pkg])
-                    prev_versions[pkg] = clean_version
+        first = False
 
-    # Build table rows only for packages that exist
-    rows = ""
-    for pkg, display_name in PKGREL_PACKAGES.items():
-        if pkg in curr_versions:
-            curr_ver = curr_versions[pkg]
-            prev_ver = prev_versions.get(pkg)
+    # Find other packages
+    for t, other in others.items():
+        first = True
+        for img, base, de in get_images(variants):
+            if img not in pkg:
+                continue
 
-            # Show change indicator if version changed
-            if prev_ver and prev_ver != curr_ver:
-                rows += f"\n| **{display_name}** | {PATTERN_PKGREL_CHANGED.format(prev=prev_ver, new=curr_ver)} |"
+            if t == "nvidia" and "nvidia" not in img:
+                continue
+            if t == "kde" and de != "kde":
+                continue
+            if t == "gnome" and de != "gnome":
+                continue
+            if t == "deck" and base != "deck":
+                continue
+            if t == "desktop" and base == "deck":
+                continue
+
+            if first:
+                for p in pkg[img]:
+                    if p not in common:
+                        other.add(p)
             else:
-                rows += f"\n| **{display_name}** | {PATTERN_PKGREL.format(version=curr_ver)} |"
+                for c in other.copy():
+                    if c not in pkg[img]:
+                        other.remove(c)
 
-    return rows
+            first = False
+
+    return sorted(common), {k: sorted(v) for k, v in others.items()}
 
 
-def get_versions(manifests: dict[str, Any]) -> dict[str, str]:
-    """Aggregate versions from all manifests."""
+def get_versions(manifests: dict[str, Any]):
     versions = {}
-    for manifest in manifests.values():
-        pkgs = get_packages(manifest)
-        for pkg, version in pkgs.items():
-            # Clean Fedora version suffix
-            clean_version = re.sub(FEDORA_PATTERN, "", version)
-            # Keep the most recent version if duplicates exist
-            if pkg not in versions or clean_version > versions[pkg]:
-                versions[pkg] = clean_version
+    pkgs = get_packages(manifests)
+    for img, img_pkgs in pkgs.items():
+        for pkg, v in img_pkgs.items():
+            if is_nvidia(img, lts=True) and "nvidia" in pkg:
+                pkg += "-lts"
+            versions[pkg] = re.sub(FEDORA_PATTERN, "", v)
     return versions
 
 
-def calculate_changes(
-    pkgs: list[str], prev: dict[str, str], curr: dict[str, str]
-) -> str:
-    """Calculate and format package changes."""
+def calculate_changes(pkgs: list[str], prev: dict[str, str], curr: dict[str, str]):
     added = []
     changed = []
     removed = []
 
-    # Build blacklist of versions to skip (highlighted packages only)
-    highlight_versions = set()
-    for pkg in HIGHLIGHT_PACKAGES:
-        if pkg in curr and curr[pkg]:
-            highlight_versions.add(curr[pkg])
-        if pkg in prev and prev[pkg]:
-            highlight_versions.add(prev[pkg])
+    blacklist_ver = set([curr.get(v, None) for v in BLACKLIST_VERSIONS])
 
     for pkg in pkgs:
-        # Skip highlighted packages (they go in a separate section)
-        if pkg in HIGHLIGHT_PACKAGES:
+        # Clearup changelog by removing mentioned packages
+        if pkg in BLACKLIST_VERSIONS:
             continue
-        # Skip packages with versions matching highlighted packages
-        if pkg in curr and curr.get(pkg, None) in highlight_versions:
+        if pkg in curr and curr.get(pkg, None) in blacklist_ver:
             continue
-        if pkg in prev and prev.get(pkg, None) in highlight_versions:
+        if pkg in prev and prev.get(pkg, None) in blacklist_ver:
+            continue
+        if pkg.endswith("-lts"):
             continue
 
         if pkg not in prev:
@@ -404,46 +304,27 @@ def calculate_changes(
         elif prev[pkg] != curr[pkg]:
             changed.append(pkg)
 
+        blacklist_ver.add(curr.get(pkg, None))
+        blacklist_ver.add(prev.get(pkg, None))
+
     out = ""
-    for pkg in sorted(added):
+    for pkg in added:
         out += PATTERN_ADD.format(name=pkg, version=curr[pkg])
-    for pkg in sorted(changed):
+    for pkg in changed:
         out += PATTERN_CHANGE.format(name=pkg, prev=prev[pkg], new=curr[pkg])
-    for pkg in sorted(removed):
+    for pkg in removed:
         out += PATTERN_REMOVE.format(name=pkg, version=prev[pkg])
     return out
 
 
-def get_commits(
-    prev_manifests: dict[str, Any],
-    manifests: dict[str, Any],
-    workdir: str,
-    owner: str,
-    repo: str,
-) -> str:
-    """Extract commits between two image revisions."""
+def get_commits(prev_manifests, manifests, workdir: str):
     try:
-        # Get revision hashes from manifests
-        start = None
-        finish = None
-
-        for manifest in prev_manifests.values():
-            rev = manifest.get("Labels", {}).get("org.opencontainers.image.revision")
-            if rev:
-                start = rev
-                break
-
-        for manifest in manifests.values():
-            rev = manifest.get("Labels", {}).get("org.opencontainers.image.revision")
-            if rev:
-                finish = rev
-                break
-
-        if not start or not finish:
-            print("Could not find revision hashes in manifests")
-            return ""
-
-        print(f"Getting commits from {start[:7]} to {finish[:7]}")
+        start = next(iter(prev_manifests.values()))["Labels"][
+            "org.opencontainers.image.revision"
+        ]
+        finish = next(iter(manifests.values()))["Labels"][
+            "org.opencontainers.image.revision"
+        ]
 
         commits = subprocess.run(
             [
@@ -465,31 +346,23 @@ def get_commits(
             parts = commit.split("|")
             if len(parts) < 4:
                 continue
-            commit_hash, short, author, subject = (
-                parts[0],
-                parts[1],
-                parts[2],
-                "|".join(parts[3:]),
-            )
+            commit_hash, short, author, subject = parts
 
-            # Skip merge commits
             if subject.lower().startswith("merge"):
                 continue
 
-            out += COMMIT_FORMAT.format(
-                short=short,
-                subject=subject,
-                hash=commit_hash,
-                author=author,
-                owner=owner,
-                repo=repo,
+            out += (
+                COMMIT_FORMAT.replace("{short}", short)
+                .replace("{subject}", subject)
+                .replace("{hash}", commit_hash)
+                .replace("{author}", author)
             )
 
         if out:
             return COMMITS_FORMAT.format(commits=out)
         return ""
     except Exception as e:
-        print(f"Failed to get commits: {e}")
+        print(f"Failed to get commits:\n{e}")
         return ""
 
 
@@ -498,186 +371,152 @@ def generate_changelog(
     target: str,
     pretty: str | None,
     workdir: str,
+    prev_manifests,
+    manifests,
     variants: list[dict[str, Any]],
-    prev_manifests: dict[str, Any],
-    manifests: dict[str, Any],
-) -> tuple[str, str]:
-    """Generate the full changelog."""
-    owner = REPO_OWNER
-    repo = REPO
-
-    # Get versions
+):
+    common, others = get_package_groups(prev_manifests, manifests, variants)
     versions = get_versions(manifests)
     prev_versions = get_versions(prev_manifests)
 
-    # Get tags using variants config
-    prev_tag, curr_tag = get_tags_from_manifests(manifests, target, variants)
+    prev, curr = get_tags(target, manifests)
 
-    # Get kernel version from first manifest
-    kernel_version = get_kernel_version(next(iter(manifests.values())))
-
-    # Get base image from variants config using the target variant name
-    variant_config = next((v for v in variants if v["name"] == target), None)
-    base_image = variant_config["base_image"] if variant_config else "Unknown"
-
-    # Get pkgrel table rows with change indicators (only packages that exist in the image)
-    pkgrel_table = get_pkgrel_table(manifests, prev_manifests)
-
-    # Generate pretty title if not provided
     if not pretty:
-        curr_pretty = re.sub(r"\.\d{1,2}$", "", curr_tag)
+        # Generate pretty version since we dont have it
+        try:
+            finish: str = next(iter(manifests.values()))["Labels"][
+                "org.opencontainers.image.revision"
+            ]
+        except Exception as e:
+            print(f"Failed to get finish hash:\n{e}")
+            finish = ""
+
+        # Remove .0 from curr
+        curr_pretty = re.sub(r"\.\d{1,2}$", "", curr)
+        # Remove target- from curr
         curr_pretty = re.sub(r"^[a-z]+-", "", curr_pretty)
-        pretty = target.capitalize() + " (F" + curr_pretty + ")"
+        pretty = target.capitalize() + " (F" + curr_pretty
+        if finish and target != "stable":
+            pretty += ", #" + finish[:7]
+        pretty += ")"
 
-    title = CHANGELOG_TITLE.format_map(defaultdict(str, tag=curr_tag, pretty=pretty))
+    title = CHANGELOG_TITLE.format_map(defaultdict(str, tag=curr, pretty=pretty))
 
-    # Resolve handwritten placeholder if needed
-    resolved_handwritten = (
-        handwritten
-        if handwritten
-        else HANDWRITTEN_PLACEHOLDER.replace("{curr}", curr_tag)
+    changelog = CHANGELOG_FORMAT
+
+    changelog = (
+        changelog.replace(
+            "{handwritten}", handwritten if handwritten else HANDWRITTEN_PLACEHOLDER
+        )
+        .replace("{target}", target)
+        .replace("{prev}", prev)
+        .replace("{curr}", curr)
     )
 
-    # Build changelog text - replace all placeholders
-    text = CHANGELOG_FORMAT
-    text = text.replace("{handwritten}", resolved_handwritten)
-    text = text.replace("{target}", target)
-    text = text.replace("{prev}", prev_tag)
-    text = text.replace("{curr}", curr_tag)
-    text = text.replace("{base_image}", base_image)
-    text = text.replace("{pkgrel_table}", pkgrel_table)
-    text = text.replace("{kernel_version}", kernel_version)
-    text = text.replace("{build_date}", time.strftime("%Y-%m-%d %H:%M UTC"))
+    # Conditionally add Nvidia row based on package presence
+    nvidia_pkg = "nvidia-kmod-common"
+    nvidia_versions = get_versions(manifests)
+    nvidia_prev_versions = get_versions(prev_manifests)
+    has_nvidia = nvidia_pkg in nvidia_versions or nvidia_pkg in nvidia_prev_versions
 
-    # Build changes section
-    changes = ""
-
-    # Add commits if available
-    commits = get_commits(prev_manifests, manifests, workdir, owner, repo)
-    if commits:
-        changes += commits
-
-    # Calculate package changes
-    all_pkgs = set(versions.keys()) | set(prev_versions.keys())
-    pkg_changes = calculate_changes(sorted(all_pkgs), prev_versions, versions)
-
-    if pkg_changes:
-        changes += CHANGELOG_SECTIONS["common"].format(changes=pkg_changes)
-
-    # Substitute changes block: if non-empty, preserve the surrounding blank
-    # line; if empty, collapse to a single newline so the build-date table
-    # and "### How to rebase" are separated by exactly one blank line rather
-    # than producing a triple newline gap.
-    if changes:
-        text = text.replace("\n\n{changes}\n", "\n\n" + changes.rstrip("\n") + "\n")
+    if has_nvidia:
+        nvidia_row = "\n| **Nvidia** | {pkgrel:nvidia-kmod-common} |"
+        if nvidia_pkg not in nvidia_prev_versions or nvidia_prev_versions[
+            nvidia_pkg
+        ] == nvidia_versions.get(nvidia_pkg):
+            changelog = changelog.replace(
+                "{pkgrel:nvidia-kmod-common}",
+                PATTERN_PKGREL.format(
+                    version=nvidia_versions.get(nvidia_pkg, "Unknown")
+                ),
+            )
+        else:
+            changelog = changelog.replace(
+                "{pkgrel:nvidia-kmod-common}",
+                PATTERN_PKGREL_CHANGED.format(
+                    prev=nvidia_prev_versions[nvidia_pkg],
+                    new=nvidia_versions[nvidia_pkg],
+                ),
+            )
     else:
-        text = text.replace("\n\n{changes}\n", "\n")
+        nvidia_row = ""
 
-    return title, text
+    changelog = changelog.replace("{nvidia_row}", nvidia_row)
+
+    for pkg, v in versions.items():
+        if pkg not in prev_versions or prev_versions[pkg] == v:
+            changelog = changelog.replace(
+                "{pkgrel:" + (PKG_ALIAS.get(pkg, None) or pkg) + "}",
+                PATTERN_PKGREL.format(version=v),
+            )
+        else:
+            changelog = changelog.replace(
+                "{pkgrel:" + (PKG_ALIAS.get(pkg, None) or pkg) + "}",
+                PATTERN_PKGREL_CHANGED.format(prev=prev_versions[pkg], new=v),
+            )
+
+    changes = ""
+    changes += get_commits(prev_manifests, manifests, workdir)
+    common = calculate_changes(common, prev_versions, versions)
+    if common:
+        changes += COMMON_PAT.format(changes=common)
+    for k, v in others.items():
+        chg = calculate_changes(v, prev_versions, versions)
+        if chg:
+            changes += OTHER_NAMES[k].format(changes=chg)
+
+    changelog = changelog.replace("{changes}", changes)
+
+    return title, changelog
 
 
 def main():
     import argparse
 
-    parser = argparse.ArgumentParser(description="Generate release changelog")
-    parser.add_argument("target", help="Target branch/tag (e.g., testing, unstable)")
-    parser.add_argument("output", help="Output environment file path")
-    parser.add_argument("changelog", help="Output changelog file path")
-    parser.add_argument("--pretty", help="Custom title for the changelog")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("target", help="Target tag")
+    parser.add_argument("output", help="Output environment file")
+    parser.add_argument("changelog", help="Output changelog file")
+    parser.add_argument("--pretty", help="Subject for the changelog")
+    parser.add_argument("--workdir", help="Git directory for commits")
+    parser.add_argument("--handwritten", help="Handwritten changelog")
     parser.add_argument(
-        "--workdir", help="Git working directory for commits", default="."
-    )
-    parser.add_argument("--handwritten", help="Custom handwritten changelog text")
-    parser.add_argument(
-        "--variants-config",
-        help="Path to variants.json config",
-        default=".github/variants.json",
-    )
-    parser.add_argument(
-        "--built-variants",
-        help="JSON array of variant_data objects that were built (informational; "
-        "changelog.py derives all variant details from --variants-config and "
-        "the registry rather than from this list).",
-        default="[]",
+        "--variants-config", help="Path to variants.json configuration file"
     )
     args = parser.parse_args()
 
-    # Clean target (remove refs/heads/, refs/tags/, etc.)
+    # Remove refs/tags, refs/heads, refs/remotes e.g.
+    # Tags cannot include / anyway.
     target = args.target.split("/")[-1]
+
     if target == "main":
         target = "stable"
 
-    print(f"Generating changelog for target: {target}")
-    print(f"Image prefix: {IMAGE_PREFIX}")
+    variants = load_variants(args.variants_config)
+    manifests = get_manifests(target, variants)
+    prev, curr = get_tags(target, manifests)
+    print(f"Previous tag: {prev}")
+    print(f" Current tag: {curr}")
 
-    # Load variants (including disabled for validation)
-    all_variants = get_variants(args.variants_config, include_disabled=True)
-    enabled_variants = get_variants(args.variants_config)
-
-    # Validate target against enabled variants
-    enabled_names = {v["name"] for v in enabled_variants}
-    all_names = {v["name"] for v in all_variants}
-
-    if target not in all_names:
-        print(
-            f"::warning::Target '{target}' not found in variants config. Available: {', '.join(sorted(all_names))}"
-        )
-    elif target not in enabled_names:
-        print(
-            f"::error::Target '{target}' is disabled in variants config. Enable it or use a different target."
-        )
-        print(f"Enabled variants: {', '.join(sorted(enabled_names))}")
-        exit(1)
-
-    print(f"Found {len(enabled_variants)} active variants")
-
-    # Get current manifests
-    manifests = get_manifests_for_target(target, enabled_variants)
-    if not manifests:
-        print(f"Error: No manifests found for target {target}")
-        exit(1)
-
-    # Get previous tag
-    prev_tag, curr_tag = get_tags_from_manifests(manifests, target, enabled_variants)
-    print(f"Previous tag: {prev_tag}")
-    print(f"Current tag: {curr_tag}")
-
-    # Get previous manifests
-    prev_manifests = {}
-    for variant_name in manifests.keys():
-        # Build previous image ref
-        variant = next((v for v in enabled_variants if v["name"] == variant_name), None)
-        if variant:
-            image_ref = f"{IMAGE_PREFIX}{variant['suffix']}:{prev_tag}"
-            manifest = get_manifest(image_ref)
-            if manifest:
-                prev_manifests[variant_name] = manifest
-
-    # Generate changelog
-    title, changelog_text = generate_changelog(
+    prev_manifests = get_manifests(prev, variants)
+    title, changelog = generate_changelog(
         args.handwritten,
         target,
         args.pretty,
         args.workdir,
-        enabled_variants,
         prev_manifests,
         manifests,
+        variants,
     )
 
-    print("\n=== Changelog ===")
-    print(f"# {title}")
-    print(changelog_text)
-    print("\n=== Output ===")
-    print(f'TITLE="{title}"')
-    print(f"TAG={curr_tag}")
+    print(f"Changelog:\n# {title}\n{changelog}")
+    print(f'\nOutput:\nTITLE="{title}"\nTAG={curr}')
 
-    # Write changelog
     with open(args.changelog, "w") as f:
-        f.write(changelog_text)
+        f.write(changelog)
 
-    # Write output env file
     with open(args.output, "w") as f:
-        f.write(f"TITLE='{title}'\nTAG={curr_tag}\n")
+        f.write(f'TITLE="{title}"\nTAG={curr}\n')
 
 
 if __name__ == "__main__":
