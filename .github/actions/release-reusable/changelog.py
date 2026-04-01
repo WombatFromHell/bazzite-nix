@@ -35,7 +35,7 @@ OTHER_NAMES = {
 COMMITS_FORMAT = (
     "### Commits\n| Hash | Subject | Author |\n| --- | --- | --- |{commits}\n\n"
 )
-COMMIT_FORMAT = "\n| **[{short}](https://github.com/wombatfromhell/bazzite-nix/commit/{hash})** | {subject} | {author} |"
+COMMIT_FORMAT = "\n| **[{short}](https://github.com/ublue-os/bazzite/commit/{hash})** | {subject} | {author} |"
 
 CHANGELOG_TITLE = "{tag}: {pretty}"
 CHANGELOG_FORMAT = """\
@@ -317,7 +317,8 @@ def calculate_changes(pkgs: list[str], prev: dict[str, str], curr: dict[str, str
     return out
 
 
-def get_commits(prev_manifests, manifests, workdir: str):
+def get_commits(prev_manifests, manifests):
+    """Fetch commits from upstream bazzite repository using revision hashes from image labels."""
     try:
         start = next(iter(prev_manifests.values()))["Labels"][
             "org.opencontainers.image.revision"
@@ -326,27 +327,27 @@ def get_commits(prev_manifests, manifests, workdir: str):
             "org.opencontainers.image.revision"
         ]
 
-        commits = subprocess.run(
-            [
-                "git",
-                "-C",
-                workdir,
-                "log",
-                "--pretty=format:%H|%h|%an|%s",
-                f"{start}..{finish}",
-            ],
+        # Use GitHub API to compare commits
+        api_url = f"https://api.github.com/repos/ublue-os/bazzite/compare/{start}...{finish}"
+        
+        response = subprocess.run(
+            ["curl", "-s", "-H", "Accept: application/vnd.github+json", api_url],
             check=True,
             stdout=subprocess.PIPE,
         ).stdout.decode("utf-8")
+        
+        data = json.loads(response)
+        
+        if "commits" not in data:
+            print(f"Failed to get commits from GitHub API: {data.get('message', 'Unknown error')}")
+            return ""
 
         out = ""
-        for commit in commits.split("\n"):
-            if not commit:
-                continue
-            parts = commit.split("|")
-            if len(parts) < 4:
-                continue
-            commit_hash, short, author, subject = parts
+        for commit in data["commits"]:
+            sha = commit["sha"]
+            short = sha[:7]
+            author = commit["commit"]["author"]["name"]
+            subject = commit["commit"]["message"].split("\n")[0]
 
             if subject.lower().startswith("merge"):
                 continue
@@ -354,7 +355,7 @@ def get_commits(prev_manifests, manifests, workdir: str):
             out += (
                 COMMIT_FORMAT.replace("{short}", short)
                 .replace("{subject}", subject)
-                .replace("{hash}", commit_hash)
+                .replace("{hash}", sha)
                 .replace("{author}", author)
             )
 
@@ -456,7 +457,6 @@ def generate_changelog(
             )
 
     changes = ""
-    changes += get_commits(prev_manifests, manifests, workdir)
     common = calculate_changes(common, prev_versions, versions)
     if common:
         changes += COMMON_PAT.format(changes=common)
@@ -464,6 +464,7 @@ def generate_changelog(
         chg = calculate_changes(v, prev_versions, versions)
         if chg:
             changes += OTHER_NAMES[k].format(changes=chg)
+    changes += get_commits(prev_manifests, manifests)
 
     changelog = changelog.replace("{changes}", changes)
 
