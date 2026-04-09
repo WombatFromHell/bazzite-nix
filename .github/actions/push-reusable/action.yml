@@ -96,44 +96,9 @@ runs:
         # shellcheck source=helpers.sh
         source "${GITHUB_ACTION_PATH}/helpers.sh"
 
-        IFS=',' read -r -a TAGS_ARR <<< "${TAGS}"
-
-        echo "::group::Push primary tag (${TAGS_ARR[0]})"
-        echo "Source ref : ${SOURCE_REF}"
-        echo "Target     : docker://${BASE_IMG}:${TAGS_ARR[0]}"
-        skopeo_copy_with_retry \
-          "${SOURCE_REF}" \
-          "docker://${BASE_IMG}:${TAGS_ARR[0]}"
-        echo "::endgroup::"
-
-        echo "::group::Inspect + verify primary digest"
-        REMOTE_DIGEST=$(sudo skopeo inspect \
-          --authfile /tmp/skopeo-auth/auth.json \
-          --format='{{.Digest}}' \
-          "docker://${BASE_IMG}:${TAGS_ARR[0]}")
-
-        [[ -z "$REMOTE_DIGEST" ]] && \
-          { echo "::error::inspect returned empty digest"; exit 1; }
-
-        verify_digest "${BASE_IMG}:${TAGS_ARR[0]}" "$REMOTE_DIGEST"
-
-        SHORT_DIGEST="${REMOTE_DIGEST#sha256:}"
-        REMOTE_DIGEST_REF="${BASE_IMG}@${REMOTE_DIGEST}"
-        echo "Digest     : ${REMOTE_DIGEST}"
-        echo "Digest ref : ${REMOTE_DIGEST_REF}"
-        echo "::endgroup::"
-
-        echo "::group::Push additional tags"
-        for tag in "${TAGS_ARR[@]:1}" "$SHORT_DIGEST"; do
-          echo "  → ${BASE_IMG}:${tag}"
-          skopeo_copy_with_retry \
-            "docker://${REMOTE_DIGEST_REF}" \
-            "docker://${BASE_IMG}:${tag}"
-        done
-        echo "::endgroup::"
-
-        echo "remote_digest=${REMOTE_DIGEST}"         >> "$GITHUB_OUTPUT"
-        echo "remote_digest_ref=${REMOTE_DIGEST_REF}" >> "$GITHUB_OUTPUT"
+        push_image_with_tags \
+          "${SOURCE_REF}" "${TAGS}" "${BASE_IMG}" \
+          >> "$GITHUB_OUTPUT"
 
     - name: Install Cosign
       uses: sigstore/cosign-installer@ba7bc0a3fef59531c69a25acd34668d6d3fe6f22 # v4.1.0
@@ -160,48 +125,12 @@ runs:
         # shellcheck source=helpers.sh
         source "${GITHUB_ACTION_PATH}/helpers.sh"
 
-        echo "::group::Sign image"
-        run_with_retry "cosign sign ${DIGEST_REF}" \
-          cosign sign -y \
-            --key env://SIGNING_SECRET \
-            --new-bundle-format=false \
-            --use-signing-config=false \
-            --registry-referrers-mode=legacy \
-            --registry-username "${GITHUB_ACTOR}" \
-            --registry-password "${GITHUB_TOKEN}" \
-            "${DIGEST_REF}"
-        echo "::endgroup::"
-
-        echo "::group::Verify image"
-        run_with_retry "cosign verify ${DIGEST_REF}" \
-          cosign verify \
-            --key ./cosign.pub \
-            "${DIGEST_REF}"
-        echo "::endgroup::"
-
-        echo "::group::Inspect layer sizes"
-        TOTAL_MB=$(sudo skopeo inspect --raw \
-          --authfile /tmp/skopeo-auth/auth.json \
-          "docker://${DIGEST_REF}" | \
-          jq '([.layers[].size] | add) / 1024 / 1024 | round')
-        echo "Total compressed size: ${TOTAL_MB} MB"
-        echo "::endgroup::"
-
-        REMOTE_DIGEST="${DIGEST_REF#*@sha256:}"
-        TAGS_FMT=$(echo "${TAGS}" | tr ',' ' · ')
-
-        {
-          echo "## ${VARIANT_NAME}"
-          echo ""
-          echo "| Field | Value |"
-          echo "| ----- | ----- |"
-          echo "| **Image**             | \`${REGISTRY}/${REPO}${SUFFIX}\` |"
-          echo "| **Digest**            | \`${REMOTE_DIGEST}\` |"
-          echo "| **Tags**              | \`${TAGS_FMT}\` |"
-          echo "| **Parent version**    | \`${PARENT_VERSION}\` |"
-          echo "| **Built**             | \`${DATE}\` |"
-          echo "| **Image size**        | \`${TOTAL_MB} MB\` |"
-          echo "| **Signed & verified** | ✅ |"
-        } >> "$GITHUB_STEP_SUMMARY"
-
-        echo "status=success" >> "$GITHUB_OUTPUT"
+        sign_and_verify_image \
+          "${DIGEST_REF}" \
+          "${GITHUB_WORKSPACE}/cosign.pub" \
+          /tmp/skopeo-auth/auth.json \
+          "${GITHUB_ACTOR}" "${GITHUB_TOKEN}" \
+          "${GITHUB_STEP_SUMMARY}" \
+          "${VARIANT_NAME}" "${TAGS}" "${DATE}" \
+          "${PARENT_VERSION}" "${REGISTRY}" "${REPO}" "${SUFFIX}" \
+          >> "$GITHUB_OUTPUT"
