@@ -8,7 +8,7 @@ dnf5 -y install --enable-repo=terra \
 dnf5 -y copr enable avengemedia/dms-git &&
   dnf5 -y copr disable avengemedia/dms-git &&
   dnf5 -y install --enable-repo="*avengemedia*" \
-    niri dms danksearch dgop fuzzel kanshi cava matugen cups-pk-helper xdg-desktop-portal-kde qt6ct-kde \
+    quickshell-git niri dms danksearch dgop fuzzel kanshi cava matugen cups-pk-helper xdg-desktop-portal-kde qt6ct-kde \
     ghostty
 
 # include hyprpicker so we get a magnifying glass with our color picker
