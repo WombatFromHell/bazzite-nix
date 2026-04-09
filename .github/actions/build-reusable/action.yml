@@ -68,7 +68,20 @@ runs:
       with:
         target-dir: /var/lib/containers
 
+    - name: Check available disk space on /
+      id: check_space
+      shell: bash
+      run: |
+        avail_gb=$(df -B1G / | awk 'NR==2 {print $4}')
+        echo "avail_gb=${avail_gb}" >> "$GITHUB_OUTPUT"
+        if [ "${avail_gb}" -lt 50 ]; then # <50GB Avail is "low"
+          echo "low_space=1" >> "$GITHUB_OUTPUT"
+        else
+          echo "low_space=0" >> "$GITHUB_OUTPUT"
+        fi
+
     - name: Free Disk Space (Ubuntu)
+      if: ${{ steps.check_space.outputs.low_space == '1' }}
       uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
 
     - name: Build image
