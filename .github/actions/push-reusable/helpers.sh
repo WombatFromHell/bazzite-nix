@@ -49,7 +49,7 @@ run_with_retry() {
 
   local attempt output exit_code tmpfile
   for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
-    echo "  ${label} (attempt ${attempt}/${MAX_ATTEMPTS})"
+    echo "  ${label} (attempt ${attempt}/${MAX_ATTEMPTS})" >&2
 
     tmpfile=$(mktemp)
     set +e
@@ -80,19 +80,19 @@ run_with_retry() {
     output=$(cat "$tmpfile")
     rm -f "$tmpfile"
 
-    echo "  ✗ exited ${exit_code}: $(echo "$output" | tail -3)"
+    echo "  ✗ exited ${exit_code}: $(echo "$output" | tail -3)" >&2
 
     if is_transient_error "$output"; then
       if [[ "$attempt" -ge "$MAX_ATTEMPTS" ]]; then
-        echo "::error::All ${MAX_ATTEMPTS} attempts failed for: ${label}"
+        echo "::error::All ${MAX_ATTEMPTS} attempts failed for: ${label}" >&2
         return 1
       fi
       local delay=$((RETRY_DELAY * attempt))
-      echo "::warning::Transient error on attempt ${attempt}. Retrying in ${delay}s…"
+      echo "::warning::Transient error on attempt ${attempt}. Retrying in ${delay}s…" >&2
       sleep "$delay"
     else
-      echo "::error::Permanent error — not retrying: ${label}"
-      echo "::error::Output: ${output}"
+      echo "::error::Permanent error — not retrying: ${label}" >&2
+      echo "::error::Output: ${output}" >&2
       return 1
     fi
   done
@@ -128,10 +128,10 @@ verify_digest() {
     --format='{{.Digest}}' \
     "docker://${ref}" 2>/dev/null || true)
   if [[ "$actual" != "$expected" ]]; then
-    echo "::error::Digest mismatch — expected ${expected}, got ${actual}"
+    echo "::error::Digest mismatch — expected ${expected}, got ${actual}" >&2
     return 1
   fi
-  echo "  ✓ digest verified: ${actual}"
+  echo "  ✓ digest verified: ${actual}" >&2
 }
 
 # ── push image and additional tags ──────────────────────────────────────────
