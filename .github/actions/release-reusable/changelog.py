@@ -5,8 +5,23 @@ from typing import Any
 import re
 from collections import defaultdict
 from pathlib import Path
+import os
 
-REGISTRY = "docker://ghcr.io/wombatfromhell/"
+# Registry prefix for skopeo inspect, derived from IMAGE_PREFIX env var.
+# IMAGE_PREFIX is set by the calling action as e.g. "ghcr.io/owner/repo".
+# We strip the repo name to get the registry + org, then prepend "docker://".
+def _registry_prefix():
+    """Return skopeo-compatible registry prefix from IMAGE_PREFIX env var."""
+    image_prefix = os.environ.get("IMAGE_PREFIX", "")
+    if image_prefix:
+        # "ghcr.io/owner/repo" → "docker://ghcr.io/owner/"
+        parts = image_prefix.rsplit("/", 1)
+        if len(parts) == 2:
+            return f"docker://{parts[0]}/"
+    # Fallback for direct invocation without IMAGE_PREFIX
+    return "docker://ghcr.io/wombatfromhell/"
+
+REGISTRY = _registry_prefix()
 DEFAULT_VARIANTS_PATH = Path(__file__).parent.parent.parent / "variants.json"
 
 RETRIES = 3
@@ -39,6 +54,11 @@ PATTERN_CHANGE = "\n| 🔄 | {name} | {prev} | {new} |"
 PATTERN_REMOVE = "\n| ❌ | {name} | {version} | |"
 PATTERN_PKGREL_CHANGED = "{prev} ➡️ {new}"
 PATTERN_PKGREL = "{version}"
+# Upstream GitHub repo for commit fetching.
+# Set by the calling action via GITHUB_REPOSITORY env var (e.g. "wombatfromhell/bazzite-nix").
+# Falls back to ublue-os/bazzite for direct invocation.
+UPSTREAM_REPO = os.environ.get("GITHUB_REPOSITORY", "ublue-os/bazzite")
+
 COMMON_PAT = "### All Images\n| | Name | Previous | New |\n| --- | --- | --- | --- |{changes}\n\n"
 OTHER_NAMES = {
     "desktop": "### Desktop Images\n| | Name | Previous | New |\n| --- | --- | --- | --- |{changes}\n\n",
@@ -50,7 +70,7 @@ OTHER_NAMES = {
 COMMITS_FORMAT = (
     "### Commits\n| Hash | Subject | Author |\n| --- | --- | --- |{commits}\n\n"
 )
-COMMIT_FORMAT = "\n| **[{short}](https://github.com/ublue-os/bazzite/commit/{hash})** | {subject} | {author} |"
+COMMIT_FORMAT = "\n| **[{short}](https://github.com/{repo}/commit/{hash})** | {subject} | {author} |"
 
 CHANGELOG_TITLE = "{tag}: {pretty}"
 CHANGELOG_FORMAT = """\
@@ -361,7 +381,7 @@ def calculate_changes(pkgs: list[str], prev: dict[str, str], curr: dict[str, str
 
 
 def get_commits(prev_manifests, manifests):
-    """Fetch commits from upstream bazzite repository using revision hashes from image labels."""
+    """Fetch commits using revision hashes from image labels."""
     try:
         start = next(iter(prev_manifests.values()))["Labels"][
             "org.opencontainers.image.revision"
@@ -371,7 +391,7 @@ def get_commits(prev_manifests, manifests):
         ]
 
         # Use GitHub API to compare commits
-        api_url = f"https://api.github.com/repos/ublue-os/bazzite/compare/{start}...{finish}"
+        api_url = f"https://api.github.com/repos/{UPSTREAM_REPO}/compare/{start}...{finish}"
         
         response = subprocess.run(
             ["curl", "-s", "-H", "Accept: application/vnd.github+json", api_url],
@@ -396,7 +416,8 @@ def get_commits(prev_manifests, manifests):
                 continue
 
             out += (
-                COMMIT_FORMAT.replace("{short}", short)
+                COMMIT_FORMAT.replace("{repo}", UPSTREAM_REPO)
+                .replace("{short}", short)
                 .replace("{subject}", subject)
                 .replace("{hash}", sha)
                 .replace("{author}", author)
@@ -554,13 +575,13 @@ def main():
     )
 
     print(f"Changelog:\n# {title}\n{changelog}")
-    print(f'\nOutput:\nTITLE="{title}"\nTAG={curr}')
+    print(f'\nOutput:\nTITLE="{title}"\nTAG="{curr}"')
 
     with open(args.changelog, "w") as f:
         f.write(changelog)
 
     with open(args.output, "w") as f:
-        f.write(f'TITLE="{title}"\nTAG={curr}\n')
+        f.write(f'TITLE="{title}"\nTAG="{curr}"\n')
 
 
 if __name__ == "__main__":

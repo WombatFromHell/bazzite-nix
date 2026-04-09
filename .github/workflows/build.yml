@@ -98,8 +98,6 @@ jobs:
       # Centralise the base image ref so all steps reference it identically
       BASE_IMG: >-
         ${{ needs.check_and_aggregate.outputs.registry }}/${{ needs.check_and_aggregate.outputs.repo }}${{ matrix.variant_data.suffix }}
-      MAX_ATTEMPTS: 3
-      RETRY_DELAY: 15
 
     steps:
       - name: Checkout

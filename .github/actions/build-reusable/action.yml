@@ -51,97 +51,48 @@ runs:
     - name: Build image
       shell: bash
       run: |
-        set -euo pipefail
-        sudo podman build \
-          --tag localhost/raw-img \
-          --build-arg BASE_IMAGE="${{ inputs.base_image }}" \
-          --build-arg BUILD_SCRIPT="${{ inputs.build_script }}" \
-          --build-arg CANONICAL_TAG="${{ inputs.canonical_tag }}" \
-          --build-arg VARIANT="${{ inputs.variant }}" \
-          --file ./Containerfile .
+        source "${{ github.action_path }}/helpers.sh"
+        build_image \
+          "${{ inputs.base_image }}" \
+          "${{ inputs.build_script }}" \
+          "${{ inputs.canonical_tag }}" \
+          "${{ inputs.variant }}" \
+          "./Containerfile"
 
     - name: Assemble image labels
       id: labels
       shell: bash
       run: |
-        set -euo pipefail
-        KERNEL_VERSION=$(sudo podman run --rm localhost/raw-img \
-          cat /usr/share/ublue-os/kernel-version)
-        echo "kernel_version=${KERNEL_VERSION}" >> "$GITHUB_OUTPUT"
+        source "${{ github.action_path }}/helpers.sh"
+        extract_image_info >> "$GITHUB_OUTPUT"
+      # Outputs: kernel_version, manifest_packages, manifest
 
-        RECHUNK_INFO=$(sudo podman run --rm localhost/raw-img \
-          cat /usr/share/ublue-os/manifest.json 2>/dev/null) || {
-          echo "::error::/usr/share/ublue-os/manifest.json not found in image"
-          exit 1
-        }
-
-        # Validate the manifest contains a valid {"packages": {...}} object
-        PACKAGES_COUNT=$(echo "$RECHUNK_INFO" | jq -r '.packages | if type == "object" then length else empty end' 2>/dev/null) || {
-          echo "::error::/usr/share/ublue-os/manifest.json does not contain a valid {\"packages\": {...}} object"
-          exit 1
-        }
-        if [ -z "$PACKAGES_COUNT" ] || [ "$PACKAGES_COUNT" -eq 0 ]; then
-          echo "::error::/usr/share/ublue-os/manifest.json contains no packages (count=$PACKAGES_COUNT)"
-          exit 1
-        fi
-        echo "manifest_packages=$PACKAGES_COUNT" >> "$GITHUB_OUTPUT"
-
-        LABELS=(
-          "org.opencontainers.image.created=${{ inputs.date }}"
-          "org.opencontainers.image.description=${{ inputs.image_desc }}"
-          "org.opencontainers.image.documentation=https://raw.githubusercontent.com/${{ inputs.repository_owner }}/${{ inputs.repository_name }}/refs/heads/main/README.md"
-          "org.opencontainers.image.source=https://github.com/${{ inputs.repository_owner }}/${{ inputs.repository_name }}/blob/main/Containerfile"
-          "org.opencontainers.image.title=${{ inputs.variant }}"
-          "org.opencontainers.image.url=https://github.com/${{ inputs.repository_owner }}/${{ inputs.repository_name }}"
-          "org.opencontainers.image.vendor=${{ inputs.repository_owner }}"
-          "org.opencontainers.image.version=${{ inputs.parent_version }}"
-          "org.opencontainers.image.kernel-version=${KERNEL_VERSION}"
-          "containers.bootc=1"
-          "ostree.rechunk.info=${RECHUNK_INFO}"
-        )
-        printf '%s\n' "${LABELS[@]}" > "${RUNNER_TEMP}/labels.txt"
-        echo "labels_file=${RUNNER_TEMP}/labels.txt" >> "$GITHUB_OUTPUT"
+    - name: Write labels file
+      id: write_labels
+      shell: bash
+      run: |
+        source "${{ github.action_path }}/helpers.sh"
+        assemble_labels \
+          "${{ inputs.date }}" \
+          "${{ inputs.image_desc }}" \
+          "${{ inputs.variant }}" \
+          "${{ inputs.parent_version }}" \
+          "${{ inputs.repository_owner }}" \
+          "${{ inputs.repository_name }}" \
+          "${{ steps.labels.outputs.kernel_version }}" \
+          "${{ steps.labels.outputs.manifest }}" \
+          "${{ runner.temp }}/labels.txt"
+        echo "labels_file=${{ runner.temp }}/labels.txt" >> "$GITHUB_OUTPUT"
 
     - name: Rechunk image
       shell: bash
       run: |
-        set -euo pipefail
-        LABEL_ARGS=()
-        while IFS= read -r line; do
-          [ -n "$line" ] && LABEL_ARGS+=(--label "$line")
-        done < "${{ steps.labels.outputs.labels_file }}"
-
-        # Initialize OCI layout on host (shared into container via the volume)
-        sudo mkdir -p /var/lib/containers/oci
-        echo '{"imageLayoutVersion":"1.0.0"}' | sudo tee /var/lib/containers/oci/oci-layout > /dev/null
-        echo '{"schemaVersion":2,"manifests":[]}' | sudo tee /var/lib/containers/oci/index.json > /dev/null
-
-        sudo podman run --rm --privileged \
-          --volume /var/lib/containers:/var/lib/containers \
-          quay.io/centos-bootc/centos-bootc:stream10 \
-          rpm-ostree compose build-chunked-oci \
-          --bootc --max-layers 128 --format-version 2 \
-          --from localhost/raw-img \
-          --output oci:/var/lib/containers/oci:latest \
-          "${LABEL_ARGS[@]}"
-
-        sudo podman image exists localhost/raw-img && \
-          sudo podman rmi localhost/raw-img
+        source "${{ github.action_path }}/helpers.sh"
+        rechunk_image "${{ steps.write_labels.outputs.labels_file }}"
 
     - name: Extract final image ref
       id: final_ref
       shell: bash
       run: |
-        set -euo pipefail
-        SOURCE_REF="oci:/var/lib/containers/oci:latest"
-        sudo skopeo inspect --raw "$SOURCE_REF" > /dev/null || \
-          { echo "::error::Expected OCI layout ${SOURCE_REF} not found after rechunk"; exit 1; }
-        FULL_DIGEST=$(sudo skopeo inspect --raw "$SOURCE_REF" | jq -r '.config.digest // empty')
-        # Fall back to manifest digest if config digest unavailable
-        if [ -z "$FULL_DIGEST" ]; then
-          FULL_DIGEST=$(sudo sha256sum /var/lib/containers/oci/index.json | awk '{print "sha256:"$1}')
-        fi
-        SHORT_DIGEST="${FULL_DIGEST#sha256:}"
-        echo "source_ref=$SOURCE_REF"         >> "$GITHUB_OUTPUT"
-        echo "full_build_digest=$FULL_DIGEST" >> "$GITHUB_OUTPUT"
-        echo "build_digest=$SHORT_DIGEST"     >> "$GITHUB_OUTPUT"
+        source "${{ github.action_path }}/helpers.sh"
+        extract_final_ref >> "$GITHUB_OUTPUT"
