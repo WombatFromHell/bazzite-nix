@@ -74,7 +74,15 @@ compute_canonical_tag() {
   local parent_version="$1"
   local prefix="$2"
   local force_build="$3"
-  local canonical="$parent_version"
+
+  # Strip branch prefix (e.g., "testing-") to get pure version number
+  local canonical
+  if [[ "$parent_version" =~ ^[a-zA-Z]+-([0-9].*)$ ]]; then
+    canonical="${BASH_REMATCH[1]}"
+  else
+    canonical="$parent_version"
+  fi
+
   local collision_detected="false"
 
   if [[ "$force_build" != "true" ]]; then

@@ -55,7 +55,7 @@ run_with_retry() {
     set +e
     if [[ -n "$stdin_data" ]]; then
       if $stream; then
-        printf '%s' "$stdin_data" | "${cmd[@]}" 2>&1 | tee "$tmpfile"
+        printf '%s' "$stdin_data" | "${cmd[@]}" 2>&1 | tee /dev/stderr >"$tmpfile"
         exit_code=${PIPESTATUS[1]}
       else
         printf '%s' "$stdin_data" | "${cmd[@]}" >"$tmpfile" 2>&1
@@ -63,7 +63,7 @@ run_with_retry() {
       fi
     else
       if $stream; then
-        "${cmd[@]}" 2>&1 | tee "$tmpfile"
+        "${cmd[@]}" 2>&1 | tee /dev/stderr >"$tmpfile"
         exit_code=${PIPESTATUS[0]}
       else
         "${cmd[@]}" >"$tmpfile" 2>&1
