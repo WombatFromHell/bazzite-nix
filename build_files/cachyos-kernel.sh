@@ -25,9 +25,4 @@ dnf5 -y copr enable bieszczaders/kernel-cachyos &&
     kernel-cachyos-devel-matched \
     kernel-cachyos-devel || exit 1
 
-export KERNEL_VERSION
-KERNEL_VERSION=$(rpm -qa --queryformat '%{VERSION}-%{RELEASE}.%{ARCH}' kernel-cachyos-core)
-
-source ./extract-kver.sh
-
 source ./dracut-kernel-fix.sh

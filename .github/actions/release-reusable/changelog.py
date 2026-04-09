@@ -7,11 +7,26 @@ from collections import defaultdict
 from pathlib import Path
 
 REGISTRY = "docker://ghcr.io/wombatfromhell/"
+DEFAULT_VARIANTS_PATH = Path(__file__).parent.parent.parent / "variants.json"
 
 RETRIES = 3
 RETRY_WAIT = 5
 FEDORA_PATTERN = re.compile(r"(?<=[-0-9a-z])\.fc\d{2}(?![0-9])")
 STABLE_START_PATTERN = re.compile(r"\d+\.\d{8}(?:\.\d+)?$")
+
+
+def _compute_images_from_variants() -> list[str]:
+    """Compute the IMAGES list from variants.json dynamically."""
+    try:
+        with open(DEFAULT_VARIANTS_PATH) as f:
+            data = json.load(f)
+        return [f"bazzite-nix{v.get('suffix', '')}" for v in data.get("variants", [])]
+    except Exception:
+        return []
+
+
+# Full set of image variants derived from variants.json
+IMAGES = _compute_images_from_variants()
 
 
 def other_start_pattern(target: str) -> re.Pattern:
@@ -82,13 +97,19 @@ BLACKLIST_VERSIONS = [
 PKG_ALIAS = {}
 
 
-def load_variants(variants_config: str | None) -> list[dict[str, Any]]:
+def load_variants(variants_config: str | None = None) -> list[dict[str, Any]]:
     """Load variant configuration from variants.json file."""
     if not variants_config:
-        # Fallback to default images if no config provided
+        # Try default path first
+        if DEFAULT_VARIANTS_PATH.exists():
+            with open(DEFAULT_VARIANTS_PATH) as f:
+                data = json.load(f)
+            variants = data.get("variants", [])
+            return [v for v in variants if not v.get("disabled", False)]
+        # Fallback to default images if no config found
         return [
             {"name": "bazzite-nix", "suffix": ""},
-            {"name": "bazzite-nix-nvidia-open", "suffix": ""},
+            {"name": "bazzite-nix-nvidia-open", "suffix": "-nvidia-open"},
         ]
 
     config_path = Path(variants_config)
@@ -103,11 +124,15 @@ def load_variants(variants_config: str | None) -> list[dict[str, Any]]:
     return [v for v in variants if not v.get("disabled", False)]
 
 
-def get_images(variants: list[dict[str, Any]]):
+def get_images(variants: list[dict[str, Any]] | None = None):
     """Generate image names from variants config.
 
-    Yields tuples of (image_name, base_type, desktop_environment)
+    Yields tuples of (image_name, base_type, desktop_environment).
+    If no variants provided, loads from default variants.json.
     """
+    if variants is None:
+        variants = load_variants()
+
     for variant in variants:
         name = variant["name"]
         suffix = variant.get("suffix", "")
@@ -185,16 +210,32 @@ def get_packages(manifests: dict[str, Any]):
     packages = {}
     for img, manifest in manifests.items():
         try:
-            # Try newer ostree.rechunk.info label first, then fallback to dev.hhd.rechunk.info
-            rechunk_info = manifest["Labels"].get("ostree.rechunk.info") or manifest[
-                "Labels"
-            ].get("dev.hhd.rechunk.info")
-            if rechunk_info:
-                packages[img] = json.loads(rechunk_info)["packages"]
-            else:
+            labels = manifest.get("Labels", {})
+            if not labels:
+                print(f"Warning: No Labels in manifest for {img}")
                 packages[img] = {}
+                continue
+
+            # Try newer ostree.rechunk.info label first, then fallback to dev.hhd.rechunk.info
+            rechunk_info = labels.get("ostree.rechunk.info") or labels.get("dev.hhd.rechunk.info")
+            if not rechunk_info:
+                available = list(labels.keys())
+                print(f"Warning: No rechunk info label for {img}. Available labels: {available}")
+                packages[img] = {}
+                continue
+
+            data = json.loads(rechunk_info)
+            if "packages" not in data:
+                print(f"Warning: No 'packages' key in rechunk info for {img}. Keys: {list(data.keys())}")
+                packages[img] = {}
+                continue
+
+            packages[img] = data["packages"]
+        except json.JSONDecodeError as e:
+            print(f"Failed to parse rechunk info JSON for {img}: {e}")
+            packages[img] = {}
         except Exception as e:
-            print(f"Failed to get packages for {img}:\n{e}")
+            print(f"Failed to get packages for {img}: {type(e).__name__}: {e}")
             packages[img] = {}
     return packages
 
@@ -207,8 +248,10 @@ def is_nvidia(img: str, lts: bool):
 
 
 def get_package_groups(
-    prev: dict[str, Any], manifests: dict[str, Any], variants: list[dict[str, Any]]
+    prev: dict[str, Any], manifests: dict[str, Any], variants: list[dict[str, Any]] | None = None
 ):
+    if variants is None:
+        variants = load_variants()
     common = set()
     others = {k: set() for k in OTHER_NAMES.keys()}
 

@@ -68,6 +68,24 @@ runs:
         KERNEL_VERSION=$(sudo podman run --rm localhost/raw-img \
           cat /usr/share/ublue-os/kernel-version)
         echo "kernel_version=${KERNEL_VERSION}" >> "$GITHUB_OUTPUT"
+
+        RECHUNK_INFO=$(sudo podman run --rm localhost/raw-img \
+          cat /usr/share/ublue-os/manifest.json 2>/dev/null) || {
+          echo "::error::/usr/share/ublue-os/manifest.json not found in image"
+          exit 1
+        }
+
+        # Validate the manifest contains a valid {"packages": {...}} object
+        PACKAGES_COUNT=$(echo "$RECHUNK_INFO" | jq -r '.packages | if type == "object" then length else empty end' 2>/dev/null) || {
+          echo "::error::/usr/share/ublue-os/manifest.json does not contain a valid {\"packages\": {...}} object"
+          exit 1
+        }
+        if [ -z "$PACKAGES_COUNT" ] || [ "$PACKAGES_COUNT" -eq 0 ]; then
+          echo "::error::/usr/share/ublue-os/manifest.json contains no packages (count=$PACKAGES_COUNT)"
+          exit 1
+        fi
+        echo "manifest_packages=$PACKAGES_COUNT" >> "$GITHUB_OUTPUT"
+
         LABELS=(
           "org.opencontainers.image.created=${{ inputs.date }}"
           "org.opencontainers.image.description=${{ inputs.image_desc }}"
@@ -79,6 +97,7 @@ runs:
           "org.opencontainers.image.version=${{ inputs.parent_version }}"
           "org.opencontainers.image.kernel-version=${KERNEL_VERSION}"
           "containers.bootc=1"
+          "ostree.rechunk.info=${RECHUNK_INFO}"
         )
         printf '%s\n' "${LABELS[@]}" > "${RUNNER_TEMP}/labels.txt"
         echo "labels_file=${RUNNER_TEMP}/labels.txt" >> "$GITHUB_OUTPUT"

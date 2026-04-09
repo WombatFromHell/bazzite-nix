@@ -6,4 +6,5 @@ cd /ctx || exit 1
 source ./init.sh
 source ./upstream-kernel.sh
 source ./extras.sh
+source ./extract-info.sh
 source ./finalize.sh

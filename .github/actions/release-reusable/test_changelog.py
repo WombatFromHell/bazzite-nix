@@ -26,8 +26,14 @@ from changelog import (
     PATTERN_REMOVE,
     PATTERN_PKGREL_CHANGED,
     PATTERN_PKGREL,
-    IMAGES,
+    load_variants,
 )
+
+
+# Compute IMAGES from the actual variants.json (only enabled variants)
+# This ensures tests always use the single source of truth
+_VARIANTS = load_variants()
+IMAGES = [f"bazzite-nix{v.get('suffix', '')}" for v in _VARIANTS]
 
 
 # =============================================================================
@@ -120,23 +126,22 @@ class TestGetImages:
     """Tests for get_images generator that categorizes images."""
 
     @pytest.mark.parametrize(
-        "image,expected_base,expected_de",
+        "variants,image,expected_base,expected_de",
         [
-            ("bazzite", "desktop", "kde"),
-            ("bazzite-gnome", "desktop", "gnome"),
-            ("bazzite-deck", "deck", "kde"),
-            ("bazzite-deck-gnome", "deck", "gnome"),
-            ("bazzite-deck-nvidia", "deck", "kde"),
-            ("bazzite-deck-nvidia-gnome", "deck", "gnome"),
-            ("bazzite-nvidia", "desktop", "kde"),
-            ("bazzite-gnome-nvidia", "desktop", "gnome"),
-            ("bazzite-nvidia-open", "desktop", "kde"),
-            ("bazzite-gnome-nvidia-open", "desktop", "gnome"),
+            pytest.param({"name": "testing", "suffix": ""}, "bazzite-nix", "desktop", "kde", id="bazzite-nix"),
+            pytest.param({"name": "testing", "suffix": "-gnome"}, "bazzite-nix-gnome", "desktop", "gnome", id="bazzite-nix-gnome"),
+            pytest.param({"name": "deck", "suffix": "-deck"}, "bazzite-nix-deck", "deck", "kde", id="bazzite-nix-deck"),
+            pytest.param({"name": "deck-gnome", "suffix": "-deck-gnome"}, "bazzite-nix-deck-gnome", "deck", "gnome", id="bazzite-nix-deck-gnome"),
+            pytest.param({"name": "deck-nvidia", "suffix": "-deck-nvidia"}, "bazzite-nix-deck-nvidia", "deck", "kde", id="bazzite-nix-deck-nvidia"),
+            pytest.param({"name": "deck-nvidia-gnome", "suffix": "-deck-nvidia-gnome"}, "bazzite-nix-deck-nvidia-gnome", "deck", "gnome", id="bazzite-nix-deck-nvidia-gnome"),
+            pytest.param({"name": "nvidia", "suffix": "-nvidia"}, "bazzite-nix-nvidia", "desktop", "kde", id="bazzite-nix-nvidia"),
+            pytest.param({"name": "gnome-nvidia", "suffix": "-gnome-nvidia"}, "bazzite-nix-gnome-nvidia", "desktop", "gnome", id="bazzite-nix-gnome-nvidia"),
+            pytest.param({"name": "nvidia-open", "suffix": "-nvidia-open"}, "bazzite-nix-nvidia-open", "desktop", "kde", id="bazzite-nix-nvidia-open"),
+            pytest.param({"name": "gnome-nvidia-open", "suffix": "-gnome-nvidia-open"}, "bazzite-nix-gnome-nvidia-open", "desktop", "gnome", id="bazzite-nix-gnome-nvidia-open"),
         ],
-        ids=lambda x: x[0],
     )
-    def test_image_categorization(self, image, expected_base, expected_de):
-        results = {img: (base, de) for img, base, de in get_images()}
+    def test_image_categorization(self, variants, image, expected_base, expected_de):
+        results = {img: (base, de) for img, base, de in get_images([variants])}
         base, de = results[image]
         assert base == expected_base, (
             f"Image '{image}' should have base '{expected_base}', got '{base}'"
@@ -145,16 +150,16 @@ class TestGetImages:
             f"Image '{image}' should have de '{expected_de}', got '{de}'"
         )
 
-    def test_yields_all_defined_images(self):
+    def test_uses_variants_json_by_default(self):
+        """get_images() with no args should use variants.json (disabled variants filtered)."""
         results = list(get_images())
-        assert len(results) == len(IMAGES), (
-            f"Expected {len(IMAGES)} images, got {len(results)}"
+        expected = list(get_images(_VARIANTS))
+        assert len(results) == len(expected), (
+            f"get_images() should yield {len(expected)} images from variants.json, got {len(results)}"
         )
-        yielded_images = [img for img, _, _ in results]
-        assert yielded_images == IMAGES
 
     def test_yields_correct_tuple_structure(self):
-        for img, base, de in get_images():
+        for img, base, de in get_images(_VARIANTS):
             assert isinstance(img, str), "Image name should be string"
             assert isinstance(base, str), "Base should be string"
             assert isinstance(de, str), "DE should be string"
@@ -464,19 +469,28 @@ class TestGetTags:
         assert "beta" not in curr
 
     def test_only_includes_tags_present_in_all_images(self):
+        """Tags not present in all images should be filtered out."""
+        # Create test variants with multiple images for tag filtering
+        test_variants = [
+            {"name": "a", "suffix": ""},
+            {"name": "b", "suffix": "-b"},
+        ]
+        test_images = ["bazzite-nix", "bazzite-nix-b"]
+
         all_tags = [
             "stable-1.20240101",
             "stable-2.20240102",
             "stable-3.20240103",
             "stable-4.20240104",
         ]
-        # First image has all tags, second is missing one
-        manifests = {}
-        manifests["bazzite"] = make_manifest_with_tags(all_tags)
-        for img in IMAGES[1:]:
-            manifests[img] = make_manifest_with_tags(all_tags[:3])  # Missing stable-4
+        # First image has all tags, second is missing the last one
+        manifests = {
+            test_images[0]: make_manifest_with_tags(all_tags),
+            test_images[1]: make_manifest_with_tags(all_tags[:3]),
+        }
         prev, curr = get_tags("stable", manifests)
-        # After filtering: stable-1, stable-2, stable-3 (string sorted)
+        # After filtering: only stable-1, stable-2, stable-3 remain
+        # String sorted: 1.20240101, 2.20240102, 3.20240103
         assert prev == "stable-2.20240102"
         assert curr == "stable-3.20240103"
 
@@ -509,21 +523,38 @@ class TestGetTags:
 class TestGetPackageGroups:
     """Tests for get_package_groups function that categorizes packages."""
 
-    def test_finds_packages_common_to_all_images(self):
+    @pytest.fixture
+    def multi_image_variants(self):
+        """Variants with multiple images covering different categories."""
+        return [
+            {"name": "testing", "suffix": ""},
+            {"name": "gnome", "suffix": "-gnome"},
+            {"name": "deck", "suffix": "-deck"},
+            {"name": "deck-gnome", "suffix": "-deck-gnome"},
+            {"name": "nvidia", "suffix": "-nvidia"},
+            {"name": "nvidia-open", "suffix": "-nvidia-open"},
+        ]
+
+    @pytest.fixture
+    def multi_image_names(self, multi_image_variants):
+        """Image names derived from multi_image_variants."""
+        return [f"bazzite-nix{v.get('suffix', '')}" for v in multi_image_variants]
+
+    def test_finds_packages_common_to_all_images(self, multi_image_variants, multi_image_names):
         common_pkg = {"common-pkg": "1.0"}
         manifests = {
             img: make_manifest_with_packages({**common_pkg, f"{img}-pkg": "2.0"})
-            for img in IMAGES
+            for img in multi_image_names
         }
-        common, others = get_package_groups({}, manifests)
+        common, others = get_package_groups({}, manifests, multi_image_variants)
         assert "common-pkg" in common
 
-    def test_excludes_packages_missing_from_any_image(self):
+    def test_excludes_packages_missing_from_any_image(self, multi_image_variants, multi_image_names):
         manifests = {}
-        manifests["bazzite"] = make_manifest_with_packages({"only-in-bazzite": "1.0"})
-        for img in IMAGES[1:]:
+        manifests[multi_image_names[0]] = make_manifest_with_packages({"only-in-bazzite": "1.0"})
+        for img in multi_image_names[1:]:
             manifests[img] = make_manifest_with_packages({})
-        common, others = get_package_groups({}, manifests)
+        common, others = get_package_groups({}, manifests, multi_image_variants)
         assert "only-in-bazzite" not in common
 
     @pytest.mark.parametrize(
@@ -536,40 +567,40 @@ class TestGetPackageGroups:
         ],
         ids=["deck", "desktop", "kde", "nvidia"],
     )
-    def test_categorizes_category_specific_packages(self, category, filter_fn):
+    def test_categorizes_category_specific_packages(self, category, filter_fn, multi_image_variants, multi_image_names):
         category_pkg = {f"{category}-only-pkg": "1.0"}
         manifests = {
             img: make_manifest_with_packages(category_pkg if filter_fn(img) else {})
-            for img in IMAGES
+            for img in multi_image_names
         }
-        common, others = get_package_groups({}, manifests)
+        common, others = get_package_groups({}, manifests, multi_image_variants)
         assert f"{category}-only-pkg" in others[category]
 
-    def test_common_packages_not_in_other_categories(self):
+    def test_common_packages_not_in_other_categories(self, multi_image_variants, multi_image_names):
         """Packages common to all images should not appear in other categories."""
         common_pkg = {"truly-common": "1.0"}
         manifests = {
             img: make_manifest_with_packages({**common_pkg, f"{img}-specific": "2.0"})
-            for img in IMAGES
+            for img in multi_image_names
         }
-        common, others = get_package_groups({}, manifests)
+        common, others = get_package_groups({}, manifests, multi_image_variants)
         assert "truly-common" in common
         for category_pkgs in others.values():
             assert "truly-common" not in category_pkgs
 
-    def test_returns_sorted_lists(self):
+    def test_returns_sorted_lists(self, multi_image_variants, multi_image_names):
         manifests = {
             img: make_manifest_with_packages(
                 {"z-pkg": "1.0", "a-pkg": "2.0", "m-pkg": "3.0"}
             )
-            for img in IMAGES
+            for img in multi_image_names
         }
-        common, others = get_package_groups({}, manifests)
+        common, others = get_package_groups({}, manifests, multi_image_variants)
         assert common == ["a-pkg", "m-pkg", "z-pkg"]
 
-    def test_handles_empty_package_sets(self):
-        manifests = {img: make_manifest_with_packages({}) for img in IMAGES}
-        common, others = get_package_groups({}, manifests)
+    def test_handles_empty_package_sets(self, multi_image_variants, multi_image_names):
+        manifests = {img: make_manifest_with_packages({}) for img in multi_image_names}
+        common, others = get_package_groups({}, manifests, multi_image_variants)
         assert common == []
         assert all(v == [] for v in others.values())
 
