@@ -48,6 +48,29 @@ outputs:
 runs:
   using: composite
   steps:
+    - name: Show disk space
+      shell: bash
+      run: sudo df -h
+
+    - name: Check if /mnt is there
+      id: check_mnt
+      shell: bash
+      run: |
+        if sudo mountpoint /mnt; then
+          echo "mnt_is_there=1" >> "$GITHUB_OUTPUT"
+        else
+          echo "mnt_is_there=0" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Mount BTRFS for podman storage
+      if: ${{ steps.check_mnt.outputs.mnt_is_there == '1' }}
+      uses: ublue-os/container-storage-action@main
+      with:
+        target-dir: /var/lib/containers
+
+    - name: Free Disk Space (Ubuntu)
+      uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # v1.3.1
+
     - name: Build image
       shell: bash
       run: |
