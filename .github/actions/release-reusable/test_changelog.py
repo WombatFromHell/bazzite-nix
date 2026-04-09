@@ -281,10 +281,10 @@ class TestGetPackages:
         result = get_packages(manifests)
         assert result["bazzite"] == {}
 
-    def test_returns_empty_dict_for_invalid_json(self):
+    def test_raises_exception_for_invalid_json(self):
         manifests = {"bazzite": {"Labels": {"ostree.rechunk.info": "not valid json"}}}
-        result = get_packages(manifests)
-        assert result["bazzite"] == {}
+        with pytest.raises(json.JSONDecodeError):
+            get_packages(manifests)
 
     def test_returns_empty_dict_for_missing_packages_key(self):
         manifests = {

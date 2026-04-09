@@ -95,16 +95,16 @@ runs:
           "${{ inputs.variant }}" \
           "./Containerfile"
 
-    - name: Assemble image labels
+    - name: Extract image info
       id: labels
       shell: bash
       run: |
         source "${{ github.action_path }}/helpers.sh"
-        extract_image_info >> "$GITHUB_OUTPUT"
-      # Outputs: kernel_version, manifest_packages, manifest
+        extract_image_info "${{ runner.temp }}/manifest.json" >> "$GITHUB_OUTPUT"
+      # Outputs: kernel_version, manifest_packages
 
-    - name: Write labels file
-      id: write_labels
+    - name: Assemble image labels
+      id: assemble_labels
       shell: bash
       run: |
         source "${{ github.action_path }}/helpers.sh"
@@ -116,7 +116,7 @@ runs:
           "${{ inputs.repository_owner }}" \
           "${{ inputs.repository_name }}" \
           "${{ steps.labels.outputs.kernel_version }}" \
-          "${{ steps.labels.outputs.manifest }}" \
+          "${{ runner.temp }}/manifest.json" \
           "${{ runner.temp }}/labels.txt"
         echo "labels_file=${{ runner.temp }}/labels.txt" >> "$GITHUB_OUTPUT"
 

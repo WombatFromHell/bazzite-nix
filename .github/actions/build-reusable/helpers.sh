@@ -24,13 +24,15 @@ build_image() {
 }
 
 # ── extract kernel and manifest info ────────────────────────────────────────
-# Usage: extract_image_info
+# Usage: extract_image_info [manifest_output_file]
+# If manifest_output_file is provided, writes manifest JSON to that file.
 # Prints to stdout for $GITHUB_OUTPUT:
 #   kernel_version=<version>
 #   manifest_packages=<count>
-#   manifest=<json>
 
 extract_image_info() {
+  local manifest_output_file="${1:-}"
+
   local kernel_version
   kernel_version=$(sudo podman run --rm localhost/raw-img \
     cat /usr/share/ublue-os/kernel-version)
@@ -54,16 +56,18 @@ extract_image_info() {
     exit 1
   fi
   echo "manifest_packages=${packages_count}"
-  # Use heredoc syntax for multiline-safe $GITHUB_OUTPUT
-  echo "manifest<<MANIFEST_EOF"
-  echo "$manifest"
-  echo "MANIFEST_EOF"
+
+  # Write manifest to file if path provided (avoids shell quoting issues)
+  if [ -n "$manifest_output_file" ]; then
+    printf '%s' "$manifest" >"$manifest_output_file"
+  fi
 }
 
 # ── assemble labels file ────────────────────────────────────────────────────
 # Usage: assemble_labels <date> <image_desc> <variant> <parent_version> \
-#                        <repo_owner> <repo_name> <kernel_version> <manifest> <output_file>
-# Writes labels to the specified output file.
+#                        <repo_owner> <repo_name> <kernel_version> \
+#                        <manifest_file_path> <output_file>
+# Reads manifest JSON from manifest_file_path and writes labels to output_file.
 
 assemble_labels() {
   local date="$1"
@@ -73,8 +77,15 @@ assemble_labels() {
   local repo_owner="$5"
   local repo_name="$6"
   local kernel_version="$7"
-  local manifest="$8"
+  local manifest_file="$8"
   local output_file="$9"
+
+  # Read manifest from file to avoid shell quoting issues with JSON
+  local manifest
+  manifest=$(cat "$manifest_file") || {
+    echo "::error::Failed to read manifest file: $manifest_file"
+    exit 1
+  }
 
   local labels=(
     "org.opencontainers.image.created=${date}"

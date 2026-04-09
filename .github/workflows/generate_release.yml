@@ -23,7 +23,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      - name: Resolve variants to process
+      - name: Resolve variants
         id: resolve
         run: |
           set -euo pipefail
@@ -32,67 +32,42 @@ jobs:
           if [ -z "$INPUT" ]; then
             # Blank input: get all enabled variants from variants.json
             ENABLED=$(jq -r '.variants[] | select(.disabled != true) | .name' .github/variants.json | paste -sd ',' -)
-            echo "ℹ️ No variants specified — processing all enabled: $ENABLED"
           else
-            # Parse and validate comma-delimited input
+            # Parse comma-delimited input
             ENABLED=""
             IFS=',' read -ra VARIANTS <<< "$INPUT"
             for v in "${VARIANTS[@]}"; do
-              # ✅ Trim whitespace using parameter expansion (shellcheck SC2001 fix)
-              v="${v#"${v%%[![:space:]]*}"}"  # trim leading
-              v="${v%"${v##*[![:space:]]}"}"  # trim trailing
+              v="${v#"${v%%[![:space:]]*}"}"
+              v="${v%"${v##*[![:space:]]}"}"
               [ -z "$v" ] && continue
-
-              # Check if variant exists
-              FOUND=$(jq -r --arg v "$v" '.variants[] | select(.name == $v) | .name' .github/variants.json)
-              if [ -z "$FOUND" ]; then
-                AVAILABLE=$(jq -r '.variants[].name' .github/variants.json | sort | paste -sd ', ' -)
-                echo "::error::Variant '$v' not found in variants.json. Available: $AVAILABLE"
-                exit 1
-              fi
-
-              # Check if variant is disabled
-              DISABLED=$(jq -r --arg v "$v" '.variants[] | select(.name == $v) | .disabled // false' .github/variants.json)
-              if [ "$DISABLED" = "true" ]; then
-                echo "::error::Variant '$v' is disabled in variants.json. Enable it or use a different variant."
-                exit 1
-              fi
-
               ENABLED="${ENABLED}${v},"
             done
-            # ✅ Remove trailing comma using parameter expansion (shellcheck SC2001 fix)
             ENABLED="${ENABLED%,}"
-            echo "ℹ️ Processing requested variants: $ENABLED"
           fi
 
           if [ -z "$ENABLED" ]; then
-            echo "::error::No valid enabled variants to process. Check your input or variants.json configuration."
+            echo "::error::No valid variants to process"
             exit 1
           fi
 
-          # Build JSON array properly for GITHUB_OUTPUT
+          # Build JSON array for matrix
           MATRIX_JSON=$(echo "$ENABLED" | tr ',' '\n' | while read -r v; do
-            # Trim whitespace using parameter expansion
             v="${v#"${v%%[![:space:]]*}"}"
             v="${v%"${v##*[![:space:]]}"}"
             [ -n "$v" ] && echo "$v"
           done | jq -R . | jq -sc .)
 
-          # Use heredoc syntax for safe GITHUB_OUTPUT writing
           {
             echo "matrix<<EOF"
             echo "$MATRIX_JSON"
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
-          echo "✅ Resolved matrix: $MATRIX_JSON"
+          echo "✅ Resolved variants: $MATRIX_JSON"
 
   generate-release:
     needs: resolve-variants
     runs-on: ubuntu-24.04
-    outputs:
-      registry: ${{ steps.lowercase_owner.outputs.registry }}
-      repo: ${{ env.IMAGE_NAME }}
     strategy:
       matrix:
         variant: ${{ fromJSON(needs.resolve-variants.outputs.matrix) }}
@@ -102,24 +77,14 @@ jobs:
       cancel-in-progress: false
     permissions:
       contents: write
-    env:
-      IMAGE_NAME: "${{ github.event.repository.name }}"
     steps:
-      - name: Checkout last 500 commits (for changelog generation)
+      - name: Checkout last 500 commits
         uses: actions/checkout@v6
         with:
           fetch-depth: 500
 
-      - name: Lowercase repository owner
-        id: lowercase_owner
-        run: |
-          echo "registry=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
-
       - name: Generate release
-        id: release
         uses: ./.github/actions/release-reusable
         with:
           variant: ${{ matrix.variant }}
           handwritten: ${{ inputs.handwritten }}
-          registry: ${{ steps.lowercase_owner.outputs.registry }}
-          repo: ${{ env.IMAGE_NAME }}

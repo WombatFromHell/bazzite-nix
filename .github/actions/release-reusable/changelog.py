@@ -244,16 +244,22 @@ def get_packages(manifests: dict[str, Any]):
                 packages[img] = {}
                 continue
 
-            data = json.loads(rechunk_info)
+            try:
+                data = json.loads(rechunk_info)
+            except json.JSONDecodeError as e:
+                print(f"::error::Invalid JSON in ostree.rechunk.info label for {img}: {e}")
+                print(f"::error::Label content (first 200 chars): {rechunk_info[:200]}")
+                raise
+
             if "packages" not in data:
                 print(f"Warning: No 'packages' key in rechunk info for {img}. Keys: {list(data.keys())}")
                 packages[img] = {}
                 continue
 
             packages[img] = data["packages"]
-        except json.JSONDecodeError as e:
-            print(f"Failed to parse rechunk info JSON for {img}: {e}")
-            packages[img] = {}
+        except json.JSONDecodeError:
+            # Re-raise JSON errors to fail the build
+            raise
         except Exception as e:
             print(f"Failed to get packages for {img}: {type(e).__name__}: {e}")
             packages[img] = {}

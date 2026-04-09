@@ -36,17 +36,23 @@ runs:
       id: defaults
       shell: bash
       run: |
-        # Set defaults if not provided by caller
+        # Set defaults if not provided by caller, enforce lowercase
+        OWNER="${GITHUB_REPOSITORY_OWNER,,}"
+
         if [ -z "${{ inputs.registry }}" ]; then
-          echo "registry=ghcr.io/${{ github.repository_owner }}" >> "$GITHUB_OUTPUT"
+          echo "registry=ghcr.io/${OWNER}" >> "$GITHUB_OUTPUT"
         else
-          echo "registry=${{ inputs.registry }}" >> "$GITHUB_OUTPUT"
+          REGISTRY="${{ inputs.registry }}"
+          echo "registry=${REGISTRY,,}" >> "$GITHUB_OUTPUT"
         fi
 
         if [ -z "${{ inputs.repo }}" ]; then
-          echo "repo=${{ github.repository }}" >> "$GITHUB_OUTPUT"
+          # Extract just the repo name (e.g. "bazzite-nix" from "owner/bazzite-nix")
+          REPO_NAME="${GITHUB_REPOSITORY#*/}"
+          echo "repo=${REPO_NAME,,}" >> "$GITHUB_OUTPUT"
         else
-          echo "repo=${{ inputs.repo }}" >> "$GITHUB_OUTPUT"
+          REPO="${{ inputs.repo }}"
+          echo "repo=${REPO,,}" >> "$GITHUB_OUTPUT"
         fi
 
     - name: Validate variant input
