@@ -39,7 +39,7 @@ load_flags() {
     [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
     # Trim whitespace and add to flags array
     flags+=("$(echo "$line" | xargs)")
-  done < "$FLAGS_CONFIG"
+  done <"$FLAGS_CONFIG"
 
   # Only output if we have flags (prevents empty line from being read by mapfile)
   [[ ${#flags[@]} -gt 0 ]] && printf '%s\n' "${flags[@]}"

@@ -432,7 +432,7 @@ set_default_web_browser() {
   # Store the previous default (overwrite to track current state before install)
   if [[ -n "$current_default" ]]; then
     mkdir -p "$(dirname "$LAST_DEFAULT_BROWSER_FILE")"
-    echo "$current_default" > "$LAST_DEFAULT_BROWSER_FILE"
+    echo "$current_default" >"$LAST_DEFAULT_BROWSER_FILE"
     log "Stored previous default browser: $current_default"
   fi
 
@@ -457,7 +457,7 @@ set_default_web_browser() {
   log "Setting default web browser to: $desktop_filename"
   if xdg-settings set default-web-browser "$desktop_filename" 2>/dev/null; then
     log "Default web browser updated successfully"
-    
+
     # Verify the change took effect
     local new_default
     new_default="$(xdg-settings get default-web-browser 2>/dev/null || echo "")"
