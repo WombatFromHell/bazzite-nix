@@ -34,14 +34,12 @@ fi
 # try to fix our downstream os-release so bootloader entries are more accurate
 VARIANT="${VARIANT:-stable}" # pick this up from our VARIANT build-arg
 # Use downstream canonical_tag if provided (handles collision suffixes like .1, .2)
-# CANONICAL_TAG already includes the branch prefix (e.g. testing-43.20260409),
-# so don't double-prefix with VARIANT.
+# CANONICAL_TAG may or may not include the variant prefix depending on build environment.
+# Detect and strip the prefix if present to avoid duplication.
 if [ -n "${CANONICAL_TAG:-}" ]; then
-  OSTREE_VERSION="${CANONICAL_TAG}"
-  sed -i "s/^PRETTY_NAME=.*/PRETTY_NAME=\"Bazzite-Nix ${OSTREE_VERSION}\"/" \
-    /usr/lib/os-release
+  OSTREE_VERSION="${CANONICAL_TAG#"${VARIANT}"-}"
 else
   OSTREE_VERSION=$(grep -oP "(?<=OSTREE_VERSION=')[^']+" /usr/lib/os-release)
-  sed -i "s/^PRETTY_NAME=.*/PRETTY_NAME=\"Bazzite-Nix ${VARIANT}-${OSTREE_VERSION}\"/" \
-    /usr/lib/os-release
 fi
+sed -i "s/^PRETTY_NAME=.*/PRETTY_NAME=\"Bazzite-Nix ${VARIANT}-${OSTREE_VERSION}\"/" \
+  /usr/lib/os-release
