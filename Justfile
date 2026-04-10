@@ -50,7 +50,8 @@ clean:
     rm -f previous.manifest.json changelog.md output.env
     rm -rf output/
     sudo rm -rf {{ oci_output_dir }}
-    sudo podman image prune --external -f
+    sudo podman image prune -f
+    sudo buildah rm --all
     just --unstable clean-vm
 
 # Clean cached VM disk images
