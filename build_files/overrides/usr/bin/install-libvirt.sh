@@ -99,8 +99,8 @@ create_container() {
   local assemble_file
   assemble_file=$(mktemp)
 
-  # Ensure cleanup on exit
-  trap 'rm -f "$assemble_file"' EXIT
+  # Ensure cleanup on function exit
+  trap 'rm -f "${assemble_file:-}"' RETURN
 
   # Prepare dynamic flags
   local additional_flags=(
