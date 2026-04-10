@@ -25,23 +25,9 @@ readonly PACKAGES=(
   "qemu-device-display-virtio-gpu"
 )
 
-#==============================================================================
-# UTILITIES
-#==============================================================================
-log() { printf "\e[1;34m>>\e[0m %s\n" "$@"; }
-err() { printf "\e[1;31m!!\e[0m %s\n" "$@" >&2; }
-
-is_inside_container() { [[ -f /var/run/.containerenv ]]; }
-
-container_exists() {
-  # grep -q is quiet, -w matches whole words (prevents matching 'libvirtbox-2')
-  distrobox list --root 2>/dev/null | grep -qw "${CONTAINER_NAME}"
-}
-
-is_exported() {
-  local desktop_file="$HOME/.local/share/applications/${CONTAINER_NAME}-virt-manager.desktop"
-  [[ -f "$desktop_file" ]]
-}
+# Source the shared helper
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/distrobox-installer.sh"
 
 #==============================================================================
 # ACTIONS
@@ -53,9 +39,17 @@ Usage: ${0##*/} [OPTIONS]
 
 Options:
   --recreate     Force recreation of the container
-  --install      Export virt-manager to host (idempotent)
-  --uninstall    Remove virt-manager export from host (idempotent)
+  --install      Install and export virt-manager to host (idempotent)
+  --uninstall    Remove virt-manager export from host (does not uninstall from container)
+  --rm           Also remove container (use with --uninstall)
   --help         Show this help message
+
+Examples:
+  ${0##*/}                   # Install virt-manager and export
+  ${0##*/} --install         # Same as above (idempotent)
+  ${0##*/} --uninstall       # Remove export from host
+  ${0##*/} --rm --uninstall  # Remove export and delete container
+  ${0##*/} --recreate        # Recreate container and reinstall
 
 Description:
   Installs QEMU with TPM passthrough support, libvirt, and virt-manager
@@ -67,40 +61,22 @@ Requirements:
 EOF
 }
 
-do_uninstall() {
-  log "Removing virt-manager export..."
-
-  # Attempt to unexport via distrobox if container exists
-  if container_exists; then
-    distrobox-enter --root "${CONTAINER_NAME}" -- distrobox-export -d -a virt-manager 2>/dev/null || true
-  fi
-
-  # Ensure local desktop file is removed
-  rm -f "$HOME/.local/share/applications/${CONTAINER_NAME}-virt-manager.desktop"
-  log "Uninstall complete."
-}
-
-do_export() {
-  log "Exporting virt-manager..."
-  if distrobox-enter --root "${CONTAINER_NAME}" -- distrobox-export -a virt-manager 2>&1; then
-    log "Export successful."
-  else
-    # Validate manually in case of benign warnings
-    if is_exported; then
-      log "Export successful (verified)."
-    else
-      err "Export failed."
-      return 1
-    fi
-  fi
-}
-
 create_container() {
   local assemble_file
   assemble_file=$(mktemp)
 
   # Ensure cleanup on function exit
   trap 'rm -f "${assemble_file:-}"' RETURN
+
+  # Remove existing container if present
+  if dbx_container_exists "$CONTAINER_NAME" "true"; then
+    dbx_log "Container '${CONTAINER_NAME}' already exists, removing..."
+    distrobox rm -f --root "${CONTAINER_NAME}" 2>/dev/null || true
+  fi
+  if podman container exists "${CONTAINER_NAME}" 2>/dev/null; then
+    dbx_log "Container '${CONTAINER_NAME}' found via podman, removing..."
+    podman rm -f "${CONTAINER_NAME}" 2>/dev/null || true
+  fi
 
   # Prepare dynamic flags
   local additional_flags=(
@@ -119,7 +95,7 @@ create_container() {
   local flags_str="${additional_flags[*]}"
   local pkgs_str="${PACKAGES[*]}"
 
-  log "Creating container configuration..."
+  dbx_log "Creating container configuration..."
   cat >"${assemble_file}" <<EOF
 [${CONTAINER_NAME}]
 image=${CONTAINER_IMAGE}
@@ -138,8 +114,22 @@ init_hooks=setenforce 0 || true;
 exported_apps="virt-manager"
 EOF
 
-  log "Assembling container..."
+  dbx_log "Assembling container..."
   distrobox assemble create --file "${assemble_file}" --replace
+}
+
+do_export() {
+  dbx_log "Exporting virt-manager..."
+  if distrobox-enter --root "${CONTAINER_NAME}" -- distrobox-export -a virt-manager 2>&1; then
+    dbx_log "Export successful."
+  else
+    if dbx_is_exported "$CONTAINER_NAME" "virt-manager"; then
+      dbx_log "Export successful (verified)."
+    else
+      dbx_err "Export failed."
+      return 1
+    fi
+  fi
 }
 
 #==============================================================================
@@ -147,69 +137,92 @@ EOF
 #==============================================================================
 
 main() {
-  # Guard: Do not run inside the container
-  if is_inside_container; then
+  if dbx_is_inside_container; then
     exit 0
   fi
 
-  local action="default"
+  # Parse arguments via helper (sets ACTION, INSTALL_TYPE, RM_CONTAINER, RECREATE)
+  local parse_result=0
+  dbx_parse_args "$@" || parse_result=$?
 
-  # Parse Arguments
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-    --recreate) action="recreate" ;;
-    --install) action="install" ;;
-    --uninstall) action="uninstall" ;;
-    --help)
-      show_help
-      exit 0
-      ;;
-    *)
-      err "Unknown argument: $1"
-      show_help
-      exit 1
-      ;;
-    esac
-    shift
-  done
+  if [[ $parse_result -eq 0 ]]; then
+    show_help
+    exit 0
+  elif [[ $parse_result -eq 1 ]]; then
+    show_help
+    exit 1
+  fi
 
-  # Dispatch Actions
-  case "$action" in
+  case "$ACTION" in
   uninstall)
-    do_uninstall
+    if [[ "$RM_CONTAINER" == "true" ]]; then
+      dbx_do_remove "$CONTAINER_NAME" "virt-manager" "true"
+    else
+      dbx_do_uninstall "$CONTAINER_NAME" "virt-manager" "true"
+    fi
     exit 0
     ;;
   install)
-    if ! container_exists; then
-      err "Container '${CONTAINER_NAME}' not found. Run without flags first."
-      exit 1
+    if [[ "$RECREATE" == "true" ]]; then
+      if dbx_container_exists "$CONTAINER_NAME" "true"; then
+        if ! dbx_confirm "This will recreate the '${CONTAINER_NAME}' container. All existing data and exports will be lost."; then
+          dbx_log "Recreation cancelled."
+          exit 0
+        fi
+      fi
+      dbx_log "Recreating container..."
+      dbx_remove_container "$CONTAINER_NAME"
+      dbx_cleanup_desktop_files "$CONTAINER_NAME"
+      create_container
+    elif dbx_container_exists "$CONTAINER_NAME" "true"; then
+      dbx_log "Container '${CONTAINER_NAME}' exists."
+      # Check if virt-manager is actually installed
+      if ! distrobox-enter --root "${CONTAINER_NAME}" -- which virt-manager &>/dev/null; then
+        dbx_log "virt-manager not found in container, reinstalling..."
+        create_container
+      fi
+    else
+      dbx_log "Container not found. Creating..."
+      create_container
     fi
-    if is_exported; then
-      log "virt-manager already exported."
+    if dbx_is_exported "$CONTAINER_NAME" "virt-manager"; then
+      dbx_log "virt-manager already exported."
     else
       do_export
     fi
-    exit 0
+    dbx_log "Installation complete."
     ;;
   recreate)
-    log "Recreating container..."
-    # distrobox assemble --replace handles removal, but we can be explicit if needed
+    if dbx_container_exists "$CONTAINER_NAME" "true"; then
+      if ! dbx_confirm "This will recreate the '${CONTAINER_NAME}' container. All existing data and exports will be lost."; then
+        dbx_log "Recreation cancelled."
+        exit 0
+      fi
+    fi
+    dbx_log "Recreating container..."
+    dbx_remove_container "$CONTAINER_NAME"
+    dbx_cleanup_desktop_files "$CONTAINER_NAME"
     create_container
     do_export
-    log "Installation complete."
+    dbx_log "Installation complete."
     ;;
   default)
-    if container_exists; then
-      log "Container '${CONTAINER_NAME}' exists."
-      if ! is_exported; then
-        log "Export missing. Re-exporting..."
+    if dbx_container_exists "$CONTAINER_NAME" "true"; then
+      dbx_log "Container '${CONTAINER_NAME}' exists."
+      # Check if virt-manager is actually installed
+      if ! distrobox-enter --root "${CONTAINER_NAME}" -- which virt-manager &>/dev/null; then
+        dbx_log "virt-manager not found in container, reinstalling..."
+        create_container
+      fi
+      if ! dbx_is_exported "$CONTAINER_NAME" "virt-manager"; then
+        dbx_log "Export missing. Re-exporting..."
         do_export
       fi
     else
-      log "Container not found. Creating..."
+      dbx_log "Container not found. Creating..."
       create_container
       do_export
-      log "Installation complete."
+      dbx_log "Installation complete."
     fi
     ;;
   esac

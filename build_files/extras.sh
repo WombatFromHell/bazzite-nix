@@ -47,6 +47,7 @@ cat "$OVERRIDES_ROOT"/usr/share/ublue-os/justfile.fragment \
   >>/usr/share/ublue-os/justfile
 # include a few distrobox related helpers (and .just files for ease of use)
 install -Z -m 0755 \
+  "$OVERRIDES_ROOT"/usr/bin/distrobox-installer.sh \
   "$OVERRIDES_ROOT"/usr/bin/install-brave.sh \
   "$OVERRIDES_ROOT"/usr/bin/install-handbrake.sh \
   "$OVERRIDES_ROOT"/usr/bin/install-libvirt.sh \

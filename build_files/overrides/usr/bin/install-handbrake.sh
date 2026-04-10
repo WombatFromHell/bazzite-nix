@@ -7,25 +7,9 @@ set -euo pipefail
 readonly CONTAINER_NAME="${CONTAINER_NAME:-encoderbox}"
 readonly CONTAINER_IMAGE="${CONTAINER_IMAGE:-archlinux:latest}"
 
-#==============================================================================
-# UTILITIES
-#==============================================================================
-log() { printf "\e[1;34m>>\e[0m %s\n" "$@"; }
-err() { printf "\e[1;31m!!\e[0m %s\n" "$@" >&2; }
-
-is_inside_container() { [[ -f /var/run/.containerenv ]]; }
-
-container_exists() {
-  distrobox list 2>/dev/null | grep -qw "${CONTAINER_NAME}"
-}
-
-is_exported() {
-  local desktop_file="$HOME/.local/share/applications/${CONTAINER_NAME}-ghb.desktop"
-  [[ -f "$desktop_file" ]]
-}
-
-# Shortcut for distrobox-enter commands
-dbxe() { distrobox-enter "${CONTAINER_NAME}" -- "$@"; }
+# Source the shared helper
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/distrobox-installer.sh"
 
 #==============================================================================
 # ACTIONS
@@ -37,9 +21,17 @@ Usage: ${0##*/} [OPTIONS]
 
 Options:
   --recreate     Force recreation of the container
-  --install      Export HandBrake (ghb) to host (idempotent)
-  --uninstall    Remove HandBrake export from host (idempotent)
+  --install      Install HandBrake (ghb) and export to host
+  --uninstall    Remove HandBrake export from host (does not uninstall from container)
+  --rm           Also remove container (use with --uninstall)
   --help         Show this help message
+
+Examples:
+  ${0##*/}                   # Install HandBrake and export
+  ${0##*/} --install         # Same as above (idempotent)
+  ${0##*/} --uninstall       # Remove export from host
+  ${0##*/} --rm --uninstall  # Remove export and delete container
+  ${0##*/} --recreate        # Recreate container and reinstall
 
 Description:
   Installs HandBrake with AMDGPU Pro support inside an Arch Linux
@@ -47,36 +39,11 @@ Description:
 EOF
 }
 
-do_uninstall() {
-  log "Removing HandBrake export..."
-
-  if container_exists; then
-    dbxe distrobox-export -d -a ghb 2>/dev/null || true
-  fi
-
-  rm -f "$HOME/.local/share/applications/${CONTAINER_NAME}-ghb.desktop"
-  log "Uninstall complete."
-}
-
-do_export() {
-  log "Exporting HandBrake (ghb)..."
-  if dbxe distrobox-export -a ghb 2>&1; then
-    log "Export successful."
-  else
-    if is_exported; then
-      log "Export successful (verified)."
-    else
-      err "Export failed."
-      return 1
-    fi
-  fi
-}
-
 setup_handbrake() {
-  log "Installing HandBrake inside container..."
+  dbx_log "Installing HandBrake inside container..."
 
   # Step 1: Install git, base-devel, and yay-bin from AUR
-  dbxe bash -c '
+  dbxe -- bash -c '
     sudo pacman -S --needed --noconfirm git base-devel && \
     git clone https://aur.archlinux.org/yay-bin.git /tmp/yay-bin && \
     cd /tmp/yay-bin && \
@@ -85,14 +52,9 @@ setup_handbrake() {
   '
 
   # Step 2: Install amf-amdgpu-pro and handbrake via yay
-  dbxe yay -Syu --noconfirm amf-amdgpu-pro handbrake gst-plugins-good gst-libav xdg-desktop-portal-gtk
+  dbxe -- yay -Syu --noconfirm amf-amdgpu-pro handbrake gst-plugins-good gst-libav xdg-desktop-portal-gtk
 
-  log "HandBrake installation complete."
-}
-
-create_container() {
-  log "Creating container '${CONTAINER_NAME}'..."
-  distrobox create -i "${CONTAINER_IMAGE}" --name "${CONTAINER_NAME}"
+  dbx_log "HandBrake installation complete."
 }
 
 #==============================================================================
@@ -100,71 +62,113 @@ create_container() {
 #==============================================================================
 
 main() {
-  if is_inside_container; then
+  if dbx_is_inside_container; then
     exit 0
   fi
 
-  local action="default"
+  # Parse arguments via helper (sets ACTION, INSTALL_TYPE, RM_CONTAINER, RECREATE)
+  local parse_result=0
+  dbx_parse_args "$@" || parse_result=$?
 
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-    --recreate) action="recreate" ;;
-    --install) action="install" ;;
-    --uninstall) action="uninstall" ;;
-    --help)
-      show_help
-      exit 0
-      ;;
-    *)
-      err "Unknown argument: $1"
-      show_help
-      exit 1
-      ;;
-    esac
-    shift
-  done
+  if [[ $parse_result -eq 0 ]]; then
+    show_help
+    exit 0
+  elif [[ $parse_result -eq 1 ]]; then
+    show_help
+    exit 1
+  fi
 
-  case "$action" in
+  case "$ACTION" in
   uninstall)
-    do_uninstall
+    if [[ "$RM_CONTAINER" == "true" ]]; then
+      dbx_do_remove "$CONTAINER_NAME" "ghb"
+    else
+      dbx_do_uninstall "$CONTAINER_NAME" "ghb"
+    fi
     exit 0
     ;;
   install)
-    if ! container_exists; then
-      err "Container '${CONTAINER_NAME}' not found. Run without flags first."
-      exit 1
+    if [[ "$RECREATE" == "true" ]]; then
+      if dbx_container_exists "$CONTAINER_NAME"; then
+        if ! dbx_confirm "This will recreate the '${CONTAINER_NAME}' container. All existing data and exports will be lost."; then
+          dbx_log "Recreation cancelled."
+          exit 0
+        fi
+      fi
+      dbx_log "Recreating container..."
+      dbx_remove_container "$CONTAINER_NAME"
+      dbx_cleanup_desktop_files "$CONTAINER_NAME"
+      dbx_create_container "$CONTAINER_NAME" "$CONTAINER_IMAGE"
+      setup_handbrake
+    elif dbx_container_exists "$CONTAINER_NAME"; then
+      dbx_log "Container '${CONTAINER_NAME}' exists."
+      # Check if HandBrake is actually installed
+      if ! dbxe -- which ghb &>/dev/null; then
+        dbx_log "HandBrake not found in container, installing..."
+        setup_handbrake
+      fi
+    else
+      dbx_log "Container not found. Creating..."
+      dbx_create_container "$CONTAINER_NAME" "$CONTAINER_IMAGE"
+      setup_handbrake
     fi
-    if is_exported; then
-      log "HandBrake already exported."
+    if dbx_is_exported "$CONTAINER_NAME" "ghb"; then
+      dbx_log "HandBrake already exported."
     else
       do_export
     fi
-    exit 0
+    dbx_log "Installation complete."
     ;;
   recreate)
-    log "Recreating container..."
-    distrobox rm -f "${CONTAINER_NAME}" 2>/dev/null || true
-    create_container
+    if dbx_container_exists "$CONTAINER_NAME"; then
+      if ! dbx_confirm "This will recreate the '${CONTAINER_NAME}' container. All existing data and exports will be lost."; then
+        dbx_log "Recreation cancelled."
+        exit 0
+      fi
+    fi
+    dbx_log "Recreating container..."
+    dbx_remove_container "$CONTAINER_NAME"
+    dbx_cleanup_desktop_files "$CONTAINER_NAME"
+    dbx_create_container "$CONTAINER_NAME" "$CONTAINER_IMAGE"
     setup_handbrake
     do_export
-    log "Installation complete."
+    dbx_log "Installation complete."
     ;;
   default)
-    if container_exists; then
-      log "Container '${CONTAINER_NAME}' exists."
-      if ! is_exported; then
-        log "Export missing. Re-exporting..."
+    if dbx_container_exists "$CONTAINER_NAME"; then
+      dbx_log "Container '${CONTAINER_NAME}' exists."
+      # Check if HandBrake is actually installed
+      if ! dbxe -- which ghb &>/dev/null; then
+        dbx_log "HandBrake not found in container, installing..."
+        setup_handbrake
+      fi
+      if ! dbx_is_exported "$CONTAINER_NAME" "ghb"; then
+        dbx_log "Export missing. Re-exporting..."
         do_export
       fi
     else
-      log "Container not found. Creating..."
-      create_container
+      dbx_log "Container not found. Creating..."
+      dbx_create_container "$CONTAINER_NAME" "$CONTAINER_IMAGE"
       setup_handbrake
       do_export
-      log "Installation complete."
+      dbx_log "Installation complete."
     fi
     ;;
   esac
+}
+
+do_export() {
+  dbx_log "Exporting HandBrake (ghb)..."
+  if dbxe -- distrobox-export -a ghb 2>&1; then
+    dbx_log "Export successful."
+  else
+    if dbx_is_exported "$CONTAINER_NAME" "ghb"; then
+      dbx_log "Export successful (verified)."
+    else
+      dbx_err "Export failed."
+      return 1
+    fi
+  fi
 }
 
 main "$@"
