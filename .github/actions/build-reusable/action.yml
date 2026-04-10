@@ -124,7 +124,7 @@ runs:
       shell: bash
       run: |
         source "${{ github.action_path }}/helpers.sh"
-        rechunk_image "${{ steps.write_labels.outputs.labels_file }}"
+        rechunk_image "${{ steps.assemble_labels.outputs.labels_file }}"
 
     - name: Extract final image ref
       id: final_ref

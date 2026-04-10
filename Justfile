@@ -1,5 +1,6 @@
 export repo_organization := env("GITHUB_REPOSITORY_OWNER", "wombatfromhell")
 export image_name := env("IMAGE_NAME", "bazzite-nix")
+export image_desc := env("IMAGE_DESC", "Customized Bazzite image with Nix mount support and other sugar")
 export image_tag := env("IMAGE_TAG", "latest")
 export image_build_script := env("IMAGE_BUILD_SCRIPT", "build.sh")
 export centos_version := env("CENTOS_VERSION", "stream10")
@@ -8,6 +9,12 @@ export default_tag := env("DEFAULT_TAG", "testing")
 export bib_image := env("BIB_IMAGE", "quay.io/centos-bootc/bootc-image-builder:latest")
 export base_image := env("BASE_IMAGE", "ghcr.io/ublue-os/bazzite:stable")
 export cache_dir := env("CACHE_DIR", `echo "$HOME/.cache/bazzite-nix"`)
+export variants_config := env("VARIANTS_CONFIG", ".github/variants.json")
+export oci_output_dir := env("OCI_OUTPUT_DIR", "/var/lib/containers/oci")
+
+# Path to shared build helpers — used by both CI and local builds
+
+helpers_build := ".github/actions/build-reusable/helpers.sh"
 
 [private]
 default:
@@ -42,6 +49,8 @@ clean:
     find *_build* -exec rm -rf {} \;
     rm -f previous.manifest.json changelog.md output.env
     rm -rf output/
+    sudo rm -rf {{ oci_output_dir }}
+    sudo podman image prune --external -f
     just --unstable clean-vm
 
 # Clean cached VM disk images
@@ -52,7 +61,7 @@ clean-vm:
     VM_CACHE="{{ cache_dir }}"
     if [[ -d "$VM_CACHE" ]]; then
         echo "Removing VM cache from $VM_CACHE..."
-        rm -rf "$VM_CACHE"
+        sudo rm -rf "$VM_CACHE"/
         echo "VM cache cleaned"
     else
         echo "VM cache does not exist: $VM_CACHE"
@@ -70,8 +79,9 @@ format:
     @/usr/bin/find . -iname "*.sh" -type f -exec shfmt --write -i 2 "{}" \;
     @/usr/bin/find . -iname "*.yml" -type f -exec prettier -w "{}" \;
 
-# Build a container image
-# Usage: just build [variant-name | image:tag] [base_image]
+# ── Build commands (sources .github/actions/build-reusable/helpers.sh) ────────
+# Build a container image (stages to localhost/raw-img)
+# Usage: just build [variant-name | image:tag] [base_image_override]
 # Examples:
 #   just build testing
 #   just build cachyos
@@ -81,9 +91,10 @@ format:
 build $variant_or_spec="{{ default_tag }}" $base_image_override="":
     #!/usr/bin/env bash
     set -euo pipefail
+    source "{{ helpers_build }}"
     eval "$(just --unstable _resolve-variant "{{ variant_or_spec }}")"
     [[ -n "{{ base_image_override }}" ]] && BASE_IMAGE="{{ base_image_override }}"
-    just --unstable _build-rootful "$TARGET_IMAGE" "$TAG" "$VARIANT_NAME" "$BASE_IMAGE" "$BUILD_SCRIPT" "0" "0" "0"
+    build_image "$BASE_IMAGE" "$BUILD_SCRIPT" "$CANONICAL_TAG" "$VARIANT_NAME" "./Containerfile"
 
 # Force-rebuild a container image, evicting any cached local image first
 
@@ -92,12 +103,91 @@ build $variant_or_spec="{{ default_tag }}" $base_image_override="":
 rebuild $variant_or_spec="{{ default_tag }}" $base_image_override="":
     #!/usr/bin/env bash
     set -euo pipefail
+    source "{{ helpers_build }}"
     eval "$(just --unstable _resolve-variant "{{ variant_or_spec }}")"
     [[ -n "{{ base_image_override }}" ]] && BASE_IMAGE="{{ base_image_override }}"
-    sudo podman rmi "${TARGET_IMAGE}:${TAG}" 2>/dev/null || true
-    just --unstable _build-rootful "$TARGET_IMAGE" "$TAG" "$VARIANT_NAME" "$BASE_IMAGE" "$BUILD_SCRIPT" "0" "0" "0"
+    sudo podman rmi localhost/raw-img 2>/dev/null || true
+    build_image "$BASE_IMAGE" "$BUILD_SCRIPT" "$CANONICAL_TAG" "$VARIANT_NAME" "./Containerfile"
 
-# List available (non-disabled) variants from variant.json
+# Rechunk localhost/raw-img to OCI layout with bootc chunking
+# (Mirrors .github/actions/build-reusable: extract_image_info → assemble_labels → rechunk_image)
+# Usage: just rechunk [variant-name | image:tag]
+
+# Example: just rechunk testing
+[group('Build Container Image')]
+rechunk $variant_or_spec="{{ default_tag }}":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source "{{ helpers_build }}"
+    eval "$(just --unstable _resolve-variant "{{ variant_or_spec }}")"
+    manifest_file="/tmp/bazzite-nix-manifest.json"
+    labels_file="/tmp/bazzite-nix-labels.txt"
+    eval "$(extract_image_info "$manifest_file")"
+    assemble_labels \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "{{ image_desc }}" "$VARIANT_NAME" "$TAG" \
+      "{{ repo_organization }}" "{{ image_name }}" "$KERNEL_VERSION" \
+      "$manifest_file" "$labels_file"
+    rechunk_image "$labels_file"
+    eval "$(extract_final_ref)"
+
+# ── Full pipeline (mirrors the GitHub Actions workflow) ─────────────────────
+# Run the full build pipeline for a single variant:
+#   build → extract image info → assemble labels → rechunk → extract final ref
+
+# Usage: just pipeline [variant-name | image:tag] [base_image_override]
+[group('Build Container Image')]
+pipeline $variant_or_spec="{{ default_tag }}" $base_image_override="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source "{{ helpers_build }}"
+    eval "$(just --unstable _resolve-variant "{{ variant_or_spec }}")"
+    [[ -n "{{ base_image_override }}" ]] && BASE_IMAGE="{{ base_image_override }}"
+
+    echo "=== Phase 1: Build ==="
+    sudo podman rmi localhost/raw-img 2>/dev/null || true
+    build_image "$BASE_IMAGE" "$BUILD_SCRIPT" "$CANONICAL_TAG" "$VARIANT_NAME" "./Containerfile"
+
+    echo "=== Phase 2: Extract image info ==="
+    manifest_file="/tmp/bazzite-nix-manifest.json"
+    labels_file="/tmp/bazzite-nix-labels.txt"
+    eval "$(extract_image_info "$manifest_file")"
+
+    echo "=== Phase 3: Assemble labels & Rechunk ==="
+    assemble_labels \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "{{ image_desc }}" "$VARIANT_NAME" "$CANONICAL_TAG" \
+      "{{ repo_organization }}" "{{ image_name }}" "$KERNEL_VERSION" \
+      "$manifest_file" "$labels_file"
+    rechunk_image "$labels_file"
+
+    echo "=== Phase 4: Extract final ref ==="
+    eval "$(extract_final_ref)"
+
+    echo ""
+    echo "=== Pipeline complete ==="
+    echo "  Variant      : $VARIANT_NAME"
+    echo "  Kernel       : $KERNEL_VERSION"
+    echo "  Manifest pkgs: $MANIFEST_PACKAGES"
+    echo "  Source ref   : $SOURCE_REF"
+    echo "  Full digest  : $FULL_DIGEST"
+    echo "  Short digest : $BUILD_DIGEST"
+
+# Run the full pipeline for all variants that need rebuilding
+# (Mirrors check_and_aggregate → build_push matrix in the workflow)
+# Usage: just build-all [force_build]
+# Examples:
+#   just build-all
+
+# just build-all 1    # force rebuild
+[group('Build Container Image')]
+build-all $force_build="0":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    just --unstable _check-variants "{{ force_build }}"
+    just --unstable _build-all-variants
+
+# ── Variant helpers ─────────────────────────────────────────────────────────
+
+# List available (non-disabled) variants from variants.json
 [group('Utility')]
 list-variants:
     #!/usr/bin/env bash
@@ -105,12 +195,19 @@ list-variants:
     jq -r '.variants[] | select((.disabled // false) == false) | "  \(.name)  →  \(.base_image)  [\(.build_script // "build.sh")]"' \
         ./.github/variants.json
 
-# Build a QCOW2 VM disk image
-# Usage: just build-qcow2 [variant-name | image:tag] [output_dir]
-# Examples:
-#   just build-qcow2 testing
+# Check which variants need rebuilding (mirrors check-variants action)
 
-# just build-qcow2 cachyos ~/.cache/my-vms
+# Usage: just check-variants [force_build]
+[group('Build Container Image')]
+check-variants $force_build="0":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    just --unstable _check-variants "{{ force_build }}"
+
+# ── VM commands ─────────────────────────────────────────────────────────────
+# Build a QCOW2 VM disk image
+
+# Usage: just build-qcow2 [variant-name | image:tag] [output_dir]
 [group('Build Virtual Machine Image')]
 build-qcow2 $variant_or_spec="{{ default_tag }}" $output_dir="" $force_rebuild="0":
     just --unstable _build-vm-image "{{ variant_or_spec }}" "qcow2" "{{ output_dir }}" "{{ force_rebuild }}"
@@ -152,32 +249,36 @@ run-vm-raw $variant_or_spec="{{ default_tag }}" $output_dir="" $force_pull="0" $
     eval "$(just --unstable _resolve-variant "{{ variant_or_spec }}")"
     just --unstable _run-vm "$TARGET_IMAGE" "$TAG" "raw" "image.toml" "{{ output_dir }}" "{{ force_pull }}" "{{ clean }}"
 
-# --- Private helpers --------------------------------------------------------
-# Resolve a variant name from variant.json into image_spec/base_image/build_script
-# Emits shell variable assignments suitable for eval
+# ── Private helpers ─────────────────────────────────────────────────────────
+# Resolve a variant name from variants.json into shell variable assignments
 
 # Usage: eval "$(just --unstable _resolve-variant testing)"
 [private]
 _resolve-variant $variant_or_spec="":
     #!/usr/bin/env bash
     set -euo pipefail
-    VARIANT_JSON="./.github/variants.json"
+    VARIANT_JSON="{{ variants_config }}"
     spec="{{ variant_or_spec }}"
 
     # If it looks like an explicit image:tag or image ref, pass it through unchanged
     if [[ "$spec" == *"/"* ]] || [[ "$spec" == *":"* ]]; then
         tag="${spec##*:}"
-        # Use image_name as the local target for consistency with named-variant resolution
         build_script=$(jq -r --arg bi "$spec" '
             .variants[] | select(.base_image == $bi and (.disabled // false) == false)
             | (.build_script // "build.sh")
         ' "$VARIANT_JSON" | head -1)
         [[ -z "$build_script" ]] && build_script="build.sh"
+        # Extract real version from upstream image label
+        canonical=$(skopeo inspect "docker://${spec}" 2>/dev/null \
+            | jq -r '.Labels["org.opencontainers.image.version"] // empty' \
+            || true)
+        [[ -z "$canonical" || "$canonical" == "null" ]] && canonical="$tag"
         echo "TARGET_IMAGE=\"localhost/{{ image_name }}\""
         echo "TAG=\"$tag\""
         echo "BASE_IMAGE=\"$spec\""
         echo "BUILD_SCRIPT=\"$build_script\""
         echo "VARIANT_NAME=\"$tag\""
+        echo "CANONICAL_TAG=\"$canonical\""
         exit 0
     fi
 
@@ -198,136 +299,95 @@ _resolve-variant $variant_or_spec="":
     build_script=$(echo "$row" | jq -r '.build_script // "build.sh"')
     suffix=$(echo "$row" | jq -r '.suffix // ""')
     image_name_resolved="{{ image_name }}${suffix}"
-    tag="${base_image##*:}"   # e.g. "testing", "stable"
+    tag="${base_image##*:}"
+
+    # Extract real version from upstream image label
+    canonical=$(skopeo inspect "docker://${base_image}" 2>/dev/null \
+        | jq -r '.Labels["org.opencontainers.image.version"] // empty' \
+        || true)
+    [[ -z "$canonical" || "$canonical" == "null" ]] && canonical="$tag"
 
     echo "TARGET_IMAGE=\"localhost/${image_name_resolved}\""
     echo "TAG=\"${tag}\""
     echo "BASE_IMAGE=\"${base_image}\""
     echo "BUILD_SCRIPT=\"${build_script}\""
     echo "VARIANT_NAME=\"${spec}\""
+    echo "CANONICAL_TAG=\"$canonical\""
 
 # Build VM image (shared helper for build-qcow2 and build-raw)
+
+# Sources build-reusable helpers.sh for build_image
 [private]
 _build-vm-image $image_spec $type $output_dir="" $force_rebuild="0":
     #!/usr/bin/env bash
     set -euo pipefail
+    source "{{ helpers_build }}"
     eval "$(just --unstable _resolve-variant "{{ image_spec }}")"
+
+    # Determine output dir and disk filename early
+    _out_dir="{{ output_dir }}"
+    [[ -z "$_out_dir" ]] && _out_dir="{{ cache_dir }}"
+    case "{{ type }}" in
+        qcow2) _disk_name="disk.qcow2" ;;
+        raw)   _disk_name="disk.raw" ;;
+        *)     _disk_name="disk.{{ type }}" ;;
+    esac
+    _disk_file="${_out_dir}/${_disk_name}"
+
+    # Force rebuild: evict existing disk so BIB rebuilds from scratch
+    if [[ "{{ force_rebuild }}" == "1" && -f "$_disk_file" ]]; then
+        echo "Force rebuild: removing existing disk: ${_disk_file}"
+        sudo rm -f "$_disk_file"
+    fi
+
+    OCI_LAYOUT="oci:{{ oci_output_dir }}:latest"
+
+    # Check for a rechunked OCI layout first (avoids full image copy)
+    if [[ "{{ force_rebuild }}" != "1" && -d {{ oci_output_dir }} && -f {{ oci_output_dir }}/index.json ]]; then
+        echo "Using existing rechunked OCI layout: ${OCI_LAYOUT}"
+        just --unstable _build-bib-oci "$OCI_LAYOUT" "$TAG" "{{ type }}" "image.toml" "{{ output_dir }}"
+        exit 0
+    fi
+
+    # Build container if needed (build_image stages to localhost/raw-img)
     if [[ "{{ force_rebuild }}" == "1" ]]; then
         echo "Force rebuilding container image..."
-        sudo podman rmi "${TARGET_IMAGE}:${TAG}" 2>/dev/null || true
-        just --unstable _build-rootful "$TARGET_IMAGE" "$TAG" "$VARIANT_NAME" "$BASE_IMAGE" "$BUILD_SCRIPT" "0" "0" "0"
+        sudo podman rmi --force localhost/raw-img 2>/dev/null || true
+        build_image "$BASE_IMAGE" "$BUILD_SCRIPT" "$CANONICAL_TAG" "$VARIANT_NAME" "./Containerfile"
+    elif sudo podman image exists localhost/raw-img 2>/dev/null; then
+        echo "Container image localhost/raw-img already exists, skipping build"
     else
-        if sudo podman image exists "${TARGET_IMAGE}:${TAG}" 2>/dev/null; then
-            echo "Container image ${TARGET_IMAGE}:${TAG} already exists, skipping build"
-        else
-            just --unstable _build-rootful "$TARGET_IMAGE" "$TAG" "$VARIANT_NAME" "$BASE_IMAGE" "$BUILD_SCRIPT" "0" "0" "0"
-        fi
+        build_image "$BASE_IMAGE" "$BUILD_SCRIPT" "$CANONICAL_TAG" "$VARIANT_NAME" "./Containerfile"
     fi
-    just --unstable _build-bib "$TARGET_IMAGE" "$TAG" "$type" "image.toml" "{{ output_dir }}"
 
-[private]
-_build-rootful $target_image $tag $variant $base_image=base_image $build_script=image_build_script $dx="0" $hwe="0" $gdx="0":
-    #!/usr/bin/env bash
-    set -euo pipefail
+    # Tag for BIB — bootc-image-builder reads from podman storage
+    sudo podman tag localhost/raw-img "${TARGET_IMAGE}:${TAG}" 2>/dev/null || true
 
-    inspect_output=$(skopeo inspect "docker://${base_image}" 2>/dev/null)
-    canonical=$(echo "$inspect_output" | jq -r '.Labels["org.opencontainers.image.version"] // empty')
-    base_image_tag="${base_image##*:}"
-
-    if [ -z "$canonical" ] || [ "$canonical" = "null" ] || [ "$canonical" = "latest" ]; then
-        echo "Warning: Could not extract valid version from ${base_image}, falling back to branch tag"
-        canonical="${base_image_tag}"
-    fi
-    [[ "$canonical" == "${base_image_tag}-"* ]] && canonical="${canonical#"${base_image_tag}"-}"
-
-    echo "Variant: ${variant}, Canonical tag: ${canonical}"
-
-    sudo podman build \
-        --build-arg MAJOR_VERSION="{{ centos_version }}" \
-        --build-arg IMAGE_NAME="${target_image}" \
-        --build-arg IMAGE_VENDOR="{{ repo_organization }}" \
-        --build-arg ENABLE_DX="${dx}" \
-        --build-arg ENABLE_HWE="${hwe}" \
-        --build-arg ENABLE_GDX="${gdx}" \
-        --build-arg BASE_IMAGE="${base_image}" \
-        --build-arg BUILD_SCRIPT="${build_script}" \
-        --build-arg VARIANT="${variant}" \
-        --build-arg CANONICAL_TAG="${canonical}" \
-        $( [[ -z "$(git status -s)" ]] && echo "--build-arg SHA_HEAD_SHORT=$(git rev-parse --short HEAD)" ) \
-        --pull=newer \
-        --security-opt label=disable \
-        --tag "${target_image}:${tag}" \
-        --tag "${target_image}:${canonical}" \
-        .
-
-# Rechunk a built image to OCI layout with bootc chunking
-# Usage: just rechunk [variant-name | image:tag]
-
-# Example: just rechunk testing
-[group('Build Container Image')]
-rechunk $variant_or_spec="{{ default_tag }}":
-    #!/usr/bin/env bash
-    set -euo pipefail
-    eval "$(just --unstable _resolve-variant "{{ variant_or_spec }}")"
-    just --unstable _rechunk "$TARGET_IMAGE" "$TAG" "$VARIANT_NAME"
-
-[private]
-_rechunk $target_image $tag $variant:
-    #!/usr/bin/env bash
-    set -euo pipefail
-
-    # Assemble image labels (mirrors .github/actions/build-reusable/action.yml)
-    KERNEL_VERSION=$(sudo podman run --rm --privileged \
-        --security-opt label=disable \
-        "${target_image}:${tag}" \
-        cat /usr/share/ublue-os/kernel-version
-    )
-
-    LABELS=(
-        "org.opencontainers.image.created=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-        "org.opencontainers.image.description=${variant}"
-        "org.opencontainers.image.documentation=https://raw.githubusercontent.com/{{ repo_organization }}/{{ image_name }}/refs/heads/main/README.md"
-        "org.opencontainers.image.source=https://github.com/{{ repo_organization }}/{{ image_name }}/blob/main/Containerfile"
-        "org.opencontainers.image.title=${variant}"
-        "org.opencontainers.image.url=https://github.com/{{ repo_organization }}/{{ image_name }}"
-        "org.opencontainers.image.vendor={{ repo_organization }}"
-        "org.opencontainers.image.version=${tag}"
-        "org.opencontainers.image.kernel-version=${KERNEL_VERSION}"
-        "containers.bootc=1"
-    )
-
-    # Initialize OCI layout on host
-    sudo rm -rf /var/lib/containers/oci
-    sudo mkdir -p /var/lib/containers/oci
-    echo '{"imageLayoutVersion":"1.0.0"}' | sudo tee /var/lib/containers/oci/oci-layout > /dev/null
-    echo '{"schemaVersion":2,"manifests":[]}' | sudo tee /var/lib/containers/oci/index.json > /dev/null
-
-    # Build LABEL_ARGS array
-    LABEL_ARGS=()
-    for line in "${LABELS[@]}"; do
-        [ -n "$line" ] && LABEL_ARGS+=(--label "$line")
-    done
-
-    # Run rechunk using centos-bootc image (same as GitHub action)
-    sudo podman run --rm --privileged \
-        --volume /var/lib/containers:/var/lib/containers \
-        quay.io/centos-bootc/centos-bootc:{{ centos_version }} \
-        rpm-ostree compose build-chunked-oci \
-        --bootc --max-layers 128 --format-version 2 \
-        --from "${target_image}:${tag}" \
-        --output "oci:/var/lib/containers/oci:${tag}" \
-        "${LABEL_ARGS[@]}"
-
-    # Clean up raw image
-    sudo podman image exists "${target_image}:${tag}" && \
-        sudo podman rmi "${target_image}:${tag}"
-
-    echo "Rechunked image available at: oci:/var/lib/containers/oci:${tag}"
+    just --unstable _build-bib "$TARGET_IMAGE" "$TAG" "{{ type }}" "image.toml" "{{ output_dir }}"
 
 [private]
 _build-bib $target_image $tag $type $config $output_dir="":
     #!/usr/bin/env bash
     set -euo pipefail
+
+    out_dir="${output_dir}"
+    if [[ -z "$out_dir" ]]; then
+        out_dir="{{ cache_dir }}"
+    fi
+    mkdir -p "$out_dir"
+
+    case "$type" in
+        qcow2) disk_name="disk.qcow2" ;;
+        raw)   disk_name="disk.raw" ;;
+        *)     disk_name="disk.${type}" ;;
+    esac
+    disk_file="${out_dir}/${disk_name}"
+
+    if [[ -f "$disk_file" ]]; then
+        echo "Disk image already exists: ${disk_file} — skipping BIB build"
+        echo "Use force_rebuild=1 to force regeneration"
+        exit 0
+    fi
 
     if ! sudo podman image exists "${target_image}:${tag}" 2>/dev/null; then
         echo "Image ${target_image}:${tag} not found in rootful storage."
@@ -342,21 +402,12 @@ _build-bib $target_image $tag $type $config $output_dir="":
 
     args="--type ${type} --use-librepo=True --rootfs=btrfs"
 
-    # bib reads from the mounted /var/lib/containers/storage, need localhost/ prefix
     if [[ "$target_image" == localhost/* ]]; then
         source_image="${target_image}:${tag}"
     else
         source_image="localhost/${target_image}:${tag}"
     fi
 
-    # Use provided output_dir or default to cache_dir
-    out_dir="${output_dir}"
-    if [[ -z "$out_dir" ]]; then
-        out_dir="{{ cache_dir }}"
-    fi
-    mkdir -p "$out_dir"
-
-    # Use cache_dir for bib temp output (avoids cluttering project dir)
     BUILDTMP="${out_dir}/.bib-tmp"
     rm -rf "$BUILDTMP"
     mkdir -p "$BUILDTMP"
@@ -372,10 +423,69 @@ _build-bib $target_image $tag $type $config $output_dir="":
         ${args} \
         "$source_image"
 
-    # Flatten bib output (bib creates type subdirs like image/, qcow2/, bootiso/)
     for item in "$BUILDTMP"/*; do
         if [[ -d "$item" ]]; then
-            # Move contents of subdirectory up one level
+            sudo mv -f "$item"/* "$out_dir"/
+            sudo rmdir "$item"
+        else
+            sudo mv -f "$item" "$out_dir"/
+        fi
+    done
+    sudo rmdir "$BUILDTMP"
+    sudo chown -R "$USER:$USER" "$out_dir"
+
+# Build VM image from an OCI layout ref (avoids full image copy)
+
+[private]
+_build-bib-oci $source_image $tag $type $config $output_dir="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    out_dir="${output_dir}"
+    if [[ -z "$out_dir" ]]; then
+        out_dir="{{ cache_dir }}"
+    fi
+    mkdir -p "$out_dir"
+
+    case "$type" in
+        qcow2) disk_name="disk.qcow2" ;;
+        raw)   disk_name="disk.raw" ;;
+        *)     disk_name="disk.${type}" ;;
+    esac
+    disk_file="${out_dir}/${disk_name}"
+
+    if [[ -f "$disk_file" ]]; then
+        echo "Disk image already exists: ${disk_file} — skipping BIB build"
+        echo "Use force_rebuild=1 to force regeneration"
+        exit 0
+    fi
+
+    # Import OCI layout into containers-storage so BIB can resolve it
+    sudo skopeo copy "$source_image" containers-storage:"${TARGET_IMAGE:-localhost/rechunked}:${tag}"
+
+    args="--type ${type} --use-librepo=True --rootfs=btrfs"
+    source_image_ref="${TARGET_IMAGE:-localhost/rechunked}:${tag}"
+
+    BUILDTMP="${out_dir}/.bib-tmp"
+    rm -rf "$BUILDTMP"
+    mkdir -p "$BUILDTMP"
+
+    sudo podman run --rm -it --privileged \
+        --pull=newer \
+        --net=host \
+        --security-opt label=type:unconfined_t \
+        -v "$(pwd)/${config}:/config.toml:ro" \
+        -v "$BUILDTMP:/output" \
+        -v /var/lib/containers/storage:/var/lib/containers/storage \
+        "${bib_image}" \
+        ${args} \
+        "$source_image_ref"
+
+    # Clean up the imported image (OCI layout stays on disk)
+    sudo podman rmi --force "$source_image_ref" 2>/dev/null || true
+
+    for item in "$BUILDTMP"/*; do
+        if [[ -d "$item" ]]; then
             sudo mv -f "$item"/* "$out_dir"/
             sudo rmdir "$item"
         else
@@ -394,7 +504,6 @@ _run-vm $target_image $tag $type $config $output_dir="" $force_pull="0" $clean="
     [[ -z "$OUTPUT_DIR" ]] && OUTPUT_DIR="{{ cache_dir }}"
     mkdir -p "$OUTPUT_DIR"
 
-    # Disk images are flattened to output dir root (bib subdirs are flattened)
     case "$type" in
         qcow2) disk_name="disk.qcow2" ;;
         raw)   disk_name="disk.raw" ;;
@@ -412,25 +521,35 @@ _run-vm $target_image $tag $type $config $output_dir="" $force_pull="0" $clean="
         is_local=false
         [[ "$target_image" == localhost/* ]] && is_local=true
 
-        if [[ "$is_local" == "true" ]]; then
+        OCI_LAYOUT="oci:{{ oci_output_dir }}:latest"
+
+        # Prefer rechunked OCI layout if available (avoids podman image copy)
+        if [[ -d {{ oci_output_dir }} && -f {{ oci_output_dir }}/index.json ]]; then
+            echo "Using existing rechunked OCI layout: ${OCI_LAYOUT}"
+            sudo podman image exists "${bib_image}" 2>/dev/null || sudo podman pull "${bib_image}"
+            sudo podman image exists "docker.io/qemux/qemu:latest" 2>/dev/null || sudo podman pull "docker.io/qemux/qemu:latest"
+            echo "Building disk image..."
+            just --unstable _build-bib-oci "$OCI_LAYOUT" "$tag" "$type" "$config" "$OUTPUT_DIR"
+        elif [[ "$is_local" == "true" ]]; then
             if ! sudo podman image exists "${target_image}:${tag}" 2>/dev/null; then
                 echo "Image ${target_image}:${tag} not found in rootful storage."
                 echo "   Build it first with: just build-${type} ${target_image}:${tag}"
                 exit 1
             fi
+            sudo podman image exists "${bib_image}" 2>/dev/null || sudo podman pull "${bib_image}"
+            sudo podman image exists "docker.io/qemux/qemu:latest" 2>/dev/null || sudo podman pull "docker.io/qemux/qemu:latest"
+            echo "Building disk image..."
+            just --unstable _build-bib "$target_image" "$tag" "$type" "$config" "$OUTPUT_DIR"
         else
             if [[ "{{ force_pull }}" == "1" ]] || ! sudo podman image exists "${target_image}:${tag}" 2>/dev/null; then
                 echo "Pulling ${target_image}:${tag}..."
                 sudo podman pull "${target_image}:${tag}"
             fi
+            sudo podman image exists "${bib_image}" 2>/dev/null || sudo podman pull "${bib_image}"
+            sudo podman image exists "docker.io/qemux/qemu:latest" 2>/dev/null || sudo podman pull "docker.io/qemux/qemu:latest"
+            echo "Building disk image..."
+            just --unstable _build-bib "$target_image" "$tag" "$type" "$config" "$OUTPUT_DIR"
         fi
-
-        # Pull required images
-        sudo podman image exists "${bib_image}" 2>/dev/null || sudo podman pull "${bib_image}"
-        sudo podman image exists "docker.io/qemux/qemu:latest" 2>/dev/null || sudo podman pull "docker.io/qemux/qemu:latest"
-
-        echo "Building disk image..."
-        just --unstable _build-bib "$target_image" "$tag" "$type" "$config" "$OUTPUT_DIR"
     fi
 
     if [[ ! -f "$image_file" ]]; then
@@ -451,7 +570,7 @@ _run-vm $target_image $tag $type $config $output_dir="" $force_pull="0" $clean="
 
     echo "Waiting for VM web interface..."
     success=false
-    for i in {1..30}; do  # Increased to 30 attempts (60 seconds)
+    for i in {1..30}; do
         if curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:8006 | grep -q "200"; then
             echo -e "\n VM ready! Opening browser..."
             xdg-open "http://127.0.0.1:8006" >/dev/null 2>&1 &
@@ -467,6 +586,86 @@ _run-vm $target_image $tag $type $config $output_dir="" $force_pull="0" $clean="
     fi
 
     wait $QEMU_PID || echo "  VM exited"
+
+# Check which variants need rebuilding (mirrors check-variants action)
+
+# Writes results to /tmp/variants_results.json
+[private]
+_check-variants $force_build="0":
+    #!/usr/bin/env bash
+    set -euo pipefail
+
+    registry="ghcr.io/$(echo "{{ repo_organization }}" | tr '[:upper:]' '[:lower:]')"
+    repo="{{ image_name }}"
+    image_desc="Customized Bazzite image with Nix mount support and other sugar"
+    date_iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+    REGISTRY="$registry" \
+    REPO="$repo" \
+    IMAGE_DESC="$image_desc" \
+    DATE="$date_iso" \
+    FORCE_BUILD="{{ force_build }}" \
+    VARIANTS_CONFIG="{{ variants_config }}" \
+        bash .github/actions/check-variants/check-variants.sh
+
+    echo "=== Variant check results ==="
+    cat /tmp/variants_results.json | jq '.'
+
+# Build all variants that need rebuilding (reads /tmp/variants_results.json)
+
+# Sources build-reusable helpers.sh for the full build pipeline
+[private]
+_build-all-variants:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source "{{ helpers_build }}"
+
+    results_file="/tmp/variants_results.json"
+    if [[ ! -f "$results_file" ]]; then
+        echo "::error::No variant check results found. Run check-variants first." >&2
+        exit 1
+    fi
+
+    variants=$(jq -c '[.[] | select(.needs_build == true)]' "$results_file")
+    count=$(echo "$variants" | jq 'length')
+
+    if [[ "$count" -eq 0 ]]; then
+        echo "No variants need building"
+        exit 0
+    fi
+
+    echo "Building ${count} variant(s)..."
+
+    for ((i = 0; i < count; i++)); do
+        variant=$(echo "$variants" | jq -r ".[$i].variant")
+        base_image=$(echo "$variants" | jq -r ".[$i].base_image")
+        build_script=$(echo "$variants" | jq -r ".[$i].build_script // \"build.sh\"")
+        canonical_tag=$(echo "$variants" | jq -r ".[$i].canonical_tag")
+
+        echo ""
+        echo "========================================"
+        echo "Building variant: ${variant}"
+        echo "  Base image    : ${base_image}"
+        echo "  Build script  : ${build_script}"
+        echo "  Canonical tag : ${canonical_tag}"
+        echo "========================================"
+
+        # Full pipeline: build → extract info → assemble labels → rechunk → extract ref
+        sudo podman rmi localhost/raw-img 2>/dev/null || true
+        build_image "$base_image" "$build_script" "$canonical_tag" "$variant" "./Containerfile"
+
+        manifest_file="/tmp/bazzite-nix-manifest.json"
+        labels_file="/tmp/bazzite-nix-labels.txt"
+        eval "$(extract_image_info "$manifest_file")"
+        assemble_labels \
+          "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "{{ image_desc }}" "$variant" "$canonical_tag" \
+          "{{ repo_organization }}" "{{ image_name }}" "$KERNEL_VERSION" \
+          "$manifest_file" "$labels_file"
+        rechunk_image "$labels_file"
+        eval "$(extract_final_ref)"
+
+        echo "Variant ${variant} complete: ${SOURCE_REF} (${BUILD_DIGEST})"
+    done
 
 [private]
 sudoif command *args:
