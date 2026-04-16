@@ -46,7 +46,7 @@ outputs:
     value: ${{ steps.labels.outputs.kernel_version }}
   variant_tag:
     description: "Version tag for the image variant"
-    value: ${{ steps.labels.outputs.tag }}
+    value: ${{ inputs.canonical_tag }}
 
 runs:
   using: composite

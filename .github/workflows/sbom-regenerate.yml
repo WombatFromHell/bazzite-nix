@@ -116,7 +116,8 @@ jobs:
       contents: read
       packages: write
       id-token: write
-
+      attestations: write
+      artifact-metadata: write
     env:
       IMAGE_NAME: "bazzite-nix"
       REGISTRY: "ghcr.io/${{ github.repository_owner }}"

@@ -146,19 +146,24 @@ attach_sbom_to_oci() {
   echo "::group::Attach SBOM to OCI registry"
 
   local full_ref="${image}@${image_digest}"
+  local sbom_filename
+  sbom_filename="$(basename "${sbom_path}")"
+  local sbom_dir
+  sbom_dir="$(dirname "${sbom_path}")"
+
   echo "  Attaching SBOM to: ${full_ref}"
 
-  cd "$(dirname "${sbom_path}")"
+  cd "${sbom_dir}"
 
   run_with_retry "oras attach ${full_ref}" \
     --stream \
     oras attach \
-    --auth-file "${authfile}" \
+    --registry-config "${authfile}" \
     --artifact-type application/vnd.syft+json \
     --annotation "org.opencontainers.artifact.created=auto" \
     --annotation "sbom.source=anchore/syft" \
     "${full_ref}" \
-    "$(basename "${sbom_path}")"
+    "${sbom_filename}"
 
   echo "  Discovering attached SBOM digest..."
   local sbom_digest

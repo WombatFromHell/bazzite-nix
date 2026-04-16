@@ -90,6 +90,9 @@ runs:
           "${OCI_DIR}" \
           "${IMAGE_REF}"
 
+    - name: Install ORAS
+      uses: oras-project/setup-oras@38de303aac69abb66f3e6255b7198bff35f323e3 # v2.0.0
+
     - name: Login to GHCR for ORAS
       id: login_oras
       shell: bash
@@ -109,7 +112,7 @@ runs:
           oras login ghcr.io \
           --username "${GITHUB_ACTOR}" \
           --password-stdin \
-          --authfile /tmp/oras-auth/auth.json
+          --registry-config /tmp/oras-auth/auth.json
 
     - name: Attach SBOM to OCI registry
       id: attach_sbom
@@ -155,3 +158,11 @@ runs:
           "${SBOM_DIGEST}" \
           "${GITHUB_ACTOR}" \
           "${GITHUB_TOKEN}"
+
+    - name: Create attestation
+      uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
+      with:
+        github-token: ${{ inputs.github_token }}
+        subject-name: "${{ inputs.registry }}/${{ inputs.repo }}${{ inputs.suffix }}"
+        subject-digest: "${{ inputs.image_digest }}"
+        push-to-registry: true
