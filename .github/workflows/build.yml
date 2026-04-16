@@ -124,8 +124,7 @@ jobs:
           date: ${{ needs.check_and_aggregate.outputs.date }}
           parent_version: ${{ matrix.variant_data.parent_version }}
 
-      - name: Manage SBOM (attach & sign)
-        if: github.event_name != 'pull_request'
+      - name: Generate SBOM (attach & sign)
         id: manage_sbom
         uses: ./.github/actions/sbom-reusable
         with:
@@ -139,17 +138,6 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           github_actor: ${{ github.actor }}
           signing_secret: ${{ secrets.SIGNING_SECRET }}
-
-      - name: Cleanup SBOM file
-        if: github.event_name != 'pull_request'
-        shell: bash
-        env:
-          SBOM_PATH: ${{ steps.manage_sbom.outputs.sbom_path }}
-        run: |
-          if [[ -n "${SBOM_PATH}" ]] && [[ -f "${SBOM_PATH}" ]]; then
-            rm -f "${SBOM_PATH}"
-            echo "✓ Cleaned up SBOM file"
-          fi
 
   collect_build_results:
     needs: [check_and_aggregate, build_push]

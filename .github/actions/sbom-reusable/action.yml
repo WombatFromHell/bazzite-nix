@@ -36,7 +36,7 @@ inputs:
   syft_version:
     description: "Syft version to download"
     required: false
-    default: "v1.39.0"
+    default: "v1.42.4"
   max_attempts:
     description: "Maximum retry attempts"
     required: false
@@ -104,10 +104,8 @@ runs:
 
         mkdir -p /tmp/oras-auth
 
-        # ✅ FIXED: Added '--' separator before actual command
         run_with_retry "oras login ghcr.io" \
           --stdin-data "${GITHUB_TOKEN}" \
-          -- \
           oras login ghcr.io \
           --username "${GITHUB_ACTOR}" \
           --password-stdin \
