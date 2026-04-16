@@ -9,11 +9,14 @@ of generating accurate changelogs.
 
 import pytest
 import json
+import os
+import tempfile
 from changelog import (
     other_start_pattern,
     get_images,
     is_nvidia,
     get_packages,
+    get_packages_from_sbom,
     get_versions,
     get_tags,
     get_package_groups,
@@ -34,6 +37,34 @@ from changelog import (
 # This ensures tests always use the single source of truth
 _VARIANTS = load_variants()
 IMAGES = [f"bazzite-nix{v.get('suffix', '')}" for v in _VARIANTS]
+
+# Sample SBOM directory and paths
+SAMPLES_DIR = os.path.join(os.path.dirname(__file__), "samples")
+SAMPLE_SBOM_PATH = os.path.join(SAMPLES_DIR, "sample-sbom.json")
+SAMPLE_SBOM_PREV_PATH = os.path.join(SAMPLES_DIR, "sample-sbom-prev.json")
+
+
+# =============================================================================
+# Fixtures
+# =============================================================================
+
+
+@pytest.fixture
+def sbom_sample():
+    """Load the sample SBOM file for testing."""
+    if not os.path.exists(SAMPLE_SBOM_PATH):
+        pytest.skip(f"Sample SBOM not found at {SAMPLE_SBOM_PATH}")
+    with open(SAMPLE_SBOM_PATH) as f:
+        return json.load(f)
+
+
+@pytest.fixture
+def sbom_prev_sample():
+    """Load the previous version sample SBOM file for testing."""
+    if not os.path.exists(SAMPLE_SBOM_PREV_PATH):
+        pytest.skip(f"Previous sample SBOM not found at {SAMPLE_SBOM_PREV_PATH}")
+    with open(SAMPLE_SBOM_PREV_PATH) as f:
+        return json.load(f)
 
 
 # =============================================================================
@@ -128,16 +159,76 @@ class TestGetImages:
     @pytest.mark.parametrize(
         "variants,image,expected_base,expected_de",
         [
-            pytest.param({"name": "testing", "suffix": ""}, "bazzite-nix", "desktop", "kde", id="bazzite-nix"),
-            pytest.param({"name": "testing", "suffix": "-gnome"}, "bazzite-nix-gnome", "desktop", "gnome", id="bazzite-nix-gnome"),
-            pytest.param({"name": "deck", "suffix": "-deck"}, "bazzite-nix-deck", "deck", "kde", id="bazzite-nix-deck"),
-            pytest.param({"name": "deck-gnome", "suffix": "-deck-gnome"}, "bazzite-nix-deck-gnome", "deck", "gnome", id="bazzite-nix-deck-gnome"),
-            pytest.param({"name": "deck-nvidia", "suffix": "-deck-nvidia"}, "bazzite-nix-deck-nvidia", "deck", "kde", id="bazzite-nix-deck-nvidia"),
-            pytest.param({"name": "deck-nvidia-gnome", "suffix": "-deck-nvidia-gnome"}, "bazzite-nix-deck-nvidia-gnome", "deck", "gnome", id="bazzite-nix-deck-nvidia-gnome"),
-            pytest.param({"name": "nvidia", "suffix": "-nvidia"}, "bazzite-nix-nvidia", "desktop", "kde", id="bazzite-nix-nvidia"),
-            pytest.param({"name": "gnome-nvidia", "suffix": "-gnome-nvidia"}, "bazzite-nix-gnome-nvidia", "desktop", "gnome", id="bazzite-nix-gnome-nvidia"),
-            pytest.param({"name": "nvidia-open", "suffix": "-nvidia-open"}, "bazzite-nix-nvidia-open", "desktop", "kde", id="bazzite-nix-nvidia-open"),
-            pytest.param({"name": "gnome-nvidia-open", "suffix": "-gnome-nvidia-open"}, "bazzite-nix-gnome-nvidia-open", "desktop", "gnome", id="bazzite-nix-gnome-nvidia-open"),
+            pytest.param(
+                {"name": "testing", "suffix": ""},
+                "bazzite-nix",
+                "desktop",
+                "kde",
+                id="bazzite-nix",
+            ),
+            pytest.param(
+                {"name": "testing", "suffix": "-gnome"},
+                "bazzite-nix-gnome",
+                "desktop",
+                "gnome",
+                id="bazzite-nix-gnome",
+            ),
+            pytest.param(
+                {"name": "deck", "suffix": "-deck"},
+                "bazzite-nix-deck",
+                "deck",
+                "kde",
+                id="bazzite-nix-deck",
+            ),
+            pytest.param(
+                {"name": "deck-gnome", "suffix": "-deck-gnome"},
+                "bazzite-nix-deck-gnome",
+                "deck",
+                "gnome",
+                id="bazzite-nix-deck-gnome",
+            ),
+            pytest.param(
+                {"name": "deck-nvidia", "suffix": "-deck-nvidia"},
+                "bazzite-nix-deck-nvidia",
+                "deck",
+                "kde",
+                id="bazzite-nix-deck-nvidia",
+            ),
+            pytest.param(
+                {"name": "deck-nvidia-gnome", "suffix": "-deck-nvidia-gnome"},
+                "bazzite-nix-deck-nvidia-gnome",
+                "deck",
+                "gnome",
+                id="bazzite-nix-deck-nvidia-gnome",
+            ),
+            pytest.param(
+                {"name": "nvidia", "suffix": "-nvidia"},
+                "bazzite-nix-nvidia",
+                "desktop",
+                "kde",
+                id="bazzite-nix-nvidia",
+            ),
+            pytest.param(
+                {"name": "gnome-nvidia", "suffix": "-gnome-nvidia"},
+                "bazzite-nix-gnome-nvidia",
+                "desktop",
+                "gnome",
+                id="bazzite-nix-gnome-nvidia",
+            ),
+            pytest.param(
+                {"name": "nvidia-open", "suffix": "-nvidia-open"},
+                "bazzite-nix-nvidia-open",
+                "desktop",
+                "kde",
+                id="bazzite-nix-nvidia-open",
+            ),
+            pytest.param(
+                {"name": "gnome-nvidia-open", "suffix": "-gnome-nvidia-open"},
+                "bazzite-nix-gnome-nvidia-open",
+                "desktop",
+                "gnome",
+                id="bazzite-nix-gnome-nvidia-open",
+            ),
         ],
     )
     def test_image_categorization(self, variants, image, expected_base, expected_de):
@@ -239,12 +330,12 @@ class TestIsNvidia:
 
 
 class TestGetPackages:
-    """Tests for get_packages function that extracts packages from manifest labels."""
+    """Tests for get_packages function that extracts packages from manifest labels or SBOM."""
 
     def test_extracts_from_ostree_rechunk_info_label(self):
         packages = {"kernel": "6.19.8-200.ogc", "mesa": "26.0.3-1"}
         manifests = {"bazzite": make_manifest_with_packages(packages)}
-        result = get_packages(manifests)
+        result, _ = get_packages(manifests)
         assert result["bazzite"] == packages
 
     def test_falls_back_to_dev_hhd_rechunk_info_label(self):
@@ -254,7 +345,7 @@ class TestGetPackages:
                 "Labels": {"dev.hhd.rechunk.info": json.dumps({"packages": packages})}
             }
         }
-        result = get_packages(manifests)
+        result, _ = get_packages(manifests)
         assert result["bazzite"] == packages
 
     def test_ostree_label_takes_precedence_over_dev_label(self):
@@ -268,17 +359,17 @@ class TestGetPackages:
                 }
             }
         }
-        result = get_packages(manifests)
+        result, _ = get_packages(manifests)
         assert result["bazzite"]["kernel"] == "6.19.8-ostree"
 
     def test_returns_empty_dict_when_no_labels(self):
         manifests = {"bazzite": {"Labels": {}}}
-        result = get_packages(manifests)
+        result, _ = get_packages(manifests)
         assert result["bazzite"] == {}
 
     def test_returns_empty_dict_when_labels_missing(self):
         manifests = {"bazzite": {}}
-        result = get_packages(manifests)
+        result, _ = get_packages(manifests)
         assert result["bazzite"] == {}
 
     def test_raises_exception_for_invalid_json(self):
@@ -292,7 +383,7 @@ class TestGetPackages:
                 "Labels": {"ostree.rechunk.info": json.dumps({"other": "data"})}
             }
         }
-        result = get_packages(manifests)
+        result, _ = get_packages(manifests)
         assert result["bazzite"] == {}
 
     def test_handles_multiple_images_independently(self):
@@ -300,7 +391,7 @@ class TestGetPackages:
             "bazzite": make_manifest_with_packages({"pkg-a": "1.0"}),
             "bazzite-deck": make_manifest_with_packages({"pkg-b": "2.0"}),
         }
-        result = get_packages(manifests)
+        result, _ = get_packages(manifests)
         assert len(result) == 2
         assert result["bazzite"] == {"pkg-a": "1.0"}
         assert result["bazzite-deck"] == {"pkg-b": "2.0"}
@@ -309,8 +400,171 @@ class TestGetPackages:
         manifests = {
             "bazzite": {"Labels": {"ostree.rechunk.info": json.dumps({"packages": {}})}}
         }
-        result = get_packages(manifests)
+        result, _ = get_packages(manifests)
         assert result["bazzite"] == {}
+
+    def test_sbom_takes_precedence_over_labels(self):
+        """When SBOM path is provided, SBOM data should be used instead of labels."""
+        packages = {"kernel": "6.19.8-sbom"}
+        manifests = {"bazzite": make_manifest_with_packages({"kernel": "6.19.8-label"})}
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump({"artifacts": [{"name": "kernel", "version": "6.19.8-sbom"}]}, f)
+            sbom_path = f.name
+
+        try:
+            result, _ = get_packages(manifests, sbom_path=sbom_path)
+            assert result["bazzite"]["kernel"] == "6.19.8-sbom"
+        finally:
+            os.unlink(sbom_path)
+
+    def test_applies_sbom_packages_to_all_images(self):
+        """SBOM packages should be applied to all images in manifests."""
+        manifests = {
+            "bazzite": make_manifest_with_packages({"pkg-a": "1.0"}),
+            "bazzite-deck": make_manifest_with_packages({"pkg-b": "2.0"}),
+        }
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump(
+                {
+                    "artifacts": [
+                        {"name": "kernel", "version": "6.19.8"},
+                        {"name": "mesa", "version": "26.0.3"},
+                    ]
+                },
+                f,
+            )
+            sbom_path = f.name
+
+        try:
+            result, _ = get_packages(manifests, sbom_path=sbom_path)
+            # SBOM packages should be applied to all images
+            assert result["bazzite"]["kernel"] == "6.19.8"
+            assert result["bazzite"]["mesa"] == "26.0.3"
+            assert result["bazzite-deck"]["kernel"] == "6.19.8"
+            assert result["bazzite-deck"]["mesa"] == "26.0.3"
+        finally:
+            os.unlink(sbom_path)
+
+
+class TestGetPackagesFromSbom:
+    """Tests for get_packages_from_sbom function that parses Syft SPDX JSON."""
+
+    def test_parses_syft_artifacts_format(self):
+        """Test parsing Syft's native artifacts format."""
+        syft_data = {
+            "artifacts": [
+                {"name": "kernel", "version": "6.19.8-200.ogc"},
+                {"name": "mesa", "version": "26.0.3-1"},
+                {"name": "glibc", "version": "2.39-1"},
+            ]
+        }
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump(syft_data, f)
+            sbom_path = f.name
+
+        try:
+            result = get_packages_from_sbom(sbom_path)
+            assert result["kernel"] == "6.19.8-200.ogc"
+            assert result["mesa"] == "26.0.3-1"
+            assert result["glibc"] == "2.39-1"
+            assert len(result) == 3
+        finally:
+            os.unlink(sbom_path)
+
+    def test_parses_spdx_packages_format(self):
+        """Test parsing SPDX format with packages array."""
+        spdx_data = {
+            "packages": [
+                {"name": "kernel", "versionInfo": "6.19.8-200.ogc"},
+                {"name": "mesa", "versionInfo": "26.0.3-1"},
+            ]
+        }
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump(spdx_data, f)
+            sbom_path = f.name
+
+        try:
+            result = get_packages_from_sbom(sbom_path)
+            assert result["kernel"] == "6.19.8-200.ogc"
+            assert result["mesa"] == "26.0.3-1"
+            assert len(result) == 2
+        finally:
+            os.unlink(sbom_path)
+
+    def test_ignores_artifacts_without_version(self):
+        """Artifacts without version field should be skipped."""
+        syft_data = {
+            "artifacts": [
+                {"name": "valid-pkg", "version": "1.0"},
+                {"name": "no-version-pkg"},
+                {"name": "", "version": "2.0"},
+                {"version": "3.0"},
+            ]
+        }
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump(syft_data, f)
+            sbom_path = f.name
+
+        try:
+            result = get_packages_from_sbom(sbom_path)
+            assert result["valid-pkg"] == "1.0"
+            assert "no-version-pkg" not in result
+            assert len(result) == 1
+        finally:
+            os.unlink(sbom_path)
+
+    def test_returns_empty_dict_for_missing_file(self):
+        """Should return empty dict for non-existent SBOM file."""
+        result = get_packages_from_sbom("/nonexistent/path/sbom.json")
+        assert result == {}
+
+    def test_returns_empty_dict_for_invalid_json(self):
+        """Should return empty dict for invalid JSON."""
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            f.write("not valid json")
+            sbom_path = f.name
+
+        try:
+            result = get_packages_from_sbom(sbom_path)
+            assert result == {}
+        finally:
+            os.unlink(sbom_path)
+
+    def test_returns_empty_dict_for_empty_artifacts(self):
+        """Should return empty dict when no artifacts or packages found."""
+        syft_data = {"artifacts": []}
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump(syft_data, f)
+            sbom_path = f.name
+
+        try:
+            result = get_packages_from_sbom(sbom_path)
+            assert result == {}
+        finally:
+            os.unlink(sbom_path)
+
+    def test_prefers_artifacts_over_packages(self):
+        """When both formats present, should prefer artifacts format."""
+        syft_data = {
+            "artifacts": [{"name": "kernel", "version": "6.19.8-artifacts"}],
+            "packages": [{"name": "kernel", "versionInfo": "6.19.8-packages"}],
+        }
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump(syft_data, f)
+            sbom_path = f.name
+
+        try:
+            result = get_packages_from_sbom(sbom_path)
+            assert result["kernel"] == "6.19.8-artifacts"
+        finally:
+            os.unlink(sbom_path)
 
 
 # =============================================================================
@@ -415,6 +669,21 @@ class TestGetVersions:
         assert result["pkg-a"] == "1.0"
         assert result["pkg-b"] == "2.0"
         assert result["pkg-c"] == "3.0"
+
+    def test_uses_sbom_when_provided(self):
+        """When sbom_path is provided, should use SBOM packages."""
+        manifests = {"bazzite": make_manifest_with_packages({"label-pkg": "1.0"})}
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump({"artifacts": [{"name": "sbom-pkg", "version": "2.0"}]}, f)
+            sbom_path = f.name
+
+        try:
+            result = get_versions(manifests, sbom_path=sbom_path)
+            # SBOM package should be in result
+            assert result["sbom-pkg"] == "2.0"
+        finally:
+            os.unlink(sbom_path)
 
 
 # =============================================================================
@@ -540,7 +809,9 @@ class TestGetPackageGroups:
         """Image names derived from multi_image_variants."""
         return [f"bazzite-nix{v.get('suffix', '')}" for v in multi_image_variants]
 
-    def test_finds_packages_common_to_all_images(self, multi_image_variants, multi_image_names):
+    def test_finds_packages_common_to_all_images(
+        self, multi_image_variants, multi_image_names
+    ):
         common_pkg = {"common-pkg": "1.0"}
         manifests = {
             img: make_manifest_with_packages({**common_pkg, f"{img}-pkg": "2.0"})
@@ -549,9 +820,13 @@ class TestGetPackageGroups:
         common, others = get_package_groups({}, manifests, multi_image_variants)
         assert "common-pkg" in common
 
-    def test_excludes_packages_missing_from_any_image(self, multi_image_variants, multi_image_names):
+    def test_excludes_packages_missing_from_any_image(
+        self, multi_image_variants, multi_image_names
+    ):
         manifests = {}
-        manifests[multi_image_names[0]] = make_manifest_with_packages({"only-in-bazzite": "1.0"})
+        manifests[multi_image_names[0]] = make_manifest_with_packages(
+            {"only-in-bazzite": "1.0"}
+        )
         for img in multi_image_names[1:]:
             manifests[img] = make_manifest_with_packages({})
         common, others = get_package_groups({}, manifests, multi_image_variants)
@@ -567,7 +842,9 @@ class TestGetPackageGroups:
         ],
         ids=["deck", "desktop", "kde", "nvidia"],
     )
-    def test_categorizes_category_specific_packages(self, category, filter_fn, multi_image_variants, multi_image_names):
+    def test_categorizes_category_specific_packages(
+        self, category, filter_fn, multi_image_variants, multi_image_names
+    ):
         category_pkg = {f"{category}-only-pkg": "1.0"}
         manifests = {
             img: make_manifest_with_packages(category_pkg if filter_fn(img) else {})
@@ -576,7 +853,9 @@ class TestGetPackageGroups:
         common, others = get_package_groups({}, manifests, multi_image_variants)
         assert f"{category}-only-pkg" in others[category]
 
-    def test_common_packages_not_in_other_categories(self, multi_image_variants, multi_image_names):
+    def test_common_packages_not_in_other_categories(
+        self, multi_image_variants, multi_image_names
+    ):
         """Packages common to all images should not appear in other categories."""
         common_pkg = {"truly-common": "1.0"}
         manifests = {
@@ -603,6 +882,36 @@ class TestGetPackageGroups:
         common, others = get_package_groups({}, manifests, multi_image_variants)
         assert common == []
         assert all(v == [] for v in others.values())
+
+    def test_uses_sbom_when_provided(self, multi_image_variants, multi_image_names):
+        """When sbom_path is provided, should use SBOM packages instead of manifest labels."""
+        # Manifests have label-pkg, SBOM has sbom-pkg
+        manifests = {
+            img: make_manifest_with_packages({"label-pkg": "1.0"})
+            for img in multi_image_names
+        }
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump(
+                {
+                    "artifacts": [
+                        {"name": "sbom-pkg", "version": "2.0"},
+                        {"name": "common-sbom", "version": "3.0"},
+                    ]
+                },
+                f,
+            )
+            sbom_path = f.name
+
+        try:
+            common, others = get_package_groups(
+                {}, manifests, multi_image_variants, sbom_path=sbom_path
+            )
+            # SBOM packages should be found
+            assert "sbom-pkg" in common
+            assert "common-sbom" in common
+        finally:
+            os.unlink(sbom_path)
 
 
 # =============================================================================
@@ -1205,3 +1514,240 @@ class TestVersionHandlingIntegration:
             {"nvidia-kmod-common-lts": "580.142-1"},
         )
         assert result == ""
+
+    def test_sbom_packages_used_for_changelog(self):
+        """Verify SBOM packages can be used for changelog generation."""
+        # Create SBOM with non-blacklisted packages
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump(
+                {
+                    "artifacts": [
+                        {"name": "gamescope-session", "version": "137.7c5ebe99-1"},
+                        {"name": "inputplumber", "version": "0.75.2-1"},
+                        {"name": "custom-package", "version": "2.0.0"},
+                    ]
+                },
+                f,
+            )
+            sbom_path = f.name
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump(
+                {
+                    "artifacts": [
+                        {"name": "gamescope-session", "version": "136.402bfb81-1"},
+                        {"name": "inputplumber", "version": "0.75.1-1"},
+                        {"name": "custom-package", "version": "1.0.0"},
+                    ]
+                },
+                f,
+            )
+            prev_sbom_path = f.name
+
+        try:
+            manifests = {"bazzite": make_manifest_with_packages({})}
+            prev_manifests = {"bazzite": make_manifest_with_packages({})}
+
+            # Get versions from SBOM
+            curr_versions = get_versions(manifests, sbom_path=sbom_path)
+            prev_versions = get_versions(prev_manifests, sbom_path=prev_sbom_path)
+
+            # Verify SBOM data was used
+            assert curr_versions["gamescope-session"] == "137.7c5ebe99-1"
+            assert curr_versions["custom-package"] == "2.0.0"
+            assert prev_versions["gamescope-session"] == "136.402bfb81-1"
+            assert prev_versions["custom-package"] == "1.0.0"
+
+            # Calculate changes
+            result = calculate_changes(
+                ["gamescope-session", "inputplumber", "custom-package"],
+                prev_versions,
+                curr_versions,
+            )
+
+            # All packages should show as changed
+            assert "🔄" in result
+            assert "gamescope-session" in result
+            assert "inputplumber" in result
+            assert "custom-package" in result
+
+        finally:
+            os.unlink(sbom_path)
+            os.unlink(prev_sbom_path)
+
+    def test_sbom_fallback_to_labels(self):
+        """Verify fallback to labels when SBOM is not available."""
+        # Create manifests with packages but no SBOM
+        manifests = {
+            "bazzite": make_manifest_with_packages(
+                {"kernel": "6.19.8", "mesa": "26.0.3"}
+            )
+        }
+
+        # Get versions without SBOM (should use labels)
+        versions = get_versions(manifests)
+
+        assert versions["kernel"] == "6.19.8"
+        assert versions["mesa"] == "26.0.3"
+
+    def test_get_packages_tuple_return_type(self):
+        """Verify get_packages returns a tuple of (current, prev) packages."""
+        manifests = {"bazzite": make_manifest_with_packages({"kernel": "6.19.8"})}
+
+        result = get_packages(manifests)
+
+        # Should be a tuple
+        assert isinstance(result, tuple)
+        assert len(result) == 2
+
+        # First element is current packages
+        current, prev = result
+        assert current["bazzite"]["kernel"] == "6.19.8"
+        assert prev == {}
+
+
+# =============================================================================
+# Integration Tests using real sample SBOM files
+# =============================================================================
+
+
+class TestRealSbomSamples:
+    """Integration tests using real Syft-generated sample SBOM files."""
+
+    def test_sample_sbom_files_exist(self):
+        """Verify sample SBOM files exist in samples directory."""
+        assert os.path.exists(SAMPLE_SBOM_PATH), (
+            f"Sample SBOM not found at {SAMPLE_SBOM_PATH}"
+        )
+        assert os.path.exists(SAMPLE_SBOM_PREV_PATH), (
+            f"Prev sample SBOM not found at {SAMPLE_SBOM_PREV_PATH}"
+        )
+
+    def test_sample_sbom_contains_packages(self, sbom_sample):
+        """Verify sample SBOM contains expected package structure."""
+        assert "artifacts" in sbom_sample
+        assert len(sbom_sample["artifacts"]) > 0
+        # Verify first artifact has required fields
+        first = sbom_sample["artifacts"][0]
+        assert "name" in first
+        assert "version" in first
+
+    def test_parse_real_sbom_format(self, sbom_sample):
+        """Verify get_packages_from_sbom can parse real Syft output."""
+        packages = get_packages_from_sbom(SAMPLE_SBOM_PATH)
+        assert len(packages) > 0
+        # Note: Some packages may have duplicate names (e.g., LCEVCdec appears twice)
+        # so unique package count may be less than artifact count
+        assert len(packages) <= len(sbom_sample["artifacts"])
+        # Verify first package matches
+        first_artifact = sbom_sample["artifacts"][0]
+        assert packages[first_artifact["name"]] == first_artifact["version"]
+
+    def test_real_sbom_package_count(self):
+        """Verify sample SBOM has expected number of unique packages."""
+        packages = get_packages_from_sbom(SAMPLE_SBOM_PATH)
+        # Some packages may have duplicate names, so count is <= 50
+        assert len(packages) <= 50, (
+            f"Expected <= 50 unique packages, got {len(packages)}"
+        )
+        assert len(packages) >= 40, (
+            f"Expected >= 40 unique packages, got {len(packages)}"
+        )
+
+    def test_detect_changes_from_sample_sboms(self, sbom_sample, sbom_prev_sample):
+        """Test changelog generation with real sample SBOMs."""
+        # Get packages from both SBOMs
+        curr_pkgs = get_packages_from_sbom(SAMPLE_SBOM_PATH)
+        prev_pkgs = get_packages_from_sbom(SAMPLE_SBOM_PREV_PATH)
+
+        # Verify we have packages
+        assert len(curr_pkgs) > 0
+        assert len(prev_pkgs) > 0
+
+        # Find changed packages
+        changed = []
+        for name in set(curr_pkgs.keys()) | set(prev_pkgs.keys()):
+            if name in curr_pkgs and name in prev_pkgs:
+                if curr_pkgs[name] != prev_pkgs[name]:
+                    changed.append(name)
+
+        # Our sample files have 2 changes: 7zip and Judy
+        assert len(changed) >= 2, (
+            f"Expected at least 2 changed packages, got {len(changed)}"
+        )
+        assert "7zip" in changed, "7zip should be in changed packages"
+        assert "Judy" in changed, "Judy should be in changed packages"
+
+    def test_changelog_generation_with_real_sbom(self, sbom_sample, sbom_prev_sample):
+        """Test full changelog generation flow with real SBOM samples."""
+        # Create manifests for testing
+        manifests = {"bazzite": make_manifest_with_packages({})}
+
+        # Get versions from SBOMs
+        curr_versions = get_versions(manifests, sbom_path=SAMPLE_SBOM_PATH)
+        prev_versions = get_versions(manifests, sbom_path=SAMPLE_SBOM_PREV_PATH)
+
+        # Verify versions were extracted
+        assert len(curr_versions) > 0
+        assert len(prev_versions) > 0
+
+        # Find all packages in both versions
+        all_pkgs = list(set(curr_versions.keys()) | set(prev_versions.keys()))
+
+        # Calculate changes
+        result = calculate_changes(all_pkgs, prev_versions, curr_versions)
+
+        # Verify changes were detected
+        assert len(result) > 0, "Expected changelog to have content"
+
+        # Verify specific packages changed
+        assert "7zip" in result, "7zip change should be in changelog"
+        # Note: FEDORA_PATTERN strips .fcXX suffix, so versions are like "24.09-1" not "24.09-1.fc43"
+        assert "24.09-1" in result, "Previous version (stripped) should be in changelog"
+        assert "25.01-1" in result, "Current version (stripped) should be in changelog"
+
+    def test_sample_sbom_known_packages(self, sbom_sample):
+        """Verify sample SBOM contains expected known packages."""
+        packages = get_packages_from_sbom(SAMPLE_SBOM_PATH)
+
+        # Verify we have some expected RPM packages (from real syft output)
+        expected_packages = ["7zip", "7zip-standalone"]
+        for pkg in expected_packages:
+            assert pkg in packages, f"Expected to find {pkg} in sample SBOM"
+
+        # Verify version format matches Syft output
+        assert packages["7zip"] == "25.01-1.fc43"
+
+    def test_sample_sbom_versions_match_artifacts(self, sbom_sample):
+        """Verify version extraction matches artifact data exactly."""
+        packages = get_packages_from_sbom(SAMPLE_SBOM_PATH)
+
+        for artifact in sbom_sample["artifacts"]:
+            name = artifact["name"]
+            version = artifact["version"]
+            assert name in packages, f"Package {name} not found in extracted packages"
+            assert packages[name] == version, (
+                f"Version mismatch for {name}: {packages[name]} != {version}"
+            )
+
+    def test_sample_prev_sbom_differences(self, sbom_sample, sbom_prev_sample):
+        """Verify previous sample SBOM has expected differences."""
+        curr_pkgs = get_packages_from_sbom(SAMPLE_SBOM_PATH)
+        prev_pkgs = get_packages_from_sbom(SAMPLE_SBOM_PREV_PATH)
+
+        # 7zip should have different versions
+        assert curr_pkgs["7zip"] == "25.01-1.fc43"
+        assert prev_pkgs["7zip"] == "24.09-1.fc43"
+        assert curr_pkgs["7zip"] != prev_pkgs["7zip"]
+
+        # Judy should have different versions
+        assert curr_pkgs["Judy"] == "1.0.5-42.fc43"
+        assert prev_pkgs["Judy"] == "1.0.5-prev"
+        assert curr_pkgs["Judy"] != prev_pkgs["Judy"]
+
+        # Other packages should be the same
+        for name in curr_pkgs:
+            if name not in ["7zip", "Judy"]:
+                assert curr_pkgs.get(name) == prev_pkgs.get(name), (
+                    f"Unexpected difference for {name}"
+                )

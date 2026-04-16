@@ -88,3 +88,4 @@ jobs:
         with:
           variant: ${{ matrix.variant }}
           handwritten: ${{ inputs.handwritten }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}

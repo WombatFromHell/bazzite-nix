@@ -7,6 +7,7 @@ from collections import defaultdict
 from pathlib import Path
 import os
 
+
 # Registry prefix for skopeo inspect, derived from IMAGE_PREFIX env var.
 # IMAGE_PREFIX is set by the calling action as e.g. "ghcr.io/owner/repo".
 # We strip the repo name to get the registry + org, then prepend "docker://".
@@ -20,6 +21,7 @@ def _registry_prefix():
             return f"docker://{parts[0]}/"
     # Fallback for direct invocation without IMAGE_PREFIX
     return "docker://ghcr.io/wombatfromhell/"
+
 
 REGISTRY = _registry_prefix()
 DEFAULT_VARIANTS_PATH = Path(__file__).parent.parent.parent / "variants.json"
@@ -226,44 +228,133 @@ def get_tags(target: str, manifests: dict[str, Any]):
     return tags[-2], tags[-1]
 
 
-def get_packages(manifests: dict[str, Any]):
+def get_packages_from_sbom(sbom_path: str) -> dict[str, str]:
+    """Extract packages from Syft SPDX JSON format.
+
+    Supports both Syft's native format (artifacts array) and SPDX format (packages array).
+    """
     packages = {}
-    for img, manifest in manifests.items():
-        try:
-            labels = manifest.get("Labels", {})
-            if not labels:
-                print(f"Warning: No Labels in manifest for {img}")
-                packages[img] = {}
-                continue
+    try:
+        with open(sbom_path) as f:
+            data = json.load(f)
 
-            # Try newer ostree.rechunk.info label first, then fallback to dev.hhd.rechunk.info
-            rechunk_info = labels.get("ostree.rechunk.info") or labels.get("dev.hhd.rechunk.info")
-            if not rechunk_info:
-                available = list(labels.keys())
-                print(f"Warning: No rechunk info label for {img}. Available labels: {available}")
-                packages[img] = {}
-                continue
+        # Try Syft native format (v1.x)
+        artifacts = data.get("artifacts", [])
+        if artifacts:
+            for artifact in artifacts:
+                name = artifact.get("name", "")
+                version = artifact.get("version", "")
+                if name and version:
+                    packages[name] = version
+            if packages:
+                print(f"  Parsed {len(packages)} packages from SBOM (artifacts format)")
+                return packages
 
+        # Try SPDX format (packages array)
+        spdx_packages = data.get("packages", [])
+        if spdx_packages:
+            for pkg in spdx_packages:
+                name = pkg.get("name", "")
+                # SPDX uses versionInfo, name, or both
+                version = pkg.get("versionInfo") or pkg.get("version", "")
+                if name and version:
+                    packages[name] = version
+            if packages:
+                print(f"  Parsed {len(packages)} packages from SBOM (SPDX format)")
+                return packages
+
+        print(f"Warning: No packages found in SBOM file: {sbom_path}")
+        return packages
+
+    except FileNotFoundError:
+        print(f"Warning: SBOM file not found: {sbom_path}")
+        return {}
+    except json.JSONDecodeError as e:
+        print(f"Warning: Invalid JSON in SBOM file {sbom_path}: {e}")
+        return {}
+    except Exception as e:
+        print(f"Warning: Failed to parse SBOM {sbom_path}: {type(e).__name__}: {e}")
+        return {}
+
+
+def get_packages(
+    manifests: dict[str, Any],
+    sbom_path: str | None = None,
+    prev_sbom_path: str | None = None,
+) -> tuple[dict[str, dict[str, str]], dict[str, dict[str, str]]]:
+    """Get packages from SBOM files or manifest labels.
+
+    Returns (current_packages, prev_packages) where each is {image_name: {pkg: version}}.
+
+    Prefers SBOM data when available, falls back to manifest labels.
+    """
+    current_packages: dict[str, dict[str, str]] = {}
+    prev_packages: dict[str, dict[str, str]] = {}
+
+    # Try to load from SBOM files first (image-agnostic, same packages for all variants)
+    if sbom_path:
+        sbom_pkgs = get_packages_from_sbom(sbom_path)
+        if sbom_pkgs:
+            print(f"Using SBOM for current packages: {sbom_path}")
+            # Apply same packages to all images
+            for img in manifests.keys():
+                current_packages[img] = sbom_pkgs.copy()
+
+    if prev_sbom_path:
+        # We need manifests to know which images to apply prev packages to
+        # For now, use manifests to determine image list
+        pass
+
+    # Fallback to manifest labels if SBOM not available
+    if not current_packages:
+        print("SBOM not available, falling back to manifest labels")
+        for img, manifest in manifests.items():
             try:
-                data = json.loads(rechunk_info)
-            except json.JSONDecodeError as e:
-                print(f"::error::Invalid JSON in ostree.rechunk.info label for {img}: {e}")
-                print(f"::error::Label content (first 200 chars): {rechunk_info[:200]}")
+                labels = manifest.get("Labels", {})
+                if not labels:
+                    print(f"Warning: No Labels in manifest for {img}")
+                    current_packages[img] = {}
+                    continue
+
+                # Try newer ostree.rechunk.info label first, then fallback to dev.hhd.rechunk.info
+                rechunk_info = labels.get("ostree.rechunk.info") or labels.get(
+                    "dev.hhd.rechunk.info"
+                )
+                if not rechunk_info:
+                    available = list(labels.keys())
+                    print(
+                        f"Warning: No rechunk info label for {img}. Available labels: {available}"
+                    )
+                    current_packages[img] = {}
+                    continue
+
+                try:
+                    data = json.loads(rechunk_info)
+                except json.JSONDecodeError as e:
+                    print(
+                        f"::error::Invalid JSON in ostree.rechunk.info label for {img}: {e}"
+                    )
+                    print(
+                        f"::error::Label content (first 200 chars): {rechunk_info[:200]}"
+                    )
+                    raise
+
+                if "packages" not in data:
+                    print(
+                        f"Warning: No 'packages' key in rechunk info for {img}. Keys: {list(data.keys())}"
+                    )
+                    current_packages[img] = {}
+                    continue
+
+                current_packages[img] = data["packages"]
+            except json.JSONDecodeError:
+                # Re-raise JSON errors to fail the build
                 raise
+            except Exception as e:
+                print(f"Failed to get packages for {img}: {type(e).__name__}: {e}")
+                current_packages[img] = {}
 
-            if "packages" not in data:
-                print(f"Warning: No 'packages' key in rechunk info for {img}. Keys: {list(data.keys())}")
-                packages[img] = {}
-                continue
-
-            packages[img] = data["packages"]
-        except json.JSONDecodeError:
-            # Re-raise JSON errors to fail the build
-            raise
-        except Exception as e:
-            print(f"Failed to get packages for {img}: {type(e).__name__}: {e}")
-            packages[img] = {}
-    return packages
+    return current_packages, prev_packages
 
 
 def is_nvidia(img: str, lts: bool):
@@ -274,15 +365,19 @@ def is_nvidia(img: str, lts: bool):
 
 
 def get_package_groups(
-    prev: dict[str, Any], manifests: dict[str, Any], variants: list[dict[str, Any]] | None = None
+    prev: dict[str, Any],
+    manifests: dict[str, Any],
+    variants: list[dict[str, Any]] | None = None,
+    sbom_path: str | None = None,
+    prev_sbom_path: str | None = None,
 ):
     if variants is None:
         variants = load_variants()
     common = set()
     others = {k: set() for k in OTHER_NAMES.keys()}
 
-    npkg = get_packages(manifests)
-    ppkg = get_packages(prev)
+    npkg, _ = get_packages(manifests, sbom_path, prev_sbom_path)
+    ppkg, _ = get_packages(prev, None, None)
 
     keys = set(npkg.keys()) | set(ppkg.keys())
     pkg = defaultdict(set)
@@ -337,9 +432,9 @@ def get_package_groups(
     return sorted(common), {k: sorted(v) for k, v in others.items()}
 
 
-def get_versions(manifests: dict[str, Any]):
+def get_versions(manifests: dict[str, Any], sbom_path: str | None = None):
     versions = {}
-    pkgs = get_packages(manifests)
+    pkgs, _ = get_packages(manifests, sbom_path, None)
     for img, img_pkgs in pkgs.items():
         for pkg, v in img_pkgs.items():
             if is_nvidia(img, lts=True) and "nvidia" in pkg:
@@ -397,18 +492,22 @@ def get_commits(prev_manifests, manifests):
         ]
 
         # Use GitHub API to compare commits
-        api_url = f"https://api.github.com/repos/{UPSTREAM_REPO}/compare/{start}...{finish}"
-        
+        api_url = (
+            f"https://api.github.com/repos/{UPSTREAM_REPO}/compare/{start}...{finish}"
+        )
+
         response = subprocess.run(
             ["curl", "-s", "-H", "Accept: application/vnd.github+json", api_url],
             check=True,
             stdout=subprocess.PIPE,
         ).stdout.decode("utf-8")
-        
+
         data = json.loads(response)
-        
+
         if "commits" not in data:
-            print(f"Failed to get commits from GitHub API: {data.get('message', 'Unknown error')}")
+            print(
+                f"Failed to get commits from GitHub API: {data.get('message', 'Unknown error')}"
+            )
             return ""
 
         out = ""
@@ -445,10 +544,14 @@ def generate_changelog(
     prev_manifests,
     manifests,
     variants: list[dict[str, Any]],
+    sbom_path: str | None = None,
+    prev_sbom_path: str | None = None,
 ):
-    common, others = get_package_groups(prev_manifests, manifests, variants)
-    versions = get_versions(manifests)
-    prev_versions = get_versions(prev_manifests)
+    common, others = get_package_groups(
+        prev_manifests, manifests, variants, sbom_path, prev_sbom_path
+    )
+    versions = get_versions(manifests, sbom_path)
+    prev_versions = get_versions(prev_manifests, prev_sbom_path)
 
     prev, curr = get_tags(target, manifests)
 
@@ -554,6 +657,8 @@ def main():
     parser.add_argument(
         "--variants-config", help="Path to variants.json configuration file"
     )
+    parser.add_argument("--sbom", help="Path to current SBOM JSON file")
+    parser.add_argument("--prev-sbom", help="Path to previous SBOM JSON file")
     args = parser.parse_args()
 
     # Remove refs/tags, refs/heads, refs/remotes e.g.
@@ -569,6 +674,11 @@ def main():
     print(f"Previous tag: {prev}")
     print(f" Current tag: {curr}")
 
+    if args.sbom:
+        print(f"Using SBOM for current: {args.sbom}")
+    if args.prev_sbom:
+        print(f"Using SBOM for previous: {args.prev_sbom}")
+
     prev_manifests = get_manifests(prev, variants)
     title, changelog = generate_changelog(
         args.handwritten,
@@ -578,6 +688,8 @@ def main():
         prev_manifests,
         manifests,
         variants,
+        args.sbom,
+        args.prev_sbom,
     )
 
     print(f"Changelog:\n# {title}\n{changelog}")

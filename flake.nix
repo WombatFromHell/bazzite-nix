@@ -11,20 +11,35 @@
     nixpkgs,
     flake-utils,
   }:
-    flake-utils.lib.eachDefaultSystem (
-      system: let
-        pkgs = nixpkgs.legacyPackages.${system};
-      in {
-        devShells.default = pkgs.mkShell {
-          packages = with pkgs; [
-            actionlint
-            shellcheck
-            shfmt
-            python3
-            python3Packages.pytest
-            python3Packages.pytest-mock
-          ];
-        };
-      }
-    );
+    flake-utils.lib.eachDefaultSystem (system: let
+      pkgs = nixpkgs.legacyPackages.${system};
+    in {
+      devShells.default = pkgs.mkShell {
+        packages = with pkgs; [
+          actionlint
+          oras
+          python3
+          python3Packages.pytest
+          python3Packages.pytest-mock
+          shellcheck
+          shfmt
+          syft
+          go
+        ];
+
+        shellHook = ''
+          export GOPATH="$HOME/.local/share/go"
+          export GOMODCACHE="$GOPATH/pkg/mod"
+          export GOBIN="$GOPATH/bin"
+
+          mkdir -p "$GOPATH" "$GOBIN"
+          export PATH="$GOBIN:$PATH"
+
+          if ! command -v composite-action-lint >/dev/null; then
+            echo "Installing composite-action-lint..."
+            go install github.com/bettermarks/composite-action-lint/cmd/composite-action-lint@latest
+          fi
+        '';
+      };
+    });
 }

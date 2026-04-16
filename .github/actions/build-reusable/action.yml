@@ -44,6 +44,9 @@ outputs:
   kernel_version:
     description: "Kernel version extracted from the built image"
     value: ${{ steps.labels.outputs.kernel_version }}
+  variant_tag:
+    description: "Version tag for the image variant"
+    value: ${{ steps.labels.outputs.tag }}
 
 runs:
   using: composite
@@ -74,7 +77,7 @@ runs:
       run: |
         avail_gb=$(df -B1G / | awk 'NR==2 {print $4}')
         echo "avail_gb=${avail_gb}" >> "$GITHUB_OUTPUT"
-        if [ "${avail_gb}" -lt 50 ]; then # <50GB Avail is "low"
+        if [ "${avail_gb}" -lt 50 ]; then
           echo "low_space=1" >> "$GITHUB_OUTPUT"
         else
           echo "low_space=0" >> "$GITHUB_OUTPUT"
@@ -101,7 +104,6 @@ runs:
       run: |
         source "${{ github.action_path }}/helpers.sh"
         extract_image_info "${{ runner.temp }}/manifest.json" >> "$GITHUB_OUTPUT"
-      # Outputs: kernel_version, manifest_packages
 
     - name: Assemble image labels
       id: assemble_labels

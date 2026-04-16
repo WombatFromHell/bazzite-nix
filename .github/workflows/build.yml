@@ -26,12 +26,8 @@ permissions:
   id-token: write
 
 env:
-  # Image metadata
   IMAGE_NAME: "${{ github.event.repository.name }}"
   IMAGE_DESC: "Customized Bazzite image with Nix mount support and other sugar"
-
-  # Variant configuration file path
-  # Edit .github/variants.json to add, remove, or modify build variants
   VARIANTS_CONFIG: ".github/variants.json"
 
 concurrency:
@@ -39,7 +35,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Check upstream images, determine which variants need rebuilding, and aggregate results
   check_and_aggregate:
     runs-on: ubuntu-24.04
     outputs:
@@ -74,7 +69,6 @@ jobs:
           image_desc: ${{ env.IMAGE_DESC }}
           date: ${{ steps.date.outputs.date }}
 
-  # Build, push, sign, and verify each variant that needs updating
   build_push:
     needs: check_and_aggregate
     if: needs.check_and_aggregate.outputs.any_builds_needed == 'true'
@@ -89,13 +83,10 @@ jobs:
       contents: read
       packages: write
       id-token: write
-
-    outputs:
-      variant_name: ${{ matrix.variant_data.variant }}
-      target_branch: ${{ matrix.variant_data.variant }}
+      attestations: write
+      artifact-metadata: write
 
     env:
-      # Centralise the base image ref so all steps reference it identically
       BASE_IMG: >-
         ${{ needs.check_and_aggregate.outputs.registry }}/${{ needs.check_and_aggregate.outputs.repo }}${{ matrix.variant_data.suffix }}
 
@@ -118,6 +109,7 @@ jobs:
           repository_name: ${{ github.event.repository.name }}
 
       - name: Push, sign, and verify image
+        id: push_image
         uses: ./.github/actions/push-reusable
         with:
           source_ref: ${{ steps.build.outputs.source_ref }}
@@ -132,24 +124,87 @@ jobs:
           date: ${{ needs.check_and_aggregate.outputs.date }}
           parent_version: ${{ matrix.variant_data.parent_version }}
 
-  generate_release:
+      - name: Manage SBOM (attach & sign)
+        if: github.event_name != 'pull_request'
+        id: manage_sbom
+        uses: ./.github/actions/sbom-reusable
+        with:
+          image_ref: ${{ steps.build.outputs.source_ref }}
+          variant_name: ${{ matrix.variant_data.variant }}
+          version_tag: ${{ steps.build.outputs.variant_tag }}
+          registry: ${{ needs.check_and_aggregate.outputs.registry }}
+          repo: ${{ needs.check_and_aggregate.outputs.repo }}
+          suffix: ${{ matrix.variant_data.suffix }}
+          image_digest: ${{ steps.push_image.outputs.remote_digest }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          github_actor: ${{ github.actor }}
+          signing_secret: ${{ secrets.SIGNING_SECRET }}
+
+      - name: Cleanup SBOM file
+        if: github.event_name != 'pull_request'
+        shell: bash
+        env:
+          SBOM_PATH: ${{ steps.manage_sbom.outputs.sbom_path }}
+        run: |
+          if [[ -n "${SBOM_PATH}" ]] && [[ -f "${SBOM_PATH}" ]]; then
+            rm -f "${SBOM_PATH}"
+            echo "✓ Cleaned up SBOM file"
+          fi
+
+  collect_build_results:
     needs: [check_and_aggregate, build_push]
+    if: needs.check_and_aggregate.outputs.any_builds_needed == 'true'
+    runs-on: ubuntu-24.04
+    outputs:
+      successful_variants: ${{ steps.collect.outputs.successful_variants }}
+      any_successful: ${{ steps.collect.outputs.any_successful }}
+    steps:
+      - name: Collect successful builds
+        id: collect
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          SUCCESSFUL_VARIANTS="[]"
+
+          JOBS=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "${{ github.api_url }}/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100")
+
+          SUCCESSFUL_VARIANTS=$(echo "$JOBS" | jq -c '
+            [ .jobs[]
+            | select(.name | startswith("Build & Push"))
+            | select(.conclusion == "success")
+            | {variant: (.name | sub("^Build & Push "; ""))}
+            ]')
+
+          COUNT=$(echo "$SUCCESSFUL_VARIANTS" | jq 'length')
+          ANY_SUCCESSFUL="false"
+          if [[ "$COUNT" -gt 0 ]]; then
+            ANY_SUCCESSFUL="true"
+          fi
+
+          echo "successful_variants=${SUCCESSFUL_VARIANTS}" >> "$GITHUB_OUTPUT"
+          echo "any_successful=${ANY_SUCCESSFUL}" >> "$GITHUB_OUTPUT"
+          echo "Found $COUNT successful builds"
+
+  generate_release:
+    needs: [check_and_aggregate, build_push, collect_build_results]
     if: |
-      needs.check_and_aggregate.outputs.any_builds_needed == 'true' &&
+      needs.collect_build_results.outputs.any_successful == 'true' &&
       (github.event.inputs.generate_release == 'true' || github.event_name == 'schedule')
-    name: Generate Release ${{ matrix.variant_data.variant }}
+    name: Generate Release ${{ matrix.variant.variant }}
     runs-on: ubuntu-24.04
     permissions:
       contents: write
 
     concurrency:
-      group: generate-release-${{ matrix.variant_data.variant }}-${{ github.ref }}
+      group: generate-release-${{ matrix.variant.variant }}-${{ github.ref }}
       cancel-in-progress: false
 
     strategy:
       fail-fast: false
       matrix:
-        variant_data: ${{ fromJson(needs.check_and_aggregate.outputs.variants_to_build) }}
+        variant: ${{ fromJson(needs.collect_build_results.outputs.successful_variants) }}
 
     steps:
       - name: Checkout
@@ -159,7 +214,8 @@ jobs:
         id: release
         uses: ./.github/actions/release-reusable
         with:
-          variant: ${{ matrix.variant_data.variant }}
+          variant: ${{ matrix.variant.variant }}
           handwritten: ${{ github.event.inputs.handwritten || '' }}
           registry: ${{ needs.check_and_aggregate.outputs.registry }}
           repo: ${{ needs.check_and_aggregate.outputs.repo }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}

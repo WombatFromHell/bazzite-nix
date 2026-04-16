@@ -207,3 +207,41 @@ run-vm-raw $variant_or_spec="{{ default_tag }}" $output_dir="" $force_pull="0" $
     set -euo pipefail
     source "{{ just_helpers }}"
     run_vm_raw "{{ variant_or_spec }}" "{{ variants_config }}" "{{ image_name }}" "{{ output_dir }}" "{{ force_pull }}" "{{ clean }}" "{{ oci_output_dir }}" "{{ cache_dir }}" "{{ bib_image }}"
+
+# ── SBOM Verification ─────────────────────────────────────────────────────────
+# Verify deployed image against remote SBOM attestation
+# Usage: just verify-sbom [--verbose] [--json] [--image ghcr.io/owner/repo:tag]
+#
+# This will:
+#   1. Extract the currently booted image from rpm-ostree status
+#   2. Fetch the SBOM from the container registry
+#   3. Compare packages between deployed image and SBOM
+#   4. Report differences
+#
+# Examples:
+#   just verify-sbom                  # Verify booted deployment
+#   just verify-sbom --verbose       # Verbose output
+#   just verify-sbom --json          # JSON output
+#   just verify-sbom --image ghcr.io/owner/bazzite-nix:stable-43.20260401
+
+[group('SBOM')]
+verify-sbom $verbose="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source "{{ just_helpers }}"
+    VERBOSE_OPT=""
+    if [[ "{{ verbose }}" == "verbose" ]]; then
+        VERBOSE_OPT="--verbose"
+    fi
+    verify_sbom $VERBOSE_OPT
+
+# Verify SBOM for a specific image tag
+# Usage: just verify-sbom-tag testing-43.20260409.1
+
+[group('SBOM')]
+verify-sbom-tag $tag:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source "{{ just_helpers }}"
+    FULL_IMAGE="docker://{{ repo_organization }}/{{ image_name }}:{{ tag }}"
+    verify_sbom --image "$FULL_IMAGE"

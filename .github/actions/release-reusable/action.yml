@@ -20,6 +20,9 @@ inputs:
     description: "Path to variants.json config"
     required: false
     default: ".github/variants.json"
+  github_token:
+    description: "GitHub token for registry authentication"
+    required: true
 
 outputs:
   title:
@@ -93,6 +96,119 @@ runs:
         echo "target=$TARGET" >> "$GITHUB_OUTPUT"
         echo "Using target: $TARGET"
 
+    - name: Install ORAS
+      uses: oras-project/setup-oras@38de303aac69abb66f3e6255b7198bff35f323e3 # v2.0.0
+
+    - name: Login to GHCR for ORAS
+      shell: bash
+      env:
+        GH_CR_TOKEN: ${{ inputs.github_token }}
+      run: |
+        echo "${{ inputs.github_token }}" | oras login ghcr.io -u ${{ github.actor }} --password-stdin
+
+    - name: Fetch current SBOM from registry
+      id: fetch-current-sbom
+      shell: bash
+      env:
+        IMAGE: "${{ steps.defaults.outputs.registry }}/${{ steps.defaults.outputs.repo }}"
+      run: |
+        set -euo pipefail
+
+        echo "::group::Fetch current SBOM"
+        echo "  Image: ${IMAGE}:${{ steps.get-target.outputs.target }}"
+
+        CURRENT_DIGEST=$(skopeo inspect --auth-file <(echo "${{ inputs.github_token }}" | oras auth encode ghcr.io ${{ github.actor }} -) \
+          "docker://${IMAGE}:${{ steps.get-target.outputs.target }}" 2>/dev/null | jq -r '.Digest')
+
+        if [[ -z "$CURRENT_DIGEST" ]] || [[ "$CURRENT_DIGEST" == "null" ]]; then
+          echo "::warning::Could not get current image digest, SBOM will not be available"
+          echo "sbom_path=" >> "$GITHUB_OUTPUT"
+        else
+          echo "  Current digest: ${CURRENT_DIGEST}"
+
+          mkdir -p ./sbom
+          if oras pull "${IMAGE}@${CURRENT_DIGEST}" \
+            --artifact-type application/vnd.spdx+json \
+            --output ./sbom; then
+            SBOM_FILE=$(ls ./sbom/*.json 2>/dev/null | head -1)
+            if [[ -n "$SBOM_FILE" ]]; then
+              echo "  SBOM file: ${SBOM_FILE}"
+              echo "sbom_path=${SBOM_FILE}" >> "$GITHUB_OUTPUT"
+            else
+              echo "::warning::No SBOM file found after oras pull"
+              echo "sbom_path=" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "::warning::Failed to pull SBOM from registry"
+            echo "sbom_path=" >> "$GITHUB_OUTPUT"
+          fi
+        fi
+        echo "::endgroup::"
+
+    - name: Fetch previous SBOM from registry
+      id: fetch-prev-sbom
+      shell: bash
+      env:
+        IMAGE: "${{ steps.defaults.outputs.registry }}/${{ steps.defaults.outputs.repo }}"
+      run: |
+        set -euo pipefail
+
+        echo "::group::Fetch previous SBOM"
+
+        # Get previous tag by looking at available tags
+        TAGS=$(skopeo list-tags "docker://${IMAGE}" 2>/dev/null | jq -r '.Tags[]' || echo "")
+        if [[ -z "$TAGS" ]]; then
+          echo "::warning::Could not list tags, SBOM will not be available for previous version"
+          echo "prev_sbom_path=" >> "$GITHUB_OUTPUT"
+          echo "::endgroup::"
+          exit 0
+        fi
+
+        # Find previous tag based on target
+        PREV_TAG=""
+        if [[ "${{ steps.get-target.outputs.target }}" == "stable" ]]; then
+          # For stable, find the second-to-last stable tag
+          PREV_TAG=$(echo "$TAGS" | grep -E '^[0-9]+\.[0-9]{8}' | sort -V | tail -2 | head -1)
+        else
+          # For other targets, find previous version
+          PREV_TAG=$(echo "$TAGS" | grep "^${{ steps.get-target.outputs.target }}" | sort -V | tail -2 | head -1)
+        fi
+
+        if [[ -z "$PREV_TAG" ]]; then
+          echo "::warning::Could not find previous tag, SBOM will not be available"
+          echo "prev_sbom_path=" >> "$GITHUB_OUTPUT"
+        else
+          echo "  Previous tag: ${PREV_TAG}"
+
+          PREV_DIGEST=$(skopeo inspect --auth-file <(echo "${{ inputs.github_token }}" | oras auth encode ghcr.io ${{ github.actor }} -) \
+            "docker://${IMAGE}:${PREV_TAG}" 2>/dev/null | jq -r '.Digest')
+
+          if [[ -z "$PREV_DIGEST" ]] || [[ "$PREV_DIGEST" == "null" ]]; then
+            echo "::warning::Could not get previous image digest"
+            echo "prev_sbom_path=" >> "$GITHUB_OUTPUT"
+          else
+            echo "  Previous digest: ${PREV_DIGEST}"
+
+            mkdir -p ./sbom/prev
+            if oras pull "${IMAGE}@${PREV_DIGEST}" \
+              --artifact-type application/vnd.spdx+json \
+              --output ./sbom/prev; then
+              PREV_SBOM_FILE=$(ls ./sbom/prev/*.json 2>/dev/null | head -1)
+              if [[ -n "$PREV_SBOM_FILE" ]]; then
+                echo "  Previous SBOM file: ${PREV_SBOM_FILE}"
+                echo "prev_sbom_path=${PREV_SBOM_FILE}" >> "$GITHUB_OUTPUT"
+              else
+                echo "::warning::No previous SBOM file found"
+                echo "prev_sbom_path=" >> "$GITHUB_OUTPUT"
+              fi
+            else
+              echo "::warning::Failed to pull previous SBOM from registry"
+              echo "prev_sbom_path=" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+        fi
+        echo "::endgroup::"
+
     - name: Generate Release Text
       id: generate-release
       shell: bash
@@ -101,13 +217,25 @@ runs:
         GITHUB_REPOSITORY: "${{ github.repository }}"
         GITHUB_REPOSITORY_OWNER: "${{ github.repository_owner }}"
       run: |
+        SBOM_ARG=""
+        if [[ -n "${{ steps.fetch-current-sbom.outputs.sbom_path }}" ]]; then
+          SBOM_ARG="--sbom ${{ steps.fetch-current-sbom.outputs.sbom_path }}"
+        fi
+
+        PREV_SBOM_ARG=""
+        if [[ -n "${{ steps.fetch-prev-sbom.outputs.prev_sbom_path }}" ]]; then
+          PREV_SBOM_ARG="--prev-sbom ${{ steps.fetch-prev-sbom.outputs.prev_sbom_path }}"
+        fi
+
         python3 "${{ github.action_path }}/changelog.py" \
           "${{ steps.get-target.outputs.target }}" \
           ./output.env \
           ./changelog.md \
           --workdir . \
           --handwritten "${{ inputs.handwritten }}" \
-          --variants-config "${{ inputs.variants_config }}"
+          --variants-config "${{ inputs.variants_config }}" \
+          ${SBOM_ARG} \
+          ${PREV_SBOM_ARG}
 
         source ./output.env
         echo "title=${TITLE}" >> "$GITHUB_OUTPUT"
@@ -122,3 +250,4 @@ runs:
         make_latest: ${{ steps.get-target.outputs.target == 'stable' }}
         prerelease: ${{ steps.get-target.outputs.target != 'stable' }}
         generate_release_notes: false
+        token: ${{ inputs.github_token }}
