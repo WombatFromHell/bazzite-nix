@@ -229,9 +229,9 @@ def get_tags(target: str, manifests: dict[str, Any]):
 
 
 def get_packages_from_sbom(sbom_path: str) -> dict[str, str]:
-    """Extract packages from Syft SPDX JSON format.
+    """Extract packages from SPDX JSON format.
 
-    Supports both Syft's native format (artifacts array) and SPDX format (packages array).
+    Supports SPDX format (packages array) and legacy Syft native format (artifacts array).
     """
     packages = {}
     try:

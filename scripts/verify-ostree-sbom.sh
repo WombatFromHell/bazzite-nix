@@ -219,7 +219,7 @@ fetch_sbom() {
   }
 
   SBOM_DIGEST=$(echo "$referrers_response" | jq -r \
-    '.referrers[] | select(.artifactType == "application/vnd.syft+json") | .digest' 2>/dev/null | head -1)
+    '.referrers[] | select(.artifactType == "application/vnd.spdx+json") | .digest' 2>/dev/null | head -1)
 
   if [[ -z "${SBOM_DIGEST}" ]] || [[ "${SBOM_DIGEST}" == "null" ]]; then
     log_warning "No SBOM attestation found for this image"
@@ -236,7 +236,7 @@ fetch_sbom() {
   log_info "Downloading SBOM..."
 
   local sbom_url="https://${registry_host}/v2/${image_name}/blobs/${SBOM_DIGEST#sha256:}"
-  run_capture "curl -s -L -f -o '$SBOM_PATH' -H 'Accept: application/vnd.syft+json' '$sbom_url'" || {
+  run_capture "curl -s -L -f -o '$SBOM_PATH' -H 'Accept: application/vnd.spdx+json' '$sbom_url'" || {
     log_error "Failed to download SBOM"
     [[ -n "${CAPTURED_ERROR:-}" ]] && log_info "curl error: ${CAPTURED_ERROR}"
     exit 2

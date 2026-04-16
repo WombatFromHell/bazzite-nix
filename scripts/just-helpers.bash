@@ -788,8 +788,8 @@ lint_scripts() {
   /usr/bin/find . \
     \( -iname "*.sh" -o -iname "*.bash" \) -type f \
     -exec shellcheck "{}" +
-  /usr/bin/find ./.github/workflows/ -iname "*.yml" -type f -exec actionlint "{}" \;
-  /usr/bin/find ./.github/actions/ -iname "*.yml" -type f -exec composite-action-lint "{}" \;
+  /usr/bin/find ./.github/workflows/ -iname "*.yml" -type f -exec actionlint "{}" +
+  /usr/bin/find ./.github/actions/ -iname "*.yml" -type f -exec composite-action-lint "{}" +
 }
 
 # Run shfmt on *.sh and prettier on workflow YAML files
@@ -797,7 +797,8 @@ format_scripts() {
   /usr/bin/find . \
     \( -iname "*.sh" -o -iname "*.bash" \) -type f \
     -exec shfmt -w -i 2 "{}" +
-  /usr/bin/find . -iname "*.yml" -type f -exec prettier -w "{}" \;
+  /usr/bin/find . -iname "*.yml" -type f -exec prettier -w "{}" +
+  /usr/bin/find . -iname "*.py" -type f -exec ruff format "{}" +
 }
 
 # List available (non-disabled) variants from variants.json

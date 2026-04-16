@@ -112,7 +112,7 @@ generate_sbom() {
   sudo "$syft_cmd" \
     --source-name "${image_name}-${version_tag}" \
     "${oci_dir}" \
-    -o syft-json="${sbom_file}"
+    -o spdx-json="${sbom_file}"
 
   echo "  SBOM size:"
   du -sh "${sbom_file}"
@@ -159,7 +159,7 @@ attach_sbom_to_oci() {
     --stream \
     oras attach \
     --registry-config "${authfile}" \
-    --artifact-type application/vnd.syft+json \
+    --artifact-type application/vnd.spdx+json \
     --annotation "org.opencontainers.artifact.created=auto" \
     --annotation "sbom.source=anchore/syft" \
     "${full_ref}" \
@@ -168,7 +168,7 @@ attach_sbom_to_oci() {
   echo "  Discovering attached SBOM digest..."
   local sbom_digest
   sbom_digest=$(oras discover --format json "${full_ref}" |
-    jq -r '.referrers[] | select(.artifactType == "application/vnd.syft+json") | .digest')
+    jq -r '.referrers[] | select(.artifactType == "application/vnd.spdx+json") | .digest')
 
   if [[ -z "$sbom_digest" ]] || [[ "$sbom_digest" == "null" ]]; then
     echo "::error::Failed to discover SBOM digest from OCI registry"

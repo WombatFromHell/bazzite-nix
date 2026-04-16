@@ -166,3 +166,5 @@ runs:
         subject-name: "${{ inputs.registry }}/${{ inputs.repo }}${{ inputs.suffix }}"
         subject-digest: "${{ inputs.image_digest }}"
         push-to-registry: true
+        predicate-type: "https://spdx.dev/Document"
+        predicate: "${{ steps.generate_sbom.outputs.sbom_path }}"

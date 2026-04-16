@@ -126,10 +126,10 @@ runs:
         else
           echo "  Current digest: ${CURRENT_DIGEST}"
 
-          mkdir -p ./sbom
-          if oras pull "${IMAGE}@${CURRENT_DIGEST}" \
-            --artifact-type application/vnd.syft+json \
-            --output ./sbom; then
+        mkdir -p ./sbom
+        if oras pull "${IMAGE}@${CURRENT_DIGEST}" \
+          --artifact-type application/vnd.spdx+json \
+          --output ./sbom; then
             SBOM_FILE=$(ls ./sbom/*.json 2>/dev/null | head -1)
             if [[ -n "$SBOM_FILE" ]]; then
               echo "  SBOM file: ${SBOM_FILE}"
@@ -138,10 +138,9 @@ runs:
               echo "::warning::No SBOM file found after oras pull"
               echo "sbom_path=" >> "$GITHUB_OUTPUT"
             fi
-          else
-            echo "::warning::Failed to pull SBOM from registry"
-            echo "sbom_path=" >> "$GITHUB_OUTPUT"
-          fi
+        else
+          echo "::warning::Failed to pull SBOM from registry"
+          echo "sbom_path=" >> "$GITHUB_OUTPUT"
         fi
         echo "::endgroup::"
 
@@ -189,10 +188,10 @@ runs:
           else
             echo "  Previous digest: ${PREV_DIGEST}"
 
-            mkdir -p ./sbom/prev
-            if oras pull "${IMAGE}@${PREV_DIGEST}" \
-              --artifact-type application/vnd.syft+json \
-              --output ./sbom/prev; then
+          mkdir -p ./sbom/prev
+          if oras pull "${IMAGE}@${PREV_DIGEST}" \
+            --artifact-type application/vnd.spdx+json \
+            --output ./sbom/prev; then
               PREV_SBOM_FILE=$(ls ./sbom/prev/*.json 2>/dev/null | head -1)
               if [[ -n "$PREV_SBOM_FILE" ]]; then
                 echo "  Previous SBOM file: ${PREV_SBOM_FILE}"

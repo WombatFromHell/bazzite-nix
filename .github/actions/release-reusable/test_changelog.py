@@ -449,7 +449,7 @@ class TestGetPackages:
 
 
 class TestGetPackagesFromSbom:
-    """Tests for get_packages_from_sbom function that parses Syft SPDX JSON."""
+    """Tests for get_packages_from_sbom function that parses SPDX JSON."""
 
     def test_parses_syft_artifacts_format(self):
         """Test parsing Syft's native artifacts format."""

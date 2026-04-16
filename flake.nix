@@ -17,6 +17,7 @@
       devShells.default = pkgs.mkShell {
         packages = with pkgs; [
           actionlint
+          bashInteractive
           oras
           python3
           python3Packages.pytest
