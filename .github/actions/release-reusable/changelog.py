@@ -228,10 +228,48 @@ def get_tags(target: str, manifests: dict[str, Any]):
     return tags[-2], tags[-1]
 
 
+def extract_rpm_from_purl(purl: str) -> tuple[str, str] | None:
+    """Extract package name and version from RPM purl.
+
+    Purl format: pkg:rpm/<namespace>/<name>@<version>?<qualifiers>
+    Example: pkg:rpm/bazzite/kernel@6.19.8-200.ogc?arch=x86_64&distro=bazzite-43
+    Returns: (name, version) or None if not a valid RPM purl
+    """
+    if not purl.startswith("pkg:rpm/"):
+        return None
+
+    # Remove pkg:rpm/<namespace>/ prefix
+    parts = purl[len("pkg:rpm/") :].split("/", 1)
+    if len(parts) != 2:
+        return None
+
+    # Get the name@version?qualifiers part
+    name_version = parts[1]
+
+    # Split at @ to get name and version+qualifiers
+    if "@" not in name_version:
+        return None
+
+    name, version_qual = name_version.split("@", 1)
+
+    # Remove qualifiers (everything after ?)
+    version = version_qual.split("?", 1)[0]
+
+    # URL decode common characters
+    name = name.replace("%2B", "+").replace("%2b", "+")
+    name = name.replace("%2F", "/").replace("%2f", "/")
+
+    if not name or not version:
+        return None
+
+    return name, version
+
+
 def get_packages_from_sbom(sbom_path: str) -> dict[str, str]:
     """Extract packages from SPDX JSON format.
 
     Supports SPDX format (packages array) and legacy Syft native format (artifacts array).
+    For SPDX format, only extracts RPM packages by filtering on purl scheme.
     """
     packages = {}
     try:
@@ -247,27 +285,39 @@ def get_packages_from_sbom(sbom_path: str) -> dict[str, str]:
                 if name and version:
                     packages[name] = version
             if packages:
-                print(f"  Parsed {len(packages)} packages from SBOM (artifacts format)")
-                return packages
+                print(f" Parsed {len(packages)} packages from SBOM (artifacts format)")
+            return packages
 
-        # Try SPDX format (packages array)
+        # Try SPDX format (packages array) - filter by RPM purl
         spdx_packages = data.get("packages", [])
         if spdx_packages:
             for pkg in spdx_packages:
-                name = pkg.get("name", "")
-                # SPDX uses versionInfo, name, or both
-                version = pkg.get("versionInfo") or pkg.get("version", "")
-                if name and version:
-                    packages[name] = version
+                external_refs = pkg.get("externalRefs", [])
+                for ref in external_refs:
+                    if ref.get("referenceType") == "purl":
+                        purl = ref.get("referenceLocator", "")
+                        result = extract_rpm_from_purl(purl)
+                        if result:
+                            name, version = result
+                            packages[name] = version
+                            break  # Found valid purl, move to next package
             if packages:
-                print(f"  Parsed {len(packages)} packages from SBOM (SPDX format)")
-                return packages
+                print(
+                    f" Parsed {len(packages)} packages from SBOM (SPDX RPM purl format)"
+                )
+            return packages
 
         print(f"Warning: No packages found in SBOM file: {sbom_path}")
         return packages
 
     except FileNotFoundError:
         print(f"Warning: SBOM file not found: {sbom_path}")
+        return {}
+    except json.JSONDecodeError as e:
+        print(f"Warning: Invalid JSON in SBOM file {sbom_path}: {e}")
+        return {}
+    except Exception as e:
+        print(f"Warning: Failed to parse SBOM {sbom_path}: {type(e).__name__}: {e}")
         return {}
     except json.JSONDecodeError as e:
         print(f"Warning: Invalid JSON in SBOM file {sbom_path}: {e}")

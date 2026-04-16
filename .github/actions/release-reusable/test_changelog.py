@@ -17,6 +17,7 @@ from changelog import (
     is_nvidia,
     get_packages,
     get_packages_from_sbom,
+    extract_rpm_from_purl,
     get_versions,
     get_tags,
     get_package_groups,
@@ -475,11 +476,29 @@ class TestGetPackagesFromSbom:
             os.unlink(sbom_path)
 
     def test_parses_spdx_packages_format(self):
-        """Test parsing SPDX format with packages array."""
+        """Test parsing SPDX format with packages array and purl filtering."""
         spdx_data = {
             "packages": [
-                {"name": "kernel", "versionInfo": "6.19.8-200.ogc"},
-                {"name": "mesa", "versionInfo": "26.0.3-1"},
+                {
+                    "name": "kernel",
+                    "versionInfo": "6.19.8-200.ogc",
+                    "externalRefs": [
+                        {
+                            "referenceType": "purl",
+                            "referenceLocator": "pkg:rpm/bazzite/kernel@6.19.8-200.ogc?arch=x86_64",
+                        }
+                    ],
+                },
+                {
+                    "name": "mesa",
+                    "versionInfo": "26.0.3-1",
+                    "externalRefs": [
+                        {
+                            "referenceType": "purl",
+                            "referenceLocator": "pkg:rpm/bazzite/mesa@26.0.3-1?arch=x86_64",
+                        }
+                    ],
+                },
             ]
         }
 
@@ -492,6 +511,96 @@ class TestGetPackagesFromSbom:
             assert result["kernel"] == "6.19.8-200.ogc"
             assert result["mesa"] == "26.0.3-1"
             assert len(result) == 2
+        finally:
+            os.unlink(sbom_path)
+
+    def test_filters_non_rpm_purl_schemes(self):
+        """SPDX packages with non-rpm purl schemes should be ignored."""
+        spdx_data = {
+            "packages": [
+                {
+                    "name": "kernel",
+                    "versionInfo": "6.19.8-200.ogc",
+                    "externalRefs": [
+                        {
+                            "referenceType": "purl",
+                            "referenceLocator": "pkg:rpm/bazzite/kernel@6.19.8-200.ogc",
+                        }
+                    ],
+                },
+                {
+                    "name": "golang-module",
+                    "versionInfo": "v1.2.3",
+                    "externalRefs": [
+                        {
+                            "referenceType": "purl",
+                            "referenceLocator": "pkg:golang/github.com/example/module@v1.2.3",
+                        }
+                    ],
+                },
+                {
+                    "name": "npm-package",
+                    "versionInfo": "1.0.0",
+                    "externalRefs": [
+                        {
+                            "referenceType": "purl",
+                            "referenceLocator": "pkg:npm/some-package@1.0.0",
+                        }
+                    ],
+                },
+            ]
+        }
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump(spdx_data, f)
+            sbom_path = f.name
+
+        try:
+            result = get_packages_from_sbom(sbom_path)
+            assert result["kernel"] == "6.19.8-200.ogc"
+            assert "golang-module" not in result
+            assert "npm-package" not in result
+            assert len(result) == 1
+        finally:
+            os.unlink(sbom_path)
+
+    def test_url_decodes_purl_characters(self):
+        """Purl names with URL-encoded characters should be decoded."""
+        spdx_data = {
+            "packages": [
+                {
+                    "name": "gcc-c++",
+                    "versionInfo": "14.2.1-1",
+                    "externalRefs": [
+                        {
+                            "referenceType": "purl",
+                            "referenceLocator": "pkg:rpm/bazzite/gcc-c%2B%2B@14.2.1-1",
+                        }
+                    ],
+                },
+                {
+                    "name": "perl-Text-Tabs+Wrap",
+                    "versionInfo": "2024.1-1",
+                    "externalRefs": [
+                        {
+                            "referenceType": "purl",
+                            "referenceLocator": "pkg:rpm/bazzite/perl-Text-Tabs%2BWrap@2024.1-1",
+                        }
+                    ],
+                },
+            ]
+        }
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump(spdx_data, f)
+            sbom_path = f.name
+
+        try:
+            result = get_packages_from_sbom(sbom_path)
+            assert "gcc-c++" in result
+            assert result["gcc-c++"] == "14.2.1-1"
+            assert "perl-Text-Tabs+Wrap" in result
+            assert result["perl-Text-Tabs+Wrap"] == "2024.1-1"
         finally:
             os.unlink(sbom_path)
 
@@ -565,6 +674,91 @@ class TestGetPackagesFromSbom:
             assert result["kernel"] == "6.19.8-artifacts"
         finally:
             os.unlink(sbom_path)
+
+
+class TestExtractRpmFromPurl:
+    """Tests for extract_rpm_from_purl function."""
+
+    @pytest.mark.parametrize(
+        "purl,expected_name,expected_version",
+        [
+            (
+                "pkg:rpm/bazzite/kernel@6.19.8-200.ogc",
+                "kernel",
+                "6.19.8-200.ogc",
+            ),
+            (
+                "pkg:rpm/fedora/mesa@26.0.3-1?arch=x86_64",
+                "mesa",
+                "26.0.3-1",
+            ),
+            (
+                "pkg:rpm/bazzite/gcc-c%2B%2B@14.2.1-1?arch=x86_64",
+                "gcc-c++",
+                "14.2.1-1",
+            ),
+            (
+                "pkg:rpm/bazzite/perl-Text-Tabs%2BWrap@2024.1-1",
+                "perl-Text-Tabs+Wrap",
+                "2024.1-1",
+            ),
+            (
+                "pkg:rpm/centos/openssl@3.0.1-5.el9?arch=aarch64&distro=centos-9",
+                "openssl",
+                "3.0.1-5.el9",
+            ),
+        ],
+        ids=[
+            "basic",
+            "with_qualifiers",
+            "url_encoded_plus",
+            "url_encoded_plus_lower",
+            "complex_qualifiers",
+        ],
+    )
+    def test_extracts_name_and_version(self, purl, expected_name, expected_version):
+        result = extract_rpm_from_purl(purl)
+        assert result is not None
+        name, version = result
+        assert name == expected_name
+        assert version == expected_version
+
+    @pytest.mark.parametrize(
+        "purl",
+        [
+            "pkg:golang/github.com/example/module@v1.2.3",
+            "pkg:npm/some-package@1.0.0",
+            "pkg:oci/registry/image@sha256:abc123",
+            "pkg:deb/ubuntu/package@1.0",
+        ],
+        ids=["golang", "npm", "oci", "deb"],
+    )
+    def test_returns_none_for_non_rpm_schemes(self, purl):
+        result = extract_rpm_from_purl(purl)
+        assert result is None
+
+    @pytest.mark.parametrize(
+        "invalid_purl",
+        [
+            "",
+            "pkg:rpm/",
+            "pkg:rpm/namespace",
+            "pkg:rpm/namespace/",
+            "not-a-purl",
+            "pkg:rpm/namespace/name-without-at",
+        ],
+        ids=[
+            "empty",
+            "no_namespace",
+            "no_name",
+            "empty_name",
+            "invalid_format",
+            "no_version_separator",
+        ],
+    )
+    def test_returns_none_for_invalid_purls(self, invalid_purl):
+        result = extract_rpm_from_purl(invalid_purl)
+        assert result is None
 
 
 # =============================================================================

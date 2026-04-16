@@ -28,11 +28,14 @@ NC='\033[0m'
 JSON_OUTPUT=false
 LOCAL_MODE=false
 VERIFY_SIGNATURE=false
+NO_PULL=false
 LOCAL_SBOM_PATH=""
-LOCAL_MANIFEST_PATH="/usr/share/ublue-os/manifest.json"
+LOCAL_MANIFEST_PATH=""
 COSIGN_PUBLIC_KEY="/etc/pki/containers/cosign.pub"
 TEMP_DIR=""
 IMAGE_REF=""
+IMAGE_TRANSPORT=""
+PODMAN_REF=""
 IMAGE_DIGEST=""
 SBOM_DIGEST=""
 SBOM_PATH=""
@@ -46,25 +49,26 @@ Verify an image's SBOM attestation exists in the registry and optionally
 verify its signature against a local cosign public key.
 
 Options:
--v, --verbose           Enable verbose output
--j, --json              Output results as JSON
--i, --image REF         Verify remote image reference (default: booted deployment)
--l, --local-sbom PATH   Local debug mode: compare local SBOM against manifest
--m, --manifest PATH     Manifest path for local mode (default: /usr/share/ublue-os/manifest.json)
--s, --verify-signature  Verify SBOM signature with cosign
--k, --public-key PATH   Cosign public key path (default: /etc/pki/containers/cosign.pub)
--h, --help              Show this help message
+  -v, --verbose           Enable verbose output
+  -j, --json              Output results as JSON
+  -i, --image REF         Image reference to verify
+  -l, --local-sbom PATH   Local SBOM file to compare against image manifest
+  -m, --manifest PATH     Manifest path (extracted from image if not specified)
+  --no-pull               Don't pull image, use local only
+  -s, --verify-signature  Verify SBOM signature with cosign
+  -k, --public-key PATH   Cosign public key path (default: /etc/pki/containers/cosign.pub)
+  -h, --help              Show this help message
 
 Modes:
-1. Default:           Verify booted deployment's SBOM attestation
-2. -i <remote-ref>:    Verify remote image's SBOM attestation
-3. -l <sbom.json>:     Compare local SBOM against manifest (debug mode)
+  1. Default: Verify booted deployment's SBOM attestation
+  2. -i <ref>: Verify remote image's SBOM attestation
+  3. -l <sbom.json> -i <ref>: Compare local SBOM against image manifest
 
 Exit codes:
-0 - Verification passed
-1 - Verification failed (SBOM missing or packages differ)
-2 - Error (network error, etc.)
-3 - Signature verification failed
+  0 - Verification passed
+  1 - Verification failed (SBOM missing or packages differ)
+  2 - Error (network error, etc.)
+  3 - Signature verification failed
 EOF
   exit 0
 }
@@ -167,6 +171,82 @@ get_deployed_info() {
   if [[ -n "${IMAGE_DIGEST}" ]]; then
     log_info "Image digest: ${IMAGE_DIGEST}"
   fi
+}
+
+normalize_image_ref() {
+  if [[ "$IMAGE_REF" == containers-storage:* ]]; then
+    IMAGE_TRANSPORT="containers-storage"
+    PODMAN_REF="$IMAGE_REF"
+  elif [[ "$IMAGE_REF" == localhost/* ]]; then
+    IMAGE_TRANSPORT="containers-storage"
+    PODMAN_REF="containers-storage:${IMAGE_REF}"
+  else
+    IMAGE_TRANSPORT="registry"
+    PODMAN_REF="$IMAGE_REF"
+  fi
+}
+
+ensure_image_local() {
+  log_info "Checking image availability: ${IMAGE_REF}..."
+
+  normalize_image_ref
+
+  if [[ "$IMAGE_TRANSPORT" == "containers-storage" ]]; then
+    if ! podman image exists "$PODMAN_REF" 2>/dev/null; then
+      if [[ "$NO_PULL" == "true" ]]; then
+        log_error "Image not found locally and --no-pull specified"
+        exit 2
+      fi
+      if [[ "$IMAGE_REF" == localhost/* ]]; then
+        log_error "Image not found in local storage: ${IMAGE_REF}"
+        log_info "Build or pull the image first"
+        exit 2
+      fi
+    else
+      log_info "Image available in containers-storage"
+    fi
+  else
+    if ! podman image exists "$PODMAN_REF" 2>/dev/null; then
+      if [[ "$NO_PULL" == "true" ]]; then
+        log_error "Image not found locally and --no-pull specified"
+        exit 2
+      fi
+      log_info "Pulling image: ${PODMAN_REF}..."
+      if ! podman pull "$PODMAN_REF"; then
+        log_error "Failed to pull image: ${PODMAN_REF}"
+        exit 2
+      fi
+    else
+      log_info "Image available locally"
+    fi
+  fi
+
+  local inspect_json
+  inspect_json=$(podman inspect --format json "$PODMAN_REF" 2>/dev/null) || {
+    log_error "Failed to inspect local image"
+    exit 2
+  }
+  IMAGE_DIGEST=$(echo "$inspect_json" | jq -r '.[0].Digest // .[0].Id // empty')
+  log_info "Image digest: ${IMAGE_DIGEST:-N/A}"
+}
+
+extract_manifest_from_image() {
+  log_info "Extracting manifest from image..."
+
+  LOCAL_MANIFEST_PATH="${TEMP_DIR}/manifest.json"
+
+  if ! podman run --rm --security-opt label=disable "$PODMAN_REF" cat /usr/share/ublue-os/manifest.json >"$LOCAL_MANIFEST_PATH" 2>/dev/null; then
+    log_error "Failed to extract manifest from image"
+    log_info "Manifest may not exist at /usr/share/ublue-os/manifest.json"
+    exit 2
+  fi
+
+  if [[ ! -s "$LOCAL_MANIFEST_PATH" ]]; then
+    log_error "Extracted manifest is empty"
+    exit 2
+  fi
+
+  log_info "Manifest extracted (${TEMP_DIR}/manifest.json)"
 }
 
 get_remote_image_info() {
@@ -332,12 +412,29 @@ extract_sbom_packages() {
     exit 2
   fi
 
-  jq -r '.artifacts[].name' "$SBOM_PATH" 2>/dev/null | sort -u >"${TEMP_DIR}/sbom-packages.txt"
+  local sbom_format
+  sbom_format=$(jq -r '.spdxVersion // empty' "$SBOM_PATH" 2>/dev/null)
+
+  if [[ -n "$sbom_format" ]]; then
+    jq -r '
+      .packages[] |
+      select(.externalRefs != null) |
+      .externalRefs[] |
+      select(.referenceType == "purl" and (.referenceLocator | startswith("pkg:rpm"))) |
+      .referenceLocator |
+      sub("^pkg:rpm/[^/]+/"; "") |
+      sub("@.*$"; "") |
+      gsub("%2[Bb]"; "+") |
+      gsub("%2[Ff]"; "/")
+    ' "$SBOM_PATH" 2>/dev/null | sort -u >"${TEMP_DIR}/sbom-packages.txt"
+  else
+    jq -r '.artifacts[].name' "$SBOM_PATH" 2>/dev/null | sort -u >"${TEMP_DIR}/sbom-packages.txt"
+  fi
   log_info "Found $(count_lines "${TEMP_DIR}/sbom-packages.txt") packages in SBOM"
 }
 
 setup_local_mode() {
-  log_info "Running in local debug mode..."
+  log_info "Running in local SBOM verification mode..."
 
   if [[ ! -f "$LOCAL_SBOM_PATH" ]]; then
     log_error "Local SBOM file not found: $LOCAL_SBOM_PATH"
@@ -345,10 +442,21 @@ setup_local_mode() {
   fi
 
   SBOM_PATH="$LOCAL_SBOM_PATH"
-  IMAGE_REF="local://$(basename "$LOCAL_SBOM_PATH")"
   SBOM_DIGEST="sha256:$(sha256sum "$LOCAL_SBOM_PATH" | cut -d' ' -f1)"
 
   log_info "Local SBOM: $LOCAL_SBOM_PATH"
+
+  if [[ -n "$IMAGE_REF" ]]; then
+    ensure_image_local
+    if [[ -z "$LOCAL_MANIFEST_PATH" ]]; then
+      extract_manifest_from_image
+    fi
+  elif [[ -z "$LOCAL_MANIFEST_PATH" ]]; then
+    log_error "No image specified and no manifest path provided"
+    log_info "Use -i <image> or -m <manifest.json>"
+    exit 2
+  fi
+
   log_info "Manifest: $LOCAL_MANIFEST_PATH"
 
   if [[ "$VERIFY_SIGNATURE" == "true" ]]; then
@@ -502,6 +610,10 @@ main() {
       LOCAL_MANIFEST_PATH="${2:?}"
       shift 2
       ;;
+    --no-pull)
+      NO_PULL=true
+      shift
+      ;;
     -s | --verify-signature)
       VERIFY_SIGNATURE=true
       shift
@@ -528,10 +640,21 @@ main() {
     get_deployed_packages_local
     compare_packages
     generate_report
-  else
-    if [[ -z "${IMAGE_REF:-}" ]]; then
-      get_deployed_info
+  elif [[ -n "$IMAGE_REF" ]]; then
+    ensure_image_local
+    extract_manifest_from_image
+    fetch_sbom
+
+    if [[ "$VERIFY_SIGNATURE" == "true" ]]; then
+      verify_sbom_signature || exit $?
     fi
+
+    extract_sbom_packages
+    get_deployed_packages_local
+    compare_packages
+    generate_report
+  else
+    get_deployed_info
     fetch_sbom
 
     if [[ "$VERIFY_SIGNATURE" == "true" ]]; then
