@@ -1,0 +1,250 @@
+name: Regenerate SBOM (Manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      variants:
+        description: "Comma-delimited list of variants to regenerate SBOM for (blank = all enabled)"
+        type: string
+        required: false
+        default: ""
+
+jobs:
+  resolve-variants:
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.resolve.outputs.matrix }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Resolve variants
+        id: resolve
+        run: |
+          set -euo pipefail
+          INPUT="${{ inputs.variants }}"
+
+          if [ -z "$INPUT" ]; then
+            ENABLED=$(jq -r '.variants[] | select(.disabled != true) | .name' .github/variants.json | paste -sd ',' -)
+          else
+            ENABLED=""
+            IFS=',' read -ra VARIANTS <<< "$INPUT"
+            for v in "${VARIANTS[@]}"; do
+              v="${v#"${v%%[![:space:]]*}"}"
+              v="${v%"${v##*[![:space:]]}"}"
+              [ -z "$v" ] && continue
+              ENABLED="${ENABLED}${v},"
+            done
+            ENABLED="${ENABLED%,}"
+          fi
+
+          if [ -z "$ENABLED" ]; then
+            echo "::error::No valid variants to process"
+            exit 1
+          fi
+
+          MATRIX_JSON=$(echo "$ENABLED" | tr ',' '\n' | while read -r v; do
+            v="${v#"${v%%[![:space:]]*}"}"
+            v="${v%"${v##*[![:space:]]}"}"
+            [ -n "$v" ] && echo "$v"
+          done | jq -R . | jq -sc .)
+
+          {
+            echo "matrix<<EOF"
+            echo "$MATRIX_JSON"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Resolved variants: $MATRIX_JSON"
+
+  get-latest-release:
+    needs: resolve-variants
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.build_matrix.outputs.matrix }}
+      has_entries: ${{ steps.build_matrix.outputs.has_entries }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install crane (for registry tag listing)
+        uses: imjasonh/setup-crane@v0.5
+
+      - name: Get latest image tag from GHCR for each variant
+        id: build_matrix
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_ACTOR: ${{ github.actor }}
+          REGISTRY: "ghcr.io"
+          OWNER_LOWER: "${{ github.repository_owner }}"
+          REPO_NAME: "bazzite-nix"
+        run: |
+          set -euo pipefail
+
+          # Convert owner to lowercase for GHCR
+          OWNER_LOWER="${OWNER_LOWER,,}"
+          REPO_PATH="${OWNER_LOWER}/${REPO_NAME}"
+
+          VARIANTS='${{ needs.resolve-variants.outputs.matrix }}'
+
+          mkdir -p ~/.docker
+          AUTH_VALUE="$(printf '%s:%s' "${GITHUB_ACTOR}" "${GH_TOKEN}" | base64 -w0)"
+          cat > ~/.docker/config.json <<EOF
+          {
+            "auths": {
+              "${REGISTRY}": {
+                "auth": "${AUTH_VALUE}"
+              }
+            }
+          }
+          EOF
+
+          echo "::group::Debug: Testing registry access"
+          echo "  Registry: ${REGISTRY}"
+          echo "  Repo path: ${REPO_PATH}"
+          echo "  Auth file contents (sanitized):"
+          jq '.auths.ghcr.io.auth = "[REDACTED]"' ~/.docker/config.json || cat ~/.docker/config.json
+
+          # Test crane auth and list tags WITHOUT hiding errors
+          echo "  Testing crane auth login..."
+          if ! crane auth login "${REGISTRY}" -u "${GITHUB_ACTOR}" -p "${GH_TOKEN}" 2>&1; then
+            echo "::warning::crane auth login failed"
+          fi
+
+          echo "  Listing tags (raw output):"
+          TAGS_OUTPUT=$(crane ls "${REGISTRY}/${REPO_PATH}" 2>&1) || {
+            echo "::error::crane ls failed with output:"
+            echo "$TAGS_OUTPUT"
+            echo "  Trying fallback with skopeo..."
+            # Fallback to skopeo list-tags
+            TAGS_OUTPUT=$(skopeo list-tags "docker://${REGISTRY}/${REPO_PATH}" 2>&1 | jq -r '.Tags[]?' || echo "")
+          }
+
+          echo "$TAGS_OUTPUT" | head -30
+          echo "::endgroup::"
+
+          MATRIX_ENTRIES="[]"
+
+          for variant in $(echo "$VARIANTS" | jq -r '.[]'); do
+            echo "::group::Processing variant: ${variant}"
+            
+            # Get suffix from variants.json
+            SUFFIX=$(jq -r --arg v "$variant" '.variants[] | select(.name == $v) | .suffix // ""' .github/variants.json)
+            IMAGE_NAME="${REPO_PATH}${SUFFIX}"
+            FULL_REPO="${REGISTRY}/${IMAGE_NAME}"
+
+            echo "  Registry repo: ${FULL_REPO}"
+            echo "  Variant suffix: '${SUFFIX}'"
+
+            # Filter tags matching: variant-VERSION.YYYYMMDD.REV
+            # shellcheck disable=SC2295
+            LATEST_TAG=$(echo "$TAGS_OUTPUT" | \
+              grep -E "^${variant}-[0-9]+\.[0-9]{8}\.[0-9]+$" | \
+              grep -vE '^[0-9a-f]{64}$' | \
+              grep -vE '\.sig$' | \
+              sort -t. -k1,1n -k2,2n -k3,3n | \
+              tail -1 || true)
+
+            if [ -z "$LATEST_TAG" ]; then
+              echo "::warning::No matching image tag found for variant '${variant}' in ${FULL_REPO}"
+              echo "  All tags for this variant prefix:"
+              echo "$TAGS_OUTPUT" | grep -E "^${variant}-" | head -10 | sed 's/^/    - /' || echo "    (none)"
+              continue
+            fi
+
+            echo "  Latest tag found: ${LATEST_TAG}"
+
+            # Get the digest for this tag
+            IMAGE_REF="${FULL_REPO}:${LATEST_TAG}"
+            DIGEST=$(crane digest "${IMAGE_REF}" 2>&1 || skopeo inspect "docker://${IMAGE_REF}" --authfile ~/.docker/config.json 2>/dev/null | jq -r '.Digest' || true)
+
+            if [ -z "$DIGEST" ] || [ "$DIGEST" = "null" ]; then
+              echo "::error::Could not resolve digest for ${IMAGE_REF}"
+              continue
+            fi
+
+            echo "  Image digest: ${DIGEST}"
+
+            # Extract canonical tag: full version string
+            # shellcheck disable=SC2295
+            CANONICAL_TAG="${LATEST_TAG#${variant}-}"
+
+            echo "  Canonical tag for matrix: ${CANONICAL_TAG}"
+
+            MATRIX_ENTRIES=$(echo "$MATRIX_ENTRIES" | jq --arg v "$variant" --arg t "$CANONICAL_TAG" --arg s "$SUFFIX" --arg d "$DIGEST" --arg tag "$LATEST_TAG" \
+              '. + [{"variant": $v, "canonical_tag": $t, "suffix": $s, "image_digest": $d, "image_tag": $tag}]')
+            
+            echo "::endgroup::"
+          done
+
+          COUNT=$(echo "$MATRIX_ENTRIES" | jq 'length')
+          echo "Total variants with images: ${COUNT}"
+
+          if [ "$COUNT" -gt 0 ]; then
+            {
+              echo "has_entries=true"
+              echo "matrix<<EOF"
+              echo "$MATRIX_ENTRIES" | jq -c '.'
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+            echo "✅ Matrix built successfully"
+          else
+            echo "::error::No variants had matching images in registry."
+            echo "  Expected tag format: {variant}-{N}.{YYYYMMDD}.{N}"
+            echo "  Example: testing-43.20260415.1"
+            echo "has_entries=false" >> "$GITHUB_OUTPUT"
+            echo "matrix=[]" >> "$GITHUB_OUTPUT"
+          fi
+
+  regenerate-sbom:
+    needs: get-latest-release
+    if: needs.get-latest-release.outputs.has_entries == 'true'
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        variant_data: ${{ fromJson(needs.get-latest-release.outputs.matrix) }}
+      fail-fast: false
+
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+
+    env:
+      IMAGE_NAME: "bazzite-nix"
+      REGISTRY: "ghcr.io/${{ github.repository_owner }}"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Pull image locally
+        shell: bash
+        env:
+          GITHUB_ACTOR: ${{ github.actor }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE_REPO: "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}${{ matrix.variant_data.suffix }}"
+          IMAGE_TAG: ${{ matrix.variant_data.image_tag }}
+          IMAGE_DIGEST: ${{ matrix.variant_data.image_digest }}
+        run: |
+          # Auth for podman
+          printf '%s' "${GH_TOKEN}" | sudo podman login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+
+          sudo podman pull "${IMAGE_REPO}@${IMAGE_DIGEST}"
+          sudo podman tag "${IMAGE_REPO}@${IMAGE_DIGEST}" "${IMAGE_REPO}:${IMAGE_TAG}"
+
+      - name: Generate and attach SBOM
+        id: manage_sbom
+        uses: ./.github/actions/sbom-reusable
+        with:
+          # Use digest-based ref: repo@sha256:abc123...
+          image_ref: "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}${{ matrix.variant_data.suffix }}@${{ matrix.variant_data.image_digest }}"
+          variant_name: ${{ matrix.variant_data.variant }}
+          version_tag: ${{ matrix.variant_data.canonical_tag }}
+          registry: ${{ env.REGISTRY }}
+          repo: ${{ env.IMAGE_NAME }}
+          suffix: ${{ matrix.variant_data.suffix }}
+          image_digest: ${{ matrix.variant_data.image_digest }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          github_actor: ${{ github.actor }}
+          signing_secret: ${{ secrets.SIGNING_SECRET }}

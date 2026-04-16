@@ -101,8 +101,9 @@ generate_sbom() {
   sudo podman export "sbom-extract-${image_name}" | sudo tar -C "${oci_dir}/rootfs" -xf -
   sudo podman container rm "sbom-extract-${image_name}"
 
-  local sbom_file
-  sbom_file="$(mktemp)/sbom.json"
+  local sbom_dir sbom_file
+  sbom_dir="$(mktemp -d)"
+  sbom_file="${sbom_dir}/sbom.json"
 
   export SYFT_PARALLELISM=$(($(nproc) * 2))
 
@@ -153,7 +154,7 @@ attach_sbom_to_oci() {
     --stream \
     oras attach \
     --auth-file "${authfile}" \
-    --artifact-type application/vnd.spdx+json \
+    --artifact-type application/vnd.syft+json \
     --annotation "org.opencontainers.artifact.created=auto" \
     --annotation "sbom.source=anchore/syft" \
     "${full_ref}" \
@@ -162,7 +163,7 @@ attach_sbom_to_oci() {
   echo "  Discovering attached SBOM digest..."
   local sbom_digest
   sbom_digest=$(oras discover --format json "${full_ref}" |
-    jq -r '.referrers[] | select(.artifactType == "application/vnd.spdx+json") | .digest')
+    jq -r '.referrers[] | select(.artifactType == "application/vnd.syft+json") | .digest')
 
   if [[ -z "$sbom_digest" ]] || [[ "$sbom_digest" == "null" ]]; then
     echo "::error::Failed to discover SBOM digest from OCI registry"

@@ -78,6 +78,7 @@ runs:
         SYFT_CMD: ${{ steps.setup-syft.outputs.cmd }}
         OCI_DIR: "/tmp/image-oci-dir"
         IMAGE_REF: ${{ inputs.image_ref }}
+        GITHUB_OUTPUT: ${{ github.output }}
       run: |
         set -euo pipefail
         source "${{ github.action_path }}/helpers.sh"
@@ -102,8 +103,11 @@ runs:
         source "${{ github.action_path }}/helpers.sh"
 
         mkdir -p /tmp/oras-auth
+
+        # ✅ FIXED: Added '--' separator before actual command
         run_with_retry "oras login ghcr.io" \
           --stdin-data "${GITHUB_TOKEN}" \
+          -- \
           oras login ghcr.io \
           --username "${GITHUB_ACTOR}" \
           --password-stdin \
@@ -116,6 +120,7 @@ runs:
         SBOM_PATH: ${{ steps.generate_sbom.outputs.sbom_path }}
         IMAGE: "${{ inputs.registry }}/${{ inputs.repo }}${{ inputs.suffix }}"
         IMAGE_DIGEST: ${{ inputs.image_digest }}
+        AUTHFILE: "/tmp/oras-auth/auth.json"
         MAX_ATTEMPTS: ${{ inputs.max_attempts }}
         RETRY_DELAY: ${{ inputs.retry_delay }}
       run: |
@@ -126,7 +131,7 @@ runs:
           "${SBOM_PATH}" \
           "${IMAGE}" \
           "${IMAGE_DIGEST}" \
-          "/tmp/oras-auth/auth.json"
+          "${AUTHFILE}"
 
     - name: Install Cosign
       uses: sigstore/cosign-installer@ba7bc0a3fef59531c69a25acd34668d6d3fe6f22 # v4.1.0
