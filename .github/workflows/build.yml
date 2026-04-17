@@ -40,17 +40,16 @@ jobs:
       variants_to_build: ${{ steps.check.outputs.variants_to_build }}
       any_builds_needed: ${{ steps.check.outputs.any_builds_needed }}
       date: ${{ steps.date.outputs.date }}
-      registry: ${{ steps.lowercase_owner.outputs.registry }}
-      repo: ${{ env.IMAGE_NAME }}
+      registry: ${{ steps.ghcr.outputs.registry }}
+      repo: ${{ steps.ghcr.outputs.repo }}
       image_desc: ${{ env.IMAGE_DESC }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      - name: Lowercase repository owner
-        id: lowercase_owner
-        run: |
-          echo "registry=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
+      - name: Set lowercase GHCR refs
+        id: ghcr
+        uses: ./.github/actions/ghcr-lc
 
       - name: Set build date
         id: date
@@ -63,8 +62,8 @@ jobs:
         with:
           force_build: ${{ github.event.inputs.force_build == 'true' }}
           variants_config: ".github/variants.json"
-          registry: ${{ steps.lowercase_owner.outputs.registry }}
-          repo: ${{ env.IMAGE_NAME }}
+          registry: ${{ steps.ghcr.outputs.registry }}
+          repo: ${{ steps.ghcr.outputs.repo }}
           image_desc: ${{ env.IMAGE_DESC }}
           date: ${{ steps.date.outputs.date }}
 

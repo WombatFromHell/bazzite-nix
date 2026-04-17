@@ -27,10 +27,15 @@ jobs:
     outputs:
       packages: ${{ steps.variants.outputs.packages }}
       owner_type: ${{ steps.detect_owner.outputs.owner_type }}
+      registry_owner: ${{ steps.ghcr.outputs.repo }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Set lowercase GHCR refs
+        id: ghcr
+        uses: ./.github/actions/ghcr-lc
 
       - name: Detect owner type for API calls
         id: detect_owner
@@ -107,15 +112,11 @@ jobs:
       digests: ${{ steps.collect.outputs.digests }}
 
     steps:
-      - name: Normalize registry owner to lowercase
+      - name: Set registry env
         run: |
-          set -euo pipefail
-          lc_owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-          # SC2034 fix: Use OWNER_TYPE from prepare job output
-          owner_type="${{ needs.prepare.outputs.owner_type }}"
           {
-            echo "REGISTRY_OWNER_LC=${lc_owner}"
-            echo "OWNER_TYPE=${owner_type}"
+            echo "REGISTRY_OWNER_LC=${{ needs.prepare.outputs.registry_owner }}"
+            echo "OWNER_TYPE=${{ needs.prepare.outputs.owner_type }}"
           } >> "$GITHUB_ENV"
 
       - name: Collect image digests before cleanup
@@ -179,14 +180,11 @@ jobs:
       packages: write
 
     steps:
-      - name: Normalize registry owner to lowercase
+      - name: Set registry env
         run: |
-          set -euo pipefail
-          lc_owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-          owner_type="${{ needs.prepare.outputs.owner_type }}"
           {
-            echo "REGISTRY_OWNER_LC=${lc_owner}"
-            echo "OWNER_TYPE=${owner_type}"
+            echo "REGISTRY_OWNER_LC=${{ needs.prepare.outputs.registry_owner }}"
+            echo "OWNER_TYPE=${{ needs.prepare.outputs.owner_type }}"
           } >> "$GITHUB_ENV"
 
       - name: Cleanup container images
@@ -220,14 +218,11 @@ jobs:
       contents: read
 
     steps:
-      - name: Setup environment
+      - name: Set registry env
         run: |
-          set -euo pipefail
-          lc_owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-          owner_type="${{ needs.prepare.outputs.owner_type }}"
           {
-            echo "REGISTRY_OWNER_LC=${lc_owner}"
-            echo "OWNER_TYPE=${owner_type}"
+            echo "REGISTRY_OWNER_LC=${{ needs.prepare.outputs.registry_owner }}"
+            echo "OWNER_TYPE=${{ needs.prepare.outputs.owner_type }}"
           } >> "$GITHUB_ENV"
 
       - name: Download pre-cleanup digests

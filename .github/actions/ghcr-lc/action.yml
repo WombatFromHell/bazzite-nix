@@ -1,0 +1,44 @@
+name: "GHCR Lowercase Refs"
+description: "Normalize registry and repository names to lowercase for GHCR compatibility"
+
+inputs:
+  registry:
+    description: "Registry URL (e.g., ghcr.io/owner). Defaults to ghcr.io/<owner> if empty."
+    required: false
+    default: ""
+  repo:
+    description: "Repository name. Defaults to current repo name if empty."
+    required: false
+    default: ""
+
+outputs:
+  registry:
+    description: "Lowercased registry URL"
+    value: ${{ steps.normalize.outputs.registry }}
+  repo:
+    description: "Lowercased repository name"
+    value: ${{ steps.normalize.outputs.repo }}
+
+runs:
+  using: composite
+  steps:
+    - name: Normalize to lowercase
+      id: normalize
+      shell: bash
+      run: |
+        OWNER="${GITHUB_REPOSITORY_OWNER,,}"
+
+        if [ -z "${{ inputs.registry }}" ]; then
+          echo "registry=ghcr.io/${OWNER}" >> "$GITHUB_OUTPUT"
+        else
+          REGISTRY="${{ inputs.registry }}"
+          echo "registry=${REGISTRY,,}" >> "$GITHUB_OUTPUT"
+        fi
+
+        if [ -z "${{ inputs.repo }}" ]; then
+          REPO_NAME="${GITHUB_REPOSITORY#*/}"
+          echo "repo=${REPO_NAME,,}" >> "$GITHUB_OUTPUT"
+        else
+          REPO="${{ inputs.repo }}"
+          echo "repo=${REPO,,}" >> "$GITHUB_OUTPUT"
+        fi

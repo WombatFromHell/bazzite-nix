@@ -35,28 +35,12 @@ outputs:
 runs:
   using: "composite"
   steps:
-    - name: Set default registry and repo
+    - name: Set lowercase GHCR refs
       id: defaults
-      shell: bash
-      run: |
-        # Set defaults if not provided by caller, enforce lowercase
-        OWNER="${GITHUB_REPOSITORY_OWNER,,}"
-
-        if [ -z "${{ inputs.registry }}" ]; then
-          echo "registry=ghcr.io/${OWNER}" >> "$GITHUB_OUTPUT"
-        else
-          REGISTRY="${{ inputs.registry }}"
-          echo "registry=${REGISTRY,,}" >> "$GITHUB_OUTPUT"
-        fi
-
-        if [ -z "${{ inputs.repo }}" ]; then
-          # Extract just the repo name (e.g. "bazzite-nix" from "owner/bazzite-nix")
-          REPO_NAME="${GITHUB_REPOSITORY#*/}"
-          echo "repo=${REPO_NAME,,}" >> "$GITHUB_OUTPUT"
-        else
-          REPO="${{ inputs.repo }}"
-          echo "repo=${REPO,,}" >> "$GITHUB_OUTPUT"
-        fi
+      uses: ./.github/actions/ghcr-lc
+      with:
+        registry: ${{ inputs.registry }}
+        repo: ${{ inputs.repo }}
 
     - name: Validate variant input
       id: validate-variant

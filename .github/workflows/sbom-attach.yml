@@ -14,9 +14,15 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       matrix: ${{ steps.resolve.outputs.matrix }}
+      registry: ${{ steps.ghcr.outputs.registry }}
+      repo: ${{ steps.ghcr.outputs.repo }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+
+      - name: Set lowercase GHCR refs
+        id: ghcr
+        uses: ./.github/actions/ghcr-lc
 
       - name: Resolve variants
         id: resolve
@@ -61,6 +67,8 @@ jobs:
     outputs:
       matrix: ${{ steps.build_matrix.outputs.matrix }}
       has_entries: ${{ steps.build_matrix.outputs.has_entries }}
+      registry: ${{ needs.resolve-variants.outputs.registry }}
+      repo: ${{ needs.resolve-variants.outputs.repo }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -73,8 +81,8 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_ACTOR: ${{ github.actor }}
-          REGISTRY: "ghcr.io/${{ github.repository_owner }}"
-          REPO_NAME: "${{ github.event.repository.name }}"
+          REGISTRY: ${{ needs.resolve-variants.outputs.registry }}
+          REPO_NAME: ${{ needs.resolve-variants.outputs.repo }}
         run: |
           set -euo pipefail
 
@@ -98,9 +106,8 @@ jobs:
       packages: write
 
     env:
-      IMAGE_NAME: "${{ github.event.repository.name }}"
-      REGISTRY: "ghcr.io/${{ github.repository_owner }}"
-      REGISTRY_LOWER: "ghcr.io/${{ github.repository_owner }}"
+      REGISTRY: ${{ needs.get-latest-release.outputs.registry }}
+      REPO: ${{ needs.get-latest-release.outputs.repo }}
 
     steps:
       - name: Checkout
@@ -110,10 +117,10 @@ jobs:
         id: manage_sbom
         uses: ./.github/actions/sbom-reusable
         with:
-          image_ref: "${{ env.REGISTRY_LOWER }}/${{ env.IMAGE_NAME }}${{ matrix.variant_data.suffix }}@${{ matrix.variant_data.image_digest }}"
+          image_ref: "${{ env.REGISTRY }}/${{ env.REPO }}${{ matrix.variant_data.suffix }}@${{ matrix.variant_data.image_digest }}"
           variant_name: ${{ matrix.variant_data.variant }}
-          registry: ${{ env.REGISTRY_LOWER }}
-          repo: ${{ env.IMAGE_NAME }}
+          registry: ${{ env.REGISTRY }}
+          repo: ${{ env.REPO }}
           suffix: ${{ matrix.variant_data.suffix }}
           image_digest: ${{ matrix.variant_data.image_digest }}
           github_token: ${{ secrets.GITHUB_TOKEN }}

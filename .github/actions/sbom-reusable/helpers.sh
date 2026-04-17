@@ -257,7 +257,7 @@ find_latest_tag() {
   tags_output=$(crane ls "$repo" 2>&1) || return 1
 
   echo "$tags_output" |
-    grep -E "^${variant}-[0-9]+\.[0-9]{8}\.[0-9]+$" |
+    grep -E "^${variant}-[0-9]+\.[0-9]{8}(\.[0-9]+)?$" |
     grep -vE '^[0-9a-f]{64}$' |
     grep -vE '\.sig$' |
     sort -t. -k1,1n -k2,2n -k3,3n |
