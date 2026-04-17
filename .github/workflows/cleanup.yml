@@ -5,64 +5,79 @@ on:
     - cron: "1 7 * * 0" # 07:01 UTC every Sunday
   workflow_dispatch:
     inputs:
-      dry-run:
-        description: "Dry-run mode"
+      dry_run:
+        description: "Dry-run mode (safe: no deletions)"
         type: boolean
         default: true
-      package-filter:
+      package_filter:
         description: "Comma-separated list of full package names to process (empty = all cleanup-enabled)"
         type: string
         default: ""
 
 env:
-  # Scheduled runs are always live; manual runs respect the input (default: true = safe).
-  DRY_RUN: ${{ github.event_name == 'schedule' && 'false' || inputs.dry-run == true && 'true' || 'false' }}
+  # Scheduled runs default to live mode; manual runs respect dry_run input
+  DRY_RUN: ${{ github.event_name == 'schedule' && 'false' || (inputs.dry_run == true && 'true' || 'false') }}
 
 jobs:
+  # ──────────────────────────────────────────────────────────────────────
+  # PHASE 0: Prepare — Build matrix of packages to process
+  # ──────────────────────────────────────────────────────────────────────
   prepare:
     runs-on: ubuntu-24.04
     outputs:
       packages: ${{ steps.variants.outputs.packages }}
+      owner_type: ${{ steps.detect_owner.outputs.owner_type }}
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v4
+
+      - name: Detect owner type for API calls
+        id: detect_owner
+        run: |
+          set -euo pipefail
+          OWNER="${{ github.repository_owner }}"
+          # Default to 'orgs', fallback to 'users' if org API returns 404
+          if gh api "/orgs/${OWNER}" &>/dev/null; then
+            OWNER_TYPE="orgs"
+          else
+            OWNER_TYPE="users"
+          fi
+          # SC2034 fix: Actually use the variable by echoing and setting output
+          echo "Detected owner type: ${OWNER_TYPE}"
+          echo "owner_type=${OWNER_TYPE}" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build package matrix
         id: variants
         run: |
           set -euo pipefail
 
-          FILTER="${{ inputs.package-filter }}"
+          FILTER="${{ inputs.package_filter }}"
           VARIANTS_FILE=".github/variants.json"
           BASE="bazzite-nix"
 
-          # Build the full list of unique package names from variants that have
-          # cleanup: true and are not disabled (unless a package-filter overrides).
-          #
-          # The cleanup property opts a variant into scheduled/automated cleanup.
-          # Variants without it (or with cleanup: false) are skipped in normal runs.
-          # A package-filter override bypasses the cleanup flag so a specific package
-          # can be run manually even if cleanup is not set.
-          #
-          # unique deduplicates so tag-only variants sharing the same package name
-          # (e.g. bazzite-nix:stable and bazzite-nix:testing) produce one matrix entry.
+          if [ ! -f "$VARIANTS_FILE" ]; then
+            echo "::error::variants.json not found at $VARIANTS_FILE"
+            exit 1
+          fi
 
           if [ -n "$FILTER" ]; then
-            # Override mode: include all variants (disabled or not) then filter.
+            # Override mode: include all variants, then filter by name
             jq -r --arg base "$BASE" \
               '[.variants[] | ($base + (.suffix // "")) | ascii_downcase] | unique[]' \
               "$VARIANTS_FILE" > /tmp/all_packages.txt
 
-            # -x: whole-line match prevents 'bazzite-nix' matching 'bazzite-nix-cachyos'
+            # Exact match filtering (prevent partial matches)
             grep -Fxf <(echo "$FILTER" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//') \
               /tmp/all_packages.txt > /tmp/packages.txt 2>/dev/null || touch /tmp/packages.txt
 
             if [ ! -s /tmp/packages.txt ]; then
-              echo "::warning::package-filter '${FILTER}' matched no defined packages — check your package names"
+              echo "::warning::package-filter '${FILTER}' matched no packages — check names in variants.json"
             fi
           else
-            # Normal mode: respect disabled flag and require cleanup: true.
+            # Normal mode: respect disabled flag and require cleanup: true
             jq -r --arg base "$BASE" \
               '[.variants[] | select(.disabled != true) | select(.cleanup != false) | ($base + (.suffix // "")) | ascii_downcase] | unique[]' \
               "$VARIANTS_FILE" > /tmp/packages.txt
@@ -74,7 +89,10 @@ jobs:
           packages=$(jq -Rnc '[inputs]' < /tmp/packages.txt)
           echo "packages=${packages}" >> "$GITHUB_OUTPUT"
 
-  cleanup:
+  # ──────────────────────────────────────────────────────────────────────
+  # PHASE 1: Collect — Gather live image digests BEFORE cleanup
+  # ──────────────────────────────────────────────────────────────────────
+  collect-digests:
     needs: prepare
     runs-on: ubuntu-24.04
     strategy:
@@ -82,9 +100,79 @@ jobs:
       matrix:
         package: ${{ fromJson(needs.prepare.outputs.packages) }}
 
-    # Prevent parallel runs against the same package (recommended by action docs).
+    permissions:
+      packages: read
+
+    outputs:
+      digests: ${{ steps.collect.outputs.digests }}
+
+    steps:
+      - name: Normalize registry owner to lowercase
+        run: |
+          set -euo pipefail
+          lc_owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          # SC2034 fix: Use OWNER_TYPE from prepare job output
+          owner_type="${{ needs.prepare.outputs.owner_type }}"
+          {
+            echo "REGISTRY_OWNER_LC=${lc_owner}"
+            echo "OWNER_TYPE=${owner_type}"
+          } >> "$GITHUB_ENV"
+
+      - name: Collect image digests before cleanup
+        id: collect
+        run: |
+          set -euo pipefail
+
+          PACKAGE="${{ matrix.package }}"
+          API_BASE="https://api.github.com"
+          TOKEN="${{ secrets.GITHUB_TOKEN }}"
+
+          echo "::group::Collecting digests for ${OWNER_TYPE}/${REGISTRY_OWNER_LC}/${PACKAGE}"
+
+          # URL-encode package name for API calls (handles org/package format)
+          PKG_ENCODED=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${PACKAGE}', safe=''))")
+
+          # Fetch all versions with pagination support
+          # SC2129 fix: Group redirects
+          {
+            curl -s -f \
+              -H "Authorization: Bearer ${TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "${API_BASE}/${OWNER_TYPE}/${REGISTRY_OWNER_LC}/packages/container/${PKG_ENCODED}/versions?per_page=100" \
+              --retry 3 --retry-delay 2
+          } | jq -r '[.[] | select(.metadata.container.digest != null) | .metadata.container.digest] | unique[]' \
+            > /tmp/digests.txt 2>/dev/null || touch /tmp/digests.txt
+
+          DIGEST_COUNT=$(wc -l < /tmp/digests.txt | tr -d ' ')
+          echo "Found ${DIGEST_COUNT} image version(s)"
+          head -20 /tmp/digests.txt | sed 's/^/  /'
+          [ "$DIGEST_COUNT" -gt 20 ] && echo "  ... and $((DIGEST_COUNT - 20)) more"
+
+          digests=$(jq -Rnc '[inputs]' < /tmp/digests.txt)
+          echo "digests=${digests}" >> "$GITHUB_OUTPUT"
+          echo "::endgroup::"
+
+      - name: Upload digest artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ matrix.package }}
+          path: /tmp/digests.txt
+          retention-days: 7
+
+  # ──────────────────────────────────────────────────────────────────────
+  # PHASE 2: Cleanup Images — Use battle-tested action for image retention
+  # ──────────────────────────────────────────────────────────────────────
+  cleanup-images:
+    needs: [prepare, collect-digests]
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        package: ${{ fromJson(needs.prepare.outputs.packages) }}
+
+    # Prevent concurrent cleanup of same package
     concurrency:
-      group: cleanup-${{ matrix.package }}
+      group: cleanup-image-${{ matrix.package }}
       cancel-in-progress: false
 
     permissions:
@@ -92,21 +180,134 @@ jobs:
 
     steps:
       - name: Normalize registry owner to lowercase
-        # OCI image refs must be fully lowercase per the OCI distribution spec.
         run: |
+          set -euo pipefail
           lc_owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
-          echo "REGISTRY_OWNER_LC=${lc_owner}" >> "$GITHUB_ENV"
-          echo "IMAGE_BASE=ghcr.io/${lc_owner}/${{ matrix.package }}" >> "$GITHUB_ENV"
+          owner_type="${{ needs.prepare.outputs.owner_type }}"
+          {
+            echo "REGISTRY_OWNER_LC=${lc_owner}"
+            echo "OWNER_TYPE=${owner_type}"
+          } >> "$GITHUB_ENV"
 
-      - name: Cleanup images
+      - name: Cleanup container images
         uses: dataaxiom/ghcr-cleanup-action@v1
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           package: ${{ matrix.package }}
-          older-than: 60 days # primary filter
-          keep-n-tagged: 24 # secondary filter (fallback)
+          older-than: 60 days
+          keep-n-tagged: 24
+          keep-n-untagged: 5
           delete-untagged: true
           delete-partial-images: true
           delete-orphaned-images: true
           dry-run: ${{ env.DRY_RUN }}
           log-level: info
+
+  # ──────────────────────────────────────────────────────────────────────
+  # PHASE 3: Sweep Attestations — Mark-and-sweep orphaned attestations
+  # ──────────────────────────────────────────────────────────────────────
+  cleanup-attestations:
+    needs: [prepare, collect-digests, cleanup-images]
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        package: ${{ fromJson(needs.prepare.outputs.packages) }}
+
+    permissions:
+      attestations: write
+      packages: read
+      contents: read
+
+    steps:
+      - name: Setup environment
+        run: |
+          set -euo pipefail
+          lc_owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          owner_type="${{ needs.prepare.outputs.owner_type }}"
+          {
+            echo "REGISTRY_OWNER_LC=${lc_owner}"
+            echo "OWNER_TYPE=${owner_type}"
+          } >> "$GITHUB_ENV"
+
+      - name: Download pre-cleanup digests
+        uses: actions/download-artifact@v4
+        with:
+          name: digests-${{ matrix.package }}
+          path: /tmp/before
+
+      - name: Collect post-cleanup digests
+        id: collect-after
+        run: |
+          set -euo pipefail
+
+          PACKAGE="${{ matrix.package }}"
+          API_BASE="https://api.github.com"
+          TOKEN="${{ secrets.GITHUB_TOKEN }}"
+
+          PKG_ENCODED=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${PACKAGE}', safe=''))")
+
+          # SC2129 fix: Group command with redirect
+          {
+            curl -s -f \
+              -H "Authorization: Bearer ${TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "${API_BASE}/${OWNER_TYPE}/${REGISTRY_OWNER_LC}/packages/container/${PKG_ENCODED}/versions?per_page=100" \
+              --retry 3 --retry-delay 2
+          } | jq -r '[.[] | select(.metadata.container.digest != null) | .metadata.container.digest] | unique[]' \
+            > /tmp/after/digests.txt 2>/dev/null || touch /tmp/after/digests.txt
+
+          echo "Remaining digests: $(wc -l < /tmp/after/digests.txt | tr -d ' ')"
+
+      - name: Delete orphaned attestations
+        id: delete-attestations
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          echo "::group::Attestation cleanup for ${{ matrix.package }}"
+
+          # Find orphaned digests (present before cleanup but no longer present)
+          orphaned=$(comm -23 <(grep -v '^$' /tmp/before/digests.txt | sort -u) <(sort -u /tmp/after/digests.txt 2>/dev/null || echo "") || true)
+
+          if [[ -z "$orphaned" ]]; then
+            echo "No orphaned digests found"
+            echo "orphan_count=0" >> "$GITHUB_OUTPUT"
+            echo "::endgroup::"
+            exit 0
+          fi
+
+          count=$(echo "$orphaned" | wc -l)
+          echo "Found ${count} orphaned digest(s)"
+
+          if [[ "${DRY_RUN}" == "true" ]]; then
+            echo "Dry-run mode: skipping attestation deletion"
+            echo "orphan_count=${count}" >> "$GITHUB_OUTPUT"
+            echo "::endgroup::"
+            exit 0
+          fi
+
+          echo "Deleting attestations for ${count} orphaned digest(s)"
+          echo "$orphaned" | jq -R . | jq -sc "{subject_digests: .}" | \
+            gh api --method POST "/${OWNER_TYPE}/${REGISTRY_OWNER_LC}/attestations/delete-request" --input -
+
+          echo "orphan_count=${count}" >> "$GITHUB_OUTPUT"
+          echo "::endgroup::"
+
+      - name: Summary
+        if: always()
+        run: |
+          DRY="${{ env.DRY_RUN }}"
+          ORPHANS="${{ steps.delete-attestations.outputs.orphan_count || 0 }}"
+
+          {
+            echo "## 🧹 Image & Attestation Cleanup Report"
+            echo ""
+            echo "| Package | ${{ matrix.package }} |"
+            echo "|---------|---------------------|"
+            echo "| Images processed | $(wc -l < /tmp/before/digests.txt 2>/dev/null | tr -d ' ' || echo 0) |"
+            echo "| Images remaining | $(wc -l < /tmp/after/digests.txt 2>/dev/null | tr -d ' ' || echo 0) |"
+            echo "| Orphaned attestations | ${ORPHANS} |"
+            echo "| Mode | $([ "$DRY" = "true" ] && echo "🔍 Dry run" || echo "✅ Live") |"
+          } >> "$GITHUB_STEP_SUMMARY"

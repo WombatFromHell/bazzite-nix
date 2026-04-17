@@ -3,11 +3,36 @@
 
 set -euo pipefail
 
+# ── helper functions ────────────────────────────────────────────────────────
+
 is_transient_error() {
   local output="$1"
   echo "$output" | grep -qiE \
     '502|503|504|429|connection reset|connection refused|EOF|i/o timeout|TLS|unexpected HTTP|context deadline|net/http'
 }
+
+sbom_validate_and_digest() {
+  local sbom_file="$1"
+
+  if [[ ! -s "$sbom_file" ]]; then
+    echo "::error::SBOM file is empty or missing: ${sbom_file}"
+    return 1
+  fi
+
+  echo "  SBOM size:"
+  sudo du -sh "${sbom_file}"
+
+  local sbom_digest
+  sbom_digest=$(sudo sha256sum "${sbom_file}" | cut -d' ' -f1)
+  echo "  SBOM digest: ${sbom_digest}"
+
+  if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+    echo "sbom_path=${sbom_file}" >>"$GITHUB_OUTPUT"
+    echo "sbom_file_digest=${sbom_digest}" >>"$GITHUB_OUTPUT"
+  fi
+}
+
+# ── retry logic ─────────────────────────────────────────────────────────────
 
 run_with_retry() {
   local label="$1"
@@ -85,57 +110,65 @@ run_with_retry() {
   return 1
 }
 
-generate_sbom() {
-  local image_name="$1"
-  local version_tag="$2"
+# ── SBOM generation ──────────────────────────────────────────────────────────
+
+generate_sbom_to_file() {
+  local source="$1"
+  local source_name="$2"
   local syft_cmd="$3"
-  local oci_dir="$4"
-  local image_ref="$5"
+  local output_file="$4"
 
-  echo "::group::Generate SBOM"
+  echo "::group::Generate SBOM to file"
 
-  mkdir -p "${oci_dir}/rootfs"
-
-  echo "  Extracting container filesystem from ${image_ref}..."
-  sudo podman container create --replace --name "sbom-extract-${image_name}" "${image_ref}"
-  sudo podman export "sbom-extract-${image_name}" | sudo tar -C "${oci_dir}/rootfs" -xf -
-  sudo podman container rm "sbom-extract-${image_name}"
-
-  local sbom_dir sbom_file
-  sbom_dir="$(mktemp -d)"
-  sbom_file="${sbom_dir}/sbom.json"
+  echo "  Generating SBOM from ${source}..."
+  echo "  Source name: ${source_name}"
+  echo "  Output path: ${output_file}"
 
   export SYFT_PARALLELISM=$(($(nproc) * 2))
 
-  echo " Running Syft to generate SBOM..."
-  echo " Source name: ${image_name}-${version_tag}"
   sudo "$syft_cmd" \
-    --source-name "${image_name}-${version_tag}" \
-    "${oci_dir}" \
-    -o spdx-json="${sbom_file}"
+    --source-name "${source_name}" \
+    --scope squashed \
+    --exclude "./sysroot/ostree/repo/*" \
+    "${source}" \
+    -o spdx-json="${output_file}"
 
-  echo "  SBOM size:"
-  du -sh "${sbom_file}"
-
-  if [[ ! -s "$sbom_file" ]]; then
-    echo "::error::SBOM file is empty or missing: ${sbom_file}"
-    return 1
-  fi
-
-  local sbom_digest
-  sbom_digest=$(sha256sum "${sbom_file}" | cut -d' ' -f1)
-
-  echo "  SBOM file digest: ${sbom_digest}"
-  echo "sbom_path=${sbom_file}" >>"$GITHUB_OUTPUT"
-  echo "sbom_file_digest=${sbom_digest}" >>"$GITHUB_OUTPUT"
-
-  echo "  Cleaning up OCI directory..."
-  sudo rm -rf "${oci_dir}"
+  sbom_validate_and_digest "${output_file}"
 
   echo "::endgroup::"
 
-  echo "✓ SBOM generated successfully"
+  echo "✓ SBOM generated successfully at ${output_file}"
 }
+
+extract_embedded_sbom() {
+  local image_ref="$1"
+
+  echo "::group::Extract embedded SBOM"
+
+  echo "  Pulling image ${image_ref}..."
+  sudo podman pull "${image_ref}"
+
+  local sbom_dir
+  sbom_dir="$(mktemp -d)"
+  local sbom_file="${sbom_dir}/sbom.json"
+
+  echo "  Extracting SBOM from image..."
+  sudo podman run --rm "${image_ref}" cat /usr/share/ublue-os/sbom.json | sudo tee "${sbom_file}" >/dev/null
+
+  if [[ ! -s "$sbom_file" ]]; then
+    echo "::error::Embedded SBOM not found or is empty"
+    rm -rf "${sbom_dir}"
+    exit 1
+  fi
+
+  sbom_validate_and_digest "${sbom_file}"
+
+  echo "::endgroup::"
+
+  echo "✓ SBOM extracted successfully"
+}
+
+# ── OCI operations ───────────────────────────────────────────────────────────
 
 attach_sbom_to_oci() {
   local sbom_path="$1"
@@ -176,7 +209,7 @@ attach_sbom_to_oci() {
   fi
 
   echo "  SBOM artifact digest: ${sbom_digest}"
-  echo "sbom_remote_digest=${sbom_digest}" >>"$GITHUB_OUTPUT"
+  [[ -n "${GITHUB_OUTPUT:-}" ]] && echo "sbom_remote_digest=${sbom_digest}" >>"$GITHUB_OUTPUT"
 
   echo "::endgroup::"
 
@@ -210,9 +243,11 @@ sign_sbom_artifact() {
 
   echo "::endgroup::"
 
-  echo "signed=true" >>"$GITHUB_OUTPUT"
+  [[ -n "${GITHUB_OUTPUT:-}" ]] && echo "signed=true" >>"$GITHUB_OUTPUT"
   echo "✓ SBOM artifact signed"
 }
+
+# ── registry helpers ────────────────────────────────────────────────────────
 
 find_latest_tag() {
   local repo="$1"
@@ -292,15 +327,15 @@ build_matrix() {
   local count
   count=$(echo "$matrix_entries" | jq 'length')
   if [ "$count" -gt 0 ]; then
-    {
+    [[ -n "${GITHUB_OUTPUT:-}" ]] && {
       echo "has_entries=true"
       echo "matrix<<EOF"
       echo "$matrix_entries" | jq -c '.'
       echo "EOF"
     } >>"$GITHUB_OUTPUT"
   else
-    {
-      echo "::error::No variants had matching images"
+    echo "::error::No variants had matching images"
+    [[ -n "${GITHUB_OUTPUT:-}" ]] && {
       echo "has_entries=false"
       echo "matrix=[]"
     } >>"$GITHUB_OUTPUT"

@@ -1,15 +1,12 @@
 name: SBOM Reusable
-description: Generate SBOM for container image, attach to OCI registry, and sign
+description: Extract embedded SBOM from container image and attach as signed OCI artifact
 
 inputs:
   image_ref:
-    description: "Container storage reference (e.g., containers-storage:localhost/raw-img)"
+    description: "Container storage reference (e.g., ghcr.io/owner/image@sha256:...)"
     required: true
   variant_name:
-    description: "Variant name for source-name annotation"
-    required: true
-  version_tag:
-    description: "Image version tag"
+    description: "Variant name for logging"
     required: true
   registry:
     description: "Registry URL (e.g., ghcr.io/owner)"
@@ -25,105 +22,68 @@ inputs:
     description: "Published image digest (e.g., sha256:...)"
     required: true
   github_token:
-    description: "GitHub token for registry auth"
-    required: true
-  github_actor:
-    description: "GitHub actor username"
+    description: "GitHub token for OCI registry auth"
     required: true
   signing_secret:
-    description: "Cosign signing secret"
+    description: "Cosign private key for signing"
     required: true
-  syft_version:
-    description: "Syft version to download"
-    required: false
-    default: "v1.42.4"
-  max_attempts:
-    description: "Maximum retry attempts"
-    required: false
-    default: "3"
-  retry_delay:
-    description: "Delay in seconds between retries"
-    required: false
-    default: "15"
 
 outputs:
   sbom_path:
-    description: "Path to generated SBOM JSON file"
-    value: ${{ steps.generate_sbom.outputs.sbom_path }}
+    description: "Path to extracted SBOM JSON file"
+    value: ${{ steps.extract_sbom.outputs.sbom_path }}
   sbom_file_digest:
-    description: "SHA256 digest of local SBOM file"
-    value: ${{ steps.generate_sbom.outputs.sbom_file_digest }}
+    description: "SHA256 digest of extracted SBOM file"
+    value: ${{ steps.extract_sbom.outputs.sbom_file_digest }}
   sbom_remote_digest:
-    description: "Digest of SBOM artifact in OCI registry"
+    description: "Digest of the attached SBOM artifact"
     value: ${{ steps.attach_sbom.outputs.sbom_remote_digest }}
-  sbom_signed:
-    description: "Whether SBOM was successfully signed"
+  signed:
+    description: "Whether the SBOM was signed"
     value: ${{ steps.sign_sbom.outputs.signed }}
 
 runs:
   using: composite
   steps:
-    - name: Setup Syft
-      id: setup-syft
-      uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0
-      with:
-        syft-version: ${{ inputs.syft_version }}
-
-    - name: Generate SBOM
-      id: generate_sbom
+    - name: Extract embedded SBOM
+      id: extract_sbom
       shell: bash
       env:
-        IMAGE: ${{ inputs.variant_name }}
-        VERSION_TAG: ${{ inputs.version_tag }}
-        SYFT_CMD: ${{ steps.setup-syft.outputs.cmd }}
-        OCI_DIR: "/tmp/image-oci-dir"
         IMAGE_REF: ${{ inputs.image_ref }}
         GITHUB_OUTPUT: ${{ github.output }}
       run: |
         set -euo pipefail
         source "${{ github.action_path }}/helpers.sh"
 
-        generate_sbom \
-          "${IMAGE}" \
-          "${VERSION_TAG}" \
-          "${SYFT_CMD}" \
-          "${OCI_DIR}" \
-          "${IMAGE_REF}"
+        extract_embedded_sbom "${IMAGE_REF}"
 
-    - name: Install ORAS
-      uses: oras-project/setup-oras@38de303aac69abb66f3e6255b7198bff35f323e3 # v2.0.0
-
-    - name: Login to GHCR for ORAS
-      id: login_oras
+    - name: Authenticate to registry
       shell: bash
       env:
-        GITHUB_TOKEN: ${{ inputs.github_token }}
-        GITHUB_ACTOR: ${{ inputs.github_actor }}
-        MAX_ATTEMPTS: ${{ inputs.max_attempts }}
-        RETRY_DELAY: ${{ inputs.retry_delay }}
+        GH_TOKEN: ${{ inputs.github_token }}
+        REGISTRY: ${{ inputs.registry }}
       run: |
-        set -euo pipefail
-        source "${{ github.action_path }}/helpers.sh"
-
-        mkdir -p /tmp/oras-auth
-
-        run_with_retry "oras login ghcr.io" \
-          --stdin-data "${GITHUB_TOKEN}" \
-          oras login ghcr.io \
-          --username "${GITHUB_ACTOR}" \
-          --password-stdin \
-          --registry-config /tmp/oras-auth/auth.json
+        mkdir -p ~/.docker
+        AUTH_VALUE="$(printf '%s:%s' "${GITHUB_ACTOR:-ci}" "${GH_TOKEN}" | base64 -w0)"
+        cat > ~/.docker/config.json <<EOF
+        {
+          "auths": {
+            "${REGISTRY}": {
+              "auth": "${AUTH_VALUE}"
+            }
+          }
+        }
+        EOF
 
     - name: Attach SBOM to OCI registry
       id: attach_sbom
       shell: bash
       env:
-        SBOM_PATH: ${{ steps.generate_sbom.outputs.sbom_path }}
-        IMAGE: "${{ inputs.registry }}/${{ inputs.repo }}${{ inputs.suffix }}"
-        IMAGE_DIGEST: ${{ inputs.image_digest }}
-        AUTHFILE: "/tmp/oras-auth/auth.json"
-        MAX_ATTEMPTS: ${{ inputs.max_attempts }}
-        RETRY_DELAY: ${{ inputs.retry_delay }}
+        IMAGE: ${{ inputs.registry }}/${{ inputs.repo }}${{ inputs.suffix }}
+        DIGEST: ${{ inputs.image_digest }}
+        SBOM_PATH: ${{ steps.extract_sbom.outputs.sbom_path }}
+        GITHUB_ACTOR: ${{ github.actor }}
+        GITHUB_OUTPUT: ${{ github.output }}
       run: |
         set -euo pipefail
         source "${{ github.action_path }}/helpers.sh"
@@ -131,40 +91,26 @@ runs:
         attach_sbom_to_oci \
           "${SBOM_PATH}" \
           "${IMAGE}" \
-          "${IMAGE_DIGEST}" \
-          "${AUTHFILE}"
-
-    - name: Install Cosign
-      uses: sigstore/cosign-installer@ba7bc0a3fef59531c69a25acd34668d6d3fe6f22 # v4.1.0
+          "${DIGEST}" \
+          ~/.docker/config.json
 
     - name: Sign SBOM artifact
       id: sign_sbom
       shell: bash
       env:
-        SIGNING_SECRET: ${{ inputs.signing_secret }}
-        GITHUB_TOKEN: ${{ inputs.github_token }}
-        GITHUB_ACTOR: ${{ inputs.github_actor }}
-        IMAGE: "${{ inputs.registry }}/${{ inputs.repo }}${{ inputs.suffix }}"
+        IMAGE: ${{ inputs.registry }}/${{ inputs.repo }}${{ inputs.suffix }}
         SBOM_DIGEST: ${{ steps.attach_sbom.outputs.sbom_remote_digest }}
-        MAX_ATTEMPTS: ${{ inputs.max_attempts }}
-        RETRY_DELAY: ${{ inputs.retry_delay }}
+        GITHUB_ACTOR: ${{ github.actor }}
+        GITHUB_TOKEN: ${{ inputs.github_token }}
+        GITHUB_OUTPUT: ${{ github.output }}
+        COSIGN_PRIVATE_KEY: ${{ inputs.signing_secret }}
       run: |
         set -euo pipefail
         source "${{ github.action_path }}/helpers.sh"
 
         sign_sbom_artifact \
-          "${SIGNING_SECRET}" \
+          "${COSIGN_PRIVATE_KEY}" \
           "${IMAGE}" \
           "${SBOM_DIGEST}" \
           "${GITHUB_ACTOR}" \
           "${GITHUB_TOKEN}"
-
-    - name: Create attestation
-      uses: actions/attest@59d89421af93a897026c735860bf21b6eb4f7b26 # v4.1.0
-      with:
-        github-token: ${{ inputs.github_token }}
-        subject-name: "${{ inputs.registry }}/${{ inputs.repo }}${{ inputs.suffix }}"
-        subject-digest: "${{ inputs.image_digest }}"
-        push-to-registry: true
-        predicate-type: "https://spdx.dev/Document"
-        predicate: "${{ steps.generate_sbom.outputs.sbom_path }}"

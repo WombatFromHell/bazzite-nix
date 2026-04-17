@@ -23,9 +23,6 @@ on:
 permissions:
   contents: read
   packages: write
-  id-token: write
-  attestations: write
-  artifact-metadata: write
 
 env:
   IMAGE_NAME: "${{ github.event.repository.name }}"
@@ -84,9 +81,6 @@ jobs:
     permissions:
       contents: read
       packages: write
-      id-token: write
-      attestations: write
-      artifact-metadata: write
 
     env:
       BASE_IMG: >-
@@ -125,21 +119,6 @@ jobs:
           suffix: ${{ matrix.variant_data.suffix }}
           date: ${{ needs.check_and_aggregate.outputs.date }}
           parent_version: ${{ matrix.variant_data.parent_version }}
-
-      - name: Generate SBOM (attach & sign)
-        id: manage_sbom
-        uses: ./.github/actions/sbom-reusable
-        with:
-          image_ref: ${{ steps.build.outputs.source_ref }}
-          variant_name: ${{ matrix.variant_data.variant }}
-          version_tag: ${{ steps.build.outputs.variant_tag }}
-          registry: ${{ needs.check_and_aggregate.outputs.registry }}
-          repo: ${{ needs.check_and_aggregate.outputs.repo }}
-          suffix: ${{ matrix.variant_data.suffix }}
-          image_digest: ${{ steps.push_image.outputs.remote_digest }}
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          github_actor: ${{ github.actor }}
-          signing_secret: ${{ secrets.SIGNING_SECRET }}
 
   collect_build_results:
     needs: [check_and_aggregate, build_push]

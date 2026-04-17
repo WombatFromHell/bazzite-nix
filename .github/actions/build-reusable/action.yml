@@ -30,6 +30,10 @@ inputs:
   repository_name:
     description: "GitHub repository name"
     required: true
+  syft_version:
+    description: "Syft version to download"
+    required: false
+    default: "v1.42.4"
 
 outputs:
   source_ref:
@@ -121,6 +125,21 @@ runs:
           "${{ runner.temp }}/manifest.json" \
           "${{ runner.temp }}/labels.txt"
         echo "labels_file=${{ runner.temp }}/labels.txt" >> "$GITHUB_OUTPUT"
+
+    - name: Setup Syft
+      id: setup-syft
+      uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610
+      with:
+        syft-version: ${{ inputs.syft_version }}
+
+    - name: Generate and embed SBOM
+      shell: bash
+      run: |
+        source "${{ github.action_path }}/helpers.sh"
+        generate_and_embed_sbom \
+          "localhost/raw-img" \
+          "${{ inputs.canonical_tag }}" \
+          "${{ steps.setup-syft.outputs.cmd }}"
 
     - name: Rechunk image
       shell: bash

@@ -4,6 +4,10 @@
 
 set -euo pipefail
 
+# Source shared SBOM helpers
+# shellcheck source=../sbom-reusable/helpers.sh
+source "${BASH_SOURCE[0]%/*}/../sbom-reusable/helpers.sh"
+
 # ── build image ─────────────────────────────────────────────────────────────
 # Usage: build_image <base_image> <build_script> <canonical_tag> <variant> <containerfile_path>
 
@@ -190,4 +194,63 @@ extract_final_ref() {
     echo "FULL_BUILD_DIGEST=${full_digest}"
     echo "BUILD_DIGEST=${short_digest}"
   fi
+}
+
+# ── generate and embed SBOM ─────────────────────────────────────────────────
+# Usage: generate_and_embed_sbom <image_name> <version_tag> <syft_cmd>
+# Generates an SBOM from the image filesystem and embeds it at /usr/share/ublue-os/sbom.json
+
+generate_and_embed_sbom() {
+  local image="$1"
+  local version_tag="$2"
+  local syft_cmd="$3"
+
+  echo "::group::Generate and embed SBOM"
+
+  local mount_point
+  mount_point=$(sudo podman image mount "${image}") || {
+    echo "::error::Failed to mount image ${image}"
+    exit 1
+  }
+
+  local sbom_dir
+  sbom_dir="$(mktemp -d)"
+  local sbom_file="${sbom_dir}/sbom.json"
+
+  echo "  Mounted image at: ${mount_point}"
+
+  generate_sbom_to_file \
+    "dir:${mount_point}" \
+    "${image}-${version_tag}" \
+    "${syft_cmd}" \
+    "${sbom_file}"
+
+  sudo podman image unmount "${image}"
+
+  echo "  Injecting SBOM into image layer with buildah..."
+
+  local container
+  container=$(sudo buildah from --security-opt label=disable --name "sbom-working-${RANDOM}" "${image}") || {
+    echo "::error::Failed to create buildah container from ${image}"
+    rm -rf "${sbom_dir}"
+    exit 1
+  }
+
+  mount_point=$(sudo buildah mount "${container}") || {
+    echo "::error::Failed to mount buildah container"
+    sudo buildah rm "${container}"
+    rm -rf "${sbom_dir}"
+    exit 1
+  }
+
+  sudo mkdir -p "${mount_point}/usr/share/ublue-os"
+  sudo cp "${sbom_file}" "${mount_point}/usr/share/ublue-os/sbom.json"
+  sudo buildah unmount "${container}"
+  sudo buildah commit --quiet "${container}" "${image}"
+  sudo buildah rm "${container}"
+
+  rm -rf "${sbom_dir}"
+
+  echo "::endgroup::"
+  echo "✓ SBOM embedded successfully at /usr/share/ublue-os/sbom.json"
 }

@@ -1,0 +1,103 @@
+{
+  "spdxVersion": "SPDX-2.3",
+  "dataLicense": "CC0-1.0",
+  "SPDXID": "SPDXRef-DOCUMENT",
+  "name": "bazzite-nix",
+  "documentNamespace": "https://github.com/ublue-os/bazzite",
+  "creationInfo": {
+    "created": "2025-04-16T00:00:00Z",
+    "creators": [
+      "Tool: syft"
+    ]
+  },
+  "packages": [
+    {
+      "SPDXID": "SPDXRef-Package-kernel",
+      "name": "kernel",
+      "versionInfo": "6.19.8-200.ogc",
+      "externalRefs": [
+        {
+          "referenceType": "purl",
+          "referenceLocator": "pkg:rpm/bazzite/kernel@6.19.8-200.ogc?arch=x86_64&distro=bazzite-43"
+        }
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-Package-mesa-filesystem",
+      "name": "mesa-filesystem",
+      "versionInfo": "26.0.3-1",
+      "externalRefs": [
+        {
+          "referenceType": "purl",
+          "referenceLocator": "pkg:rpm/fedora/mesa-filesystem@26.0.3-1?arch=x86_64"
+        }
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-Package-terra-gamescope",
+      "name": "terra-gamescope",
+      "versionInfo": "136.402bfb81-1",
+      "externalRefs": [
+        {
+          "referenceType": "purl",
+          "referenceLocator": "pkg:rpm/bazzite/terra-gamescope@136.402bfb81-1?arch=x86_64"
+        }
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-Package-bazaar",
+      "name": "bazaar",
+      "versionInfo": "0.7.11-3",
+      "externalRefs": [
+        {
+          "referenceType": "purl",
+          "referenceLocator": "pkg:rpm/bazzite/bazaar@0.7.11-3?arch=x86_64"
+        }
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-Package-plasma-desktop",
+      "name": "plasma-desktop",
+      "versionInfo": "6.6.2-1",
+      "externalRefs": [
+        {
+          "referenceType": "purl",
+          "referenceLocator": "pkg:rpm/fedora/plasma-desktop@6.6.2-1?arch=x86_64"
+        }
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-Package-atheros-firmware",
+      "name": "atheros-firmware",
+      "versionInfo": "20250109-1",
+      "externalRefs": [
+        {
+          "referenceType": "purl",
+          "referenceLocator": "pkg:rpm/fedora/atheros-firmware@20250109-1?arch=noarch"
+        }
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-Package-nvidia-kmod-common",
+      "name": "nvidia-kmod-common",
+      "versionInfo": "580.142-1",
+      "externalRefs": [
+        {
+          "referenceType": "purl",
+          "referenceLocator": "pkg:rpm/bazzite/nvidia-kmod-common@580.142-1?arch=x86_64"
+        }
+      ]
+    },
+    {
+      "SPDXID": "SPDXRef-Package NetworkManager",
+      "name": "NetworkManager",
+      "versionInfo": "1:1.54.3-1000.2.fc43.bazzite",
+      "externalRefs": [
+        {
+          "referenceType": "purl",
+          "referenceLocator": "pkg:rpm/bazzite/NetworkManager@1.54.3-1000.2.fc43.bazzite?arch=x86_64"
+        }
+      ]
+    }
+  ]
+}

@@ -1,10 +1,10 @@
-name: Regenerate SBOM (Manual)
+name: Attach SBOM (Manual)
 
 on:
   workflow_dispatch:
     inputs:
       variants:
-        description: "Comma-delimited list of variants to regenerate SBOM for (blank = all enabled)"
+        description: "Comma-delimited list of variants to attach SBOM for (blank = all enabled)"
         type: string
         required: false
         default: ""
@@ -55,8 +55,6 @@ jobs:
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
 
-          echo "Resolved variants: $MATRIX_JSON"
-
   get-latest-release:
     needs: resolve-variants
     runs-on: ubuntu-24.04
@@ -70,40 +68,23 @@ jobs:
       - name: Install crane
         uses: imjasonh/setup-crane@v0.5
 
-      - name: Get latest image tag from GHCR for each variant
+      - name: Get latest image digests from GHCR
         id: build_matrix
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_ACTOR: ${{ github.actor }}
-          REGISTRY: "ghcr.io"
-          OUTPUT_REPO_BASE: "ghcr.io/${{ github.repository_owner }}"
+          REGISTRY: "ghcr.io/${{ github.repository_owner }}"
           REPO_NAME: "${{ github.event.repository.name }}"
         run: |
           set -euo pipefail
 
           source ./.github/actions/sbom-reusable/helpers.sh
 
-          mkdir -p ~/.docker
-          AUTH_VALUE="$(printf '%s:%s' "${GITHUB_ACTOR}" "${GH_TOKEN}" | base64 -w0)"
-          cat > ~/.docker/config.json <<EOF
-          {
-            "auths": {
-              "${REGISTRY}": {
-                "auth": "${AUTH_VALUE}"
-              }
-            }
-          }
-          EOF
-
-          echo "::group::Debug: Registry access test"
-          crane auth login "${REGISTRY}" -u "${GITHUB_ACTOR}" -p "${GH_TOKEN}" 2>&1 || true
-          echo "::endgroup::"
-
           VARIANTS='${{ needs.resolve-variants.outputs.matrix }}'
 
-          build_matrix "$VARIANTS" "${OUTPUT_REPO_BASE}" "${REPO_NAME}"
+          build_matrix "$VARIANTS" "${REGISTRY}" "${REPO_NAME}"
 
-  regenerate-sbom:
+  attach-sbom:
     needs: get-latest-release
     if: needs.get-latest-release.outputs.has_entries == 'true'
     runs-on: ubuntu-24.04
@@ -115,50 +96,25 @@ jobs:
     permissions:
       contents: read
       packages: write
-      id-token: write
-      attestations: write
-      artifact-metadata: write
+
     env:
-      IMAGE_NAME: "bazzite-nix"
+      IMAGE_NAME: "${{ github.event.repository.name }}"
       REGISTRY: "ghcr.io/${{ github.repository_owner }}"
+      REGISTRY_LOWER: "ghcr.io/${{ github.repository_owner }}"
 
     steps:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Normalize registry to lowercase
-        id: normalize_registry
-        run: |
-          REGISTRY_LOWER="ghcr.io/${{ github.repository_owner }}"
-          REGISTRY_LOWER="${REGISTRY_LOWER,,}"
-          echo "registry=${REGISTRY_LOWER}" >> "$GITHUB_OUTPUT"
-
-      - name: Pull image locally
-        shell: bash
-        env:
-          GITHUB_ACTOR: ${{ github.actor }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          IMAGE_REPO: "${{ steps.normalize_registry.outputs.registry }}/${{ env.IMAGE_NAME }}${{ matrix.variant_data.suffix }}"
-          IMAGE_TAG: ${{ matrix.variant_data.image_tag }}
-          IMAGE_DIGEST: ${{ matrix.variant_data.image_digest }}
-        run: |
-          # Auth for podman
-          printf '%s' "${GH_TOKEN}" | sudo podman login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
-
-          sudo podman pull "${IMAGE_REPO}@${IMAGE_DIGEST}"
-          sudo podman tag "${IMAGE_REPO}@${IMAGE_DIGEST}" "${IMAGE_REPO}:${IMAGE_TAG}"
-
-      - name: Generate and attach SBOM
+      - name: Extract and attach SBOM
         id: manage_sbom
         uses: ./.github/actions/sbom-reusable
         with:
-          image_ref: "${{ steps.normalize_registry.outputs.registry }}/${{ env.IMAGE_NAME }}${{ matrix.variant_data.suffix }}@${{ matrix.variant_data.image_digest }}"
+          image_ref: "${{ env.REGISTRY_LOWER }}/${{ env.IMAGE_NAME }}${{ matrix.variant_data.suffix }}@${{ matrix.variant_data.image_digest }}"
           variant_name: ${{ matrix.variant_data.variant }}
-          version_tag: ${{ matrix.variant_data.canonical_tag }}
-          registry: ${{ steps.normalize_registry.outputs.registry }}
+          registry: ${{ env.REGISTRY_LOWER }}
           repo: ${{ env.IMAGE_NAME }}
           suffix: ${{ matrix.variant_data.suffix }}
           image_digest: ${{ matrix.variant_data.image_digest }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          github_actor: ${{ github.actor }}
           signing_secret: ${{ secrets.SIGNING_SECRET }}
