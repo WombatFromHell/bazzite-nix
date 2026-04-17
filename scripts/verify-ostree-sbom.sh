@@ -207,22 +207,21 @@ extract_sbom_from_image() {
   fi
 
   local sbom_format
-  sbom_format=$(jq -r '.spdxVersion // empty' "$SBOM_PATH" 2>/dev/null)
+  sbom_format=$(jq -r '.bomFormat // empty' "$SBOM_PATH" 2>/dev/null)
   if [[ -z "$sbom_format" ]]; then
-    log_error "SBOM in image is not in SPDX format"
-    log_info "Expected SPDX-JSON format with 'spdxVersion' field"
+    log_error "SBOM in image is not in CycloneDX format"
+    log_info "Expected CycloneDX JSON format with 'bomFormat' field"
     exit 2
   fi
 
-  if [[ "$sbom_format" != "SPDX-2.3" && "$sbom_format" != "SPDX-2.2" && "$sbom_format" != "SPDX-2.1" ]]; then
-    log_error "Unsupported SPDX version in image: $sbom_format"
-    log_info "Expected SPDX-2.1, SPDX-2.2, or SPDX-2.3"
+  if [[ "$sbom_format" != "CycloneDX" ]]; then
+    log_error "Unsupported SBOM format in image: $sbom_format"
+    log_info "Expected CycloneDX"
     exit 2
   fi
 
   SBOM_DIGEST="sha256:$(sha256sum "$SBOM_PATH" | cut -d' ' -f1)"
   log_success "SBOM extracted ($(wc -c <"$SBOM_PATH" | tr -d ' ') bytes, ${sbom_format})"
-  log_info "SBOM digest: ${SBOM_DIGEST}"
 }
 
 ensure_image_local() {
@@ -327,22 +326,22 @@ fetch_attestation() {
   log_info "Attempting to fetch SBOM attestation via gh attestation verify..."
   if gh attestation verify "oci://${subject_name}" \
     --owner "$GITHUB_OWNER" \
-    --predicate-type "https://spdx.dev/Document/v2.3" \
+    --predicate-type "https://cyclonedx.org/bom" \
     -o json 2>/dev/null | jq -e 'length > 0' >/dev/null 2>&1; then
 
-    log_info "Found SPDX SBOM attestation, extracting..."
+    log_info "Found CycloneDX SBOM attestation, extracting..."
 
     local sbom_json
     if sbom_json=$(gh attestation verify "oci://${subject_name}" \
       --owner "$GITHUB_OWNER" \
-      --predicate-type "https://spdx.dev/Document/v2.3" \
+      --predicate-type "https://cyclonedx.org/bom" \
       -o json 2>/dev/null | jq -r '.[].verificationResult.statement.predicate' 2>/dev/null); then
 
       if [[ -n "$sbom_json" && "$sbom_json" != "null" ]]; then
         echo "$sbom_json" >"$SBOM_PATH"
 
         local sbom_format
-        sbom_format=$(jq -r '.spdxVersion // empty' "$SBOM_PATH" 2>/dev/null)
+        sbom_format=$(jq -r '.bomFormat // empty' "$SBOM_PATH" 2>/dev/null)
         if [[ -n "$sbom_format" ]]; then
           SBOM_DIGEST="sha256:$(sha256sum "$SBOM_PATH" | cut -d' ' -f1)"
           log_success "SBOM attestation extracted via gh attestation verify ($(wc -c <"$SBOM_PATH" | tr -d ' ') bytes, ${sbom_format})"
@@ -407,8 +406,8 @@ fetch_attestation() {
     predicate_type=$(echo "$decoded_payload" | jq -r '.predicateType // empty' 2>/dev/null)
     log_info "Predicate type: ${predicate_type:-unknown}"
 
-    if [[ "$predicate_type" == *"spdx.dev"* ]] || [[ "$predicate_type" == "application/vnd.spdx+json" ]]; then
-      log_info "Found SPDX SBOM attestation"
+    if [[ "$predicate_type" == *"cyclonedx"* ]] || [[ "$predicate_type" == "application/vnd.cyclonedx+json" ]]; then
+      log_info "Found CycloneDX SBOM attestation"
 
       local sbom_content
       sbom_content=$(echo "$decoded_payload" | jq -r '.statement.predicate' 2>/dev/null)
@@ -420,7 +419,7 @@ fetch_attestation() {
         echo "$sbom_content" >"$SBOM_PATH"
 
         local sbom_format
-        sbom_format=$(jq -r '.spdxVersion // empty' "$SBOM_PATH" 2>/dev/null)
+        sbom_format=$(jq -r '.bomFormat // empty' "$SBOM_PATH" 2>/dev/null)
         if [[ -n "$sbom_format" ]]; then
           SBOM_DIGEST="sha256:$(sha256sum "$SBOM_PATH" | cut -d' ' -f1)"
           sbom_found=true
@@ -464,7 +463,7 @@ verify_attestation_signature() {
 
   gh attestation verify "oci://${subject_name}" \
     --owner "$GITHUB_OWNER" \
-    --predicate-type "https://spdx.dev/Document/v2.3" \
+    --predicate-type "https://cyclonedx.org/bom" \
     -o json >/dev/null 2>&1 || {
     log_error "SBOM attestation signature verification failed"
     log_info "The attestation may have been tampered with or uses different signing key"
@@ -525,28 +524,28 @@ extract_sbom_packages() {
   }
 
   local sbom_format
-  sbom_format=$(jq -r '.spdxVersion // empty' "$SBOM_PATH" 2>/dev/null)
+  sbom_format=$(jq -r '.bomFormat // empty' "$SBOM_PATH" 2>/dev/null)
 
   if [[ -z "$sbom_format" ]]; then
-    log_error "SBOM is not in SPDX format: $SBOM_PATH"
-    log_info "Expected SPDX-JSON format with 'spdxVersion' field"
+    log_error "SBOM is not in CycloneDX format: $SBOM_PATH"
+    log_info "Expected CycloneDX JSON format with 'bomFormat' field"
     exit 2
   fi
 
-  if [[ "$sbom_format" != "SPDX-2.3" && "$sbom_format" != "SPDX-2.2" && "$sbom_format" != "SPDX-2.1" ]]; then
-    log_error "Unsupported SPDX version: $sbom_format"
-    log_info "Expected SPDX-2.1, SPDX-2.2, or SPDX-2.3"
+  if [[ "$sbom_format" != "CycloneDX" ]]; then
+    log_error "Unsupported SBOM format: $sbom_format"
+    log_info "Expected CycloneDX"
     exit 2
   fi
 
   jq -r '
-    .packages[] |
-    select(.externalRefs != null) |
-    .externalRefs[] |
-    select(.referenceType == "purl" and (.referenceLocator | startswith("pkg:rpm"))) |
-    .referenceLocator |
-    sub("^pkg:rpm/[^/]+/"; "") |
-    sub("@.*$"; "") |
+    .components[]? |
+    select(.purl != null) |
+    .purl |
+    select(startswith("pkg:rpm/")) |
+    ltrimstr("pkg:rpm/") |
+    split("@") |
+    .[0] |
     gsub("%2[Bb]"; "+") |
     gsub("%2[Ff]"; "/")
   ' "$SBOM_PATH" 2>/dev/null | sort -u >"${TEMP_DIR}/sbom-packages.txt"
@@ -569,16 +568,16 @@ setup_local_mode() {
   }
 
   local sbom_format
-  sbom_format=$(jq -r '.spdxVersion // empty' "$LOCAL_SBOM_PATH" 2>/dev/null)
+  sbom_format=$(jq -r '.bomFormat // empty' "$LOCAL_SBOM_PATH" 2>/dev/null)
   if [[ -z "$sbom_format" ]]; then
-    log_error "Local SBOM is not in SPDX format: $LOCAL_SBOM_PATH"
-    log_info "Expected SPDX-JSON format with 'spdxVersion' field"
+    log_error "Local SBOM is not in CycloneDX format: $LOCAL_SBOM_PATH"
+    log_info "Expected CycloneDX JSON format with 'bomFormat' field"
     exit 2
   fi
 
-  if [[ "$sbom_format" != "SPDX-2.3" && "$sbom_format" != "SPDX-2.2" && "$sbom_format" != "SPDX-2.1" ]]; then
-    log_error "Unsupported SPDX version in local SBOM: $sbom_format"
-    log_info "Expected SPDX-2.1, SPDX-2.2, or SPDX-2.3"
+  if [[ "$sbom_format" != "CycloneDX" ]]; then
+    log_error "Unsupported SBOM format in local SBOM: $sbom_format"
+    log_info "Expected CycloneDX"
     exit 2
   fi
 

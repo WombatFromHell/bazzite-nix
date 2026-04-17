@@ -450,60 +450,30 @@ class TestGetPackages:
 
 
 class TestGetPackagesFromSbom:
-    """Tests for get_packages_from_sbom function that parses SPDX JSON."""
+    """Tests for get_packages_from_sbom function that parses CycloneDX JSON."""
 
-    def test_parses_syft_artifacts_format(self):
-        """Test parsing Syft's native artifacts format."""
-        syft_data = {
-            "artifacts": [
-                {"name": "kernel", "version": "6.19.8-200.ogc"},
-                {"name": "mesa", "version": "26.0.3-1"},
-                {"name": "glibc", "version": "2.39-1"},
-            ]
-        }
-
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            json.dump(syft_data, f)
-            sbom_path = f.name
-
-        try:
-            result = get_packages_from_sbom(sbom_path)
-            assert result["kernel"] == "6.19.8-200.ogc"
-            assert result["mesa"] == "26.0.3-1"
-            assert result["glibc"] == "2.39-1"
-            assert len(result) == 3
-        finally:
-            os.unlink(sbom_path)
-
-    def test_parses_spdx_packages_format(self):
-        """Test parsing SPDX format with packages array and purl filtering."""
-        spdx_data = {
-            "packages": [
+    def test_parses_cyclonedx_format(self):
+        """Test parsing CycloneDX format with components array and purl filtering."""
+        cyclonedx_data = {
+            "bomFormat": "CycloneDX",
+            "components": [
                 {
                     "name": "kernel",
-                    "versionInfo": "6.19.8-200.ogc",
-                    "externalRefs": [
-                        {
-                            "referenceType": "purl",
-                            "referenceLocator": "pkg:rpm/bazzite/kernel@6.19.8-200.ogc?arch=x86_64",
-                        }
-                    ],
+                    "version": "6.19.8-200.ogc",
+                    "purl": "pkg:rpm/bazzite/kernel@6.19.8-200.ogc?arch=x86_64",
+                    "type": "library",
                 },
                 {
                     "name": "mesa",
-                    "versionInfo": "26.0.3-1",
-                    "externalRefs": [
-                        {
-                            "referenceType": "purl",
-                            "referenceLocator": "pkg:rpm/bazzite/mesa@26.0.3-1?arch=x86_64",
-                        }
-                    ],
+                    "version": "26.0.3-1",
+                    "purl": "pkg:rpm/bazzite/mesa@26.0.3-1?arch=x86_64",
+                    "type": "library",
                 },
-            ]
+            ],
         }
 
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            json.dump(spdx_data, f)
+            json.dump(cyclonedx_data, f)
             sbom_path = f.name
 
         try:
@@ -511,119 +481,6 @@ class TestGetPackagesFromSbom:
             assert result["kernel"] == "6.19.8-200.ogc"
             assert result["mesa"] == "26.0.3-1"
             assert len(result) == 2
-        finally:
-            os.unlink(sbom_path)
-
-    def test_filters_non_rpm_purl_schemes(self):
-        """SPDX packages with non-rpm purl schemes should be ignored."""
-        spdx_data = {
-            "packages": [
-                {
-                    "name": "kernel",
-                    "versionInfo": "6.19.8-200.ogc",
-                    "externalRefs": [
-                        {
-                            "referenceType": "purl",
-                            "referenceLocator": "pkg:rpm/bazzite/kernel@6.19.8-200.ogc",
-                        }
-                    ],
-                },
-                {
-                    "name": "golang-module",
-                    "versionInfo": "v1.2.3",
-                    "externalRefs": [
-                        {
-                            "referenceType": "purl",
-                            "referenceLocator": "pkg:golang/github.com/example/module@v1.2.3",
-                        }
-                    ],
-                },
-                {
-                    "name": "npm-package",
-                    "versionInfo": "1.0.0",
-                    "externalRefs": [
-                        {
-                            "referenceType": "purl",
-                            "referenceLocator": "pkg:npm/some-package@1.0.0",
-                        }
-                    ],
-                },
-            ]
-        }
-
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            json.dump(spdx_data, f)
-            sbom_path = f.name
-
-        try:
-            result = get_packages_from_sbom(sbom_path)
-            assert result["kernel"] == "6.19.8-200.ogc"
-            assert "golang-module" not in result
-            assert "npm-package" not in result
-            assert len(result) == 1
-        finally:
-            os.unlink(sbom_path)
-
-    def test_url_decodes_purl_characters(self):
-        """Purl names with URL-encoded characters should be decoded."""
-        spdx_data = {
-            "packages": [
-                {
-                    "name": "gcc-c++",
-                    "versionInfo": "14.2.1-1",
-                    "externalRefs": [
-                        {
-                            "referenceType": "purl",
-                            "referenceLocator": "pkg:rpm/bazzite/gcc-c%2B%2B@14.2.1-1",
-                        }
-                    ],
-                },
-                {
-                    "name": "perl-Text-Tabs+Wrap",
-                    "versionInfo": "2024.1-1",
-                    "externalRefs": [
-                        {
-                            "referenceType": "purl",
-                            "referenceLocator": "pkg:rpm/bazzite/perl-Text-Tabs%2BWrap@2024.1-1",
-                        }
-                    ],
-                },
-            ]
-        }
-
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            json.dump(spdx_data, f)
-            sbom_path = f.name
-
-        try:
-            result = get_packages_from_sbom(sbom_path)
-            assert "gcc-c++" in result
-            assert result["gcc-c++"] == "14.2.1-1"
-            assert "perl-Text-Tabs+Wrap" in result
-            assert result["perl-Text-Tabs+Wrap"] == "2024.1-1"
-        finally:
-            os.unlink(sbom_path)
-
-    def test_ignores_artifacts_without_version(self):
-        """Artifacts without version field should be skipped."""
-        syft_data = {
-            "artifacts": [
-                {"name": "valid-pkg", "version": "1.0"},
-                {"name": "no-version-pkg"},
-                {"name": "", "version": "2.0"},
-                {"version": "3.0"},
-            ]
-        }
-
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            json.dump(syft_data, f)
-            sbom_path = f.name
-
-        try:
-            result = get_packages_from_sbom(sbom_path)
-            assert result["valid-pkg"] == "1.0"
-            assert "no-version-pkg" not in result
-            assert len(result) == 1
         finally:
             os.unlink(sbom_path)
 
@@ -644,34 +501,17 @@ class TestGetPackagesFromSbom:
         finally:
             os.unlink(sbom_path)
 
-    def test_returns_empty_dict_for_empty_artifacts(self):
-        """Should return empty dict when no artifacts or packages found."""
-        syft_data = {"artifacts": []}
+    def test_returns_empty_dict_for_empty_components(self):
+        """Should return empty dict when no components found."""
+        cyclonedx_data = {"bomFormat": "CycloneDX", "components": []}
 
         with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            json.dump(syft_data, f)
+            json.dump(cyclonedx_data, f)
             sbom_path = f.name
 
         try:
             result = get_packages_from_sbom(sbom_path)
             assert result == {}
-        finally:
-            os.unlink(sbom_path)
-
-    def test_prefers_artifacts_over_packages(self):
-        """When both formats present, should prefer artifacts format."""
-        syft_data = {
-            "artifacts": [{"name": "kernel", "version": "6.19.8-artifacts"}],
-            "packages": [{"name": "kernel", "versionInfo": "6.19.8-packages"}],
-        }
-
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            json.dump(syft_data, f)
-            sbom_path = f.name
-
-        try:
-            result = get_packages_from_sbom(sbom_path)
-            assert result["kernel"] == "6.19.8-artifacts"
         finally:
             os.unlink(sbom_path)
 

@@ -125,27 +125,6 @@ clean_vm_cache() {
 
 # ── Build pipeline functions ────────────────────────────────────────────────
 
-has_syft() {
-  command -v syft &>/dev/null
-}
-
-inject_sbom() {
-  local image="$1"
-  local version_tag="$2"
-  local helpers_build="$JUST_HELPERS_BUILD"
-
-  local syft_path
-  syft_path=$(command -v syft 2>/dev/null) || {
-    echo "syft not found - skipping SBOM generation (install via flake or manually to enable)"
-    return 0
-  }
-
-  echo "Generating SBOM with syft..."
-  # shellcheck disable=SC1090
-  source "$helpers_build"
-  generate_and_embed_sbom "$image" "$version_tag" "$syft_path"
-}
-
 # Build a container image (stages to localhost/raw-img)
 # Sources helpers_build for build_image function
 run_build() {
@@ -162,7 +141,6 @@ run_build() {
   eval "$(resolve_variant "$variant_or_spec" "$variants_config" "$image_name")"
   [[ -n "$base_image_override" ]] && BASE_IMAGE="$base_image_override"
   build_image "$BASE_IMAGE" "$BUILD_SCRIPT" "$CANONICAL_TAG" "$VARIANT_NAME" "./Containerfile"
-  inject_sbom "localhost/raw-img" "$CANONICAL_TAG"
 }
 
 # Force-rebuild a container image, evicting any cached local image first
@@ -181,7 +159,6 @@ run_rebuild() {
   [[ -n "$base_image_override" ]] && BASE_IMAGE="$base_image_override"
   sudo podman rmi localhost/raw-img 2>/dev/null || true
   build_image "$BASE_IMAGE" "$BUILD_SCRIPT" "$CANONICAL_TAG" "$VARIANT_NAME" "./Containerfile"
-  inject_sbom "localhost/raw-img" "$CANONICAL_TAG"
 }
 
 # Rechunk localhost/raw-img to OCI layout with bootc chunking
@@ -247,8 +224,6 @@ run_pipeline() {
   else
     build_image "$BASE_IMAGE" "$BUILD_SCRIPT" "$CANONICAL_TAG" "$VARIANT_NAME" "./Containerfile"
   fi
-
-  inject_sbom "localhost/raw-img" "$CANONICAL_TAG"
 
   # Phase 2: Extract image info (always safe to re-run, cheap operation)
   echo "=== Phase 2: Extract image info ==="

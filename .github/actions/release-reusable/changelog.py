@@ -266,15 +266,58 @@ def extract_rpm_from_purl(purl: str) -> tuple[str, str] | None:
 
 
 def get_packages_from_sbom(sbom_path: str) -> dict[str, str]:
-    """Extract packages from SPDX JSON format.
+    """Extract packages from SBOM files.
 
-    Supports SPDX format (packages array) and legacy Syft native format (artifacts array).
-    For SPDX format, only extracts RPM packages by filtering on purl scheme.
+    Supports CycloneDX format (components array with purl field).
+    Only extracts RPM packages by filtering on purl scheme.
     """
     packages = {}
     try:
         with open(sbom_path) as f:
             data = json.load(f)
+
+        # CycloneDX has "bomFormat" field
+        bom_format = data.get("bomFormat", "")
+        if bom_format == "CycloneDX":
+            components = data.get("components", [])
+            if components:
+                for comp in components:
+                    purl = comp.get("purl", "")
+                    if purl and purl.startswith("pkg:rpm/"):
+                        result = extract_rpm_from_purl(purl)
+                        if result:
+                            name, version = result
+                            packages[name] = version
+                if packages:
+                    print(
+                        f" Parsed {len(packages)} packages from SBOM (CycloneDX RPM purl format)"
+                    )
+                return packages
+
+        print(f"Warning: No packages found in SBOM file: {sbom_path}")
+        return packages
+
+        # SPDX format has "spdxVersion"
+        spdx_version = data.get("spdxVersion", "")
+        if spdx_version:
+            # Try SPDX format (packages array) - filter by RPM purl
+            spdx_packages = data.get("packages", [])
+            if spdx_packages:
+                for pkg in spdx_packages:
+                    external_refs = pkg.get("externalRefs", [])
+                    for ref in external_refs:
+                        if ref.get("referenceType") == "purl":
+                            purl = ref.get("referenceLocator", "")
+                            result = extract_rpm_from_purl(purl)
+                            if result:
+                                name, version = result
+                                packages[name] = version
+                                break  # Found valid purl, move to next package
+                if packages:
+                    print(
+                        f" Parsed {len(packages)} packages from SBOM (SPDX RPM purl format)"
+                    )
+                return packages
 
         # Try Syft native format (v1.x)
         artifacts = data.get("artifacts", [])
@@ -286,25 +329,6 @@ def get_packages_from_sbom(sbom_path: str) -> dict[str, str]:
                     packages[name] = version
             if packages:
                 print(f" Parsed {len(packages)} packages from SBOM (artifacts format)")
-            return packages
-
-        # Try SPDX format (packages array) - filter by RPM purl
-        spdx_packages = data.get("packages", [])
-        if spdx_packages:
-            for pkg in spdx_packages:
-                external_refs = pkg.get("externalRefs", [])
-                for ref in external_refs:
-                    if ref.get("referenceType") == "purl":
-                        purl = ref.get("referenceLocator", "")
-                        result = extract_rpm_from_purl(purl)
-                        if result:
-                            name, version = result
-                            packages[name] = version
-                            break  # Found valid purl, move to next package
-            if packages:
-                print(
-                    f" Parsed {len(packages)} packages from SBOM (SPDX RPM purl format)"
-                )
             return packages
 
         print(f"Warning: No packages found in SBOM file: {sbom_path}")

@@ -221,7 +221,7 @@ generate_and_embed_sbom() {
 
   generate_sbom_to_file \
     "dir:${mount_point}" \
-    "${image}-${version_tag}" \
+    "${version_tag}" \
     "${syft_cmd}" \
     "${sbom_file}"
 

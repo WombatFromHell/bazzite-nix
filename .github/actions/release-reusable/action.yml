@@ -114,7 +114,7 @@ runs:
 
         mkdir -p ./sbom
         if oras pull "${IMAGE}@${CURRENT_DIGEST}" \
-          --artifact-type application/vnd.spdx+json \
+          --artifact-type application/vnd.cyclonedx+json \
           --output ./sbom; then
             SBOM_FILE=$(ls ./sbom/*.json 2>/dev/null | head -1)
             if [[ -n "$SBOM_FILE" ]]; then
@@ -181,7 +181,7 @@ runs:
 
           mkdir -p ./sbom/prev
           if oras pull "${IMAGE}@${PREV_DIGEST}" \
-            --artifact-type application/vnd.spdx+json \
+            --artifact-type application/vnd.cyclonedx+json \
             --output ./sbom/prev; then
               PREV_SBOM_FILE=$(ls ./sbom/prev/*.json 2>/dev/null | head -1)
               if [[ -n "$PREV_SBOM_FILE" ]]; then

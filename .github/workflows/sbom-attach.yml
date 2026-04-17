@@ -104,6 +104,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write
+      attestations: write
 
     env:
       REGISTRY: ${{ needs.get-latest-release.outputs.registry }}
@@ -113,8 +115,30 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      - name: Install crane
+        uses: imjasonh/setup-crane@v0.5
+
+      - name: Install oras
+        uses: oras-project/setup-oras@v2
+
+      - name: Check existing attestation
+        id: check_attestation
+        run: |
+          set -euo pipefail
+          source ./.github/actions/sbom-reusable/helpers.sh
+
+          IMAGE_REF="${{ env.REGISTRY }}/${{ env.REPO }}${{ matrix.variant_data.suffix }}@${{ matrix.variant_data.image_digest }}"
+
+          if check_attestation "$IMAGE_REF"; then
+            echo "Attestation and SBOM already exist, skipping"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Extract and attach SBOM
         id: manage_sbom
+        if: steps.check_attestation.outputs.skip != 'true'
         uses: ./.github/actions/sbom-reusable
         with:
           image_ref: "${{ env.REGISTRY }}/${{ env.REPO }}${{ matrix.variant_data.suffix }}@${{ matrix.variant_data.image_digest }}"

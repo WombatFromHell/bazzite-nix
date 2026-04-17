@@ -18,6 +18,8 @@
         packages = with pkgs; [
           actionlint
           bashInteractive
+          crane
+          grype
           oras
           python3
           python3Packages.pytest

@@ -126,6 +126,8 @@ jobs:
     outputs:
       successful_variants: ${{ steps.collect.outputs.successful_variants }}
       any_successful: ${{ steps.collect.outputs.any_successful }}
+      registry: ${{ needs.check_and_aggregate.outputs.registry }}
+      repo: ${{ needs.check_and_aggregate.outputs.repo }}
     steps:
       - name: Collect successful builds
         id: collect
@@ -155,8 +157,81 @@ jobs:
           echo "any_successful=${ANY_SUCCESSFUL}" >> "$GITHUB_OUTPUT"
           echo "Found $COUNT successful builds"
 
-  generate_release:
+  create_attestations:
     needs: [check_and_aggregate, build_push, collect_build_results]
+    if: needs.collect_build_results.outputs.any_successful == 'true'
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: ${{ fromJson(needs.collect_build_results.outputs.successful_variants) }}
+
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+
+    env:
+      REGISTRY: ${{ needs.check_and_aggregate.outputs.registry }}
+      REPO: ${{ needs.check_and_aggregate.outputs.repo }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install crane
+        uses: imjasonh/setup-crane@v0.5
+
+      - name: Install oras
+        uses: oras-project/setup-oras@v2
+
+      - name: Get variant config and image digest
+        id: variant_info
+        run: |
+          set -euo pipefail
+
+          VARIANT_CONFIG=$(jq -c --arg v "${{ matrix.variant.variant }}" '.variants[] | select(.name == $v)' .github/variants.json)
+          SUFFIX=$(echo "$VARIANT_CONFIG" | jq -r '.suffix // ""')
+          echo "suffix=${SUFFIX}" >> "$GITHUB_OUTPUT"
+
+          # Find the most recent tag for this variant using crane
+          # Tags follow pattern: variant-YYYY.MMDD.VERSION (e.g., bazzite-nvidia-40.20241215.1)
+          IMAGE_NAME="${{ env.REGISTRY }}/${{ env.REPO }}${SUFFIX}"
+          TAGS=$(crane ls "$IMAGE_NAME" 2>/dev/null || echo "")
+
+          VARIANT_TAG=$(echo "$TAGS" | grep -E "^${{ matrix.variant.variant }}-[0-9]+\.[0-9]{8}(\.[0-9]+)?$" | grep -vE '^[0-9a-f]{64}$' | grep -vE '\.sig$' | sort -t. -k1,1n -k2,2n -k3,3n | tail -1)
+
+          if [ -z "$VARIANT_TAG" ]; then
+            echo "::error::No matching tag found for variant ${{ matrix.variant.variant }}"
+            exit 1
+          fi
+
+          echo "Found tag: ${VARIANT_TAG}"
+          DIGEST=$(crane digest "${IMAGE_NAME}:${VARIANT_TAG}")
+          echo "image_digest=${DIGEST}" >> "$GITHUB_OUTPUT"
+          echo "image_tag=${VARIANT_TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Create attestation with SBOM
+        uses: ./.github/actions/sbom-reusable
+        with:
+          image_ref: "${{ env.REGISTRY }}/${{ env.REPO }}${{ steps.variant_info.outputs.suffix }}@${{ steps.variant_info.outputs.image_digest }}"
+          variant_name: ${{ matrix.variant.variant }}
+          registry: ${{ env.REGISTRY }}
+          repo: ${{ env.REPO }}
+          suffix: ${{ steps.variant_info.outputs.suffix }}
+          image_digest: ${{ steps.variant_info.outputs.image_digest }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          signing_secret: ${{ secrets.SIGNING_SECRET }}
+
+  generate_release:
+    needs:
+      [
+        check_and_aggregate,
+        build_push,
+        collect_build_results,
+        create_attestations,
+      ]
     if: |
       needs.collect_build_results.outputs.any_successful == 'true' &&
       (github.event.inputs.generate_release == 'true' || github.event_name == 'schedule')

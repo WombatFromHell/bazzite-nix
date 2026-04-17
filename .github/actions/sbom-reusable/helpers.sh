@@ -124,14 +124,16 @@ generate_sbom_to_file() {
   echo "  Source name: ${source_name}"
   echo "  Output path: ${output_file}"
 
-  export SYFT_PARALLELISM=$(($(nproc) * 2))
+  local tmpdir="${TMPDIR:-/tmp/syft-tmp}"
+  rm -rf "${tmpdir:?}/"
+  mkdir -p "${tmpdir}"
 
-  sudo "$syft_cmd" \
-    --source-name "${source_name}" \
-    --scope squashed \
-    --exclude "./sysroot/ostree/repo/*" \
+  export SYFT_PARALLELISM=$(($(nproc) * 2))
+  TMPDIR="$tmpdir" sudo "$syft_cmd" \
     "${source}" \
-    -o spdx-json="${output_file}"
+    --source-name "${source_name}" \
+    --config syft-config.yaml \
+    -o cyclonedx-json="${output_file}"
 
   sbom_validate_and_digest "${output_file}"
 
@@ -192,7 +194,7 @@ attach_sbom_to_oci() {
     --stream \
     oras attach \
     --registry-config "${authfile}" \
-    --artifact-type application/vnd.spdx+json \
+    --artifact-type application/vnd.cyclonedx+json \
     --annotation "org.opencontainers.artifact.created=auto" \
     --annotation "sbom.source=anchore/syft" \
     "${full_ref}" \
@@ -201,7 +203,7 @@ attach_sbom_to_oci() {
   echo "  Discovering attached SBOM digest..."
   local sbom_digest
   sbom_digest=$(oras discover --format json "${full_ref}" |
-    jq -r '.referrers[] | select(.artifactType == "application/vnd.spdx+json") | .digest')
+    jq -r '.referrers[] | select(.artifactType == "application/vnd.cyclonedx+json") | .digest')
 
   if [[ -z "$sbom_digest" ]] || [[ "$sbom_digest" == "null" ]]; then
     echo "::error::Failed to discover SBOM digest from OCI registry"
@@ -339,5 +341,44 @@ build_matrix() {
       echo "has_entries=false"
       echo "matrix=[]"
     } >>"$GITHUB_OUTPUT"
+  fi
+}
+
+check_attestation() {
+  local image_ref="$1"
+  local referrer_type="${2:-application/vnd.cyclonedx+json}"
+
+  local attestations
+  attestations=$(oras discover --format json "$image_ref" 2>/dev/null || true)
+
+  local has_provenance
+  has_provenance=$(echo "$attestations" | jq -r '.referrers[] | select(.artifactType == "application/in-toto+json") | .digest' 2>/dev/null || true)
+
+  local has_sbom=false
+  if [[ "$referrer_type" != "none" ]]; then
+    local sbom_digest
+    sbom_digest=$(echo "$attestations" | jq -r ".referrers[] | select(.artifactType == \"${referrer_type}\") | .digest" 2>/dev/null || true)
+    if [[ -n "$sbom_digest" ]] && [[ "$sbom_digest" != "null" ]]; then
+      has_sbom=true
+    fi
+  fi
+
+  local has_attestation=false
+  if [[ -n "$has_provenance" ]] && [[ "$has_provenance" != "null" ]]; then
+    has_attestation=true
+  fi
+
+  echo "  Attestation found: ${has_attestation}"
+  echo "  SBOM referrer found: ${has_sbom}"
+
+  [[ -n "${GITHUB_OUTPUT:-}" ]] && {
+    echo "has_attestation=${has_attestation}"
+    echo "has_sbom_referrer=${has_sbom}"
+  } >>"$GITHUB_OUTPUT"
+
+  if [[ "$has_attestation" == "true" ]] && [[ "$has_sbom" == "true" ]]; then
+    return 0
+  else
+    return 1
   fi
 }
