@@ -33,11 +33,9 @@ if [[ -f "$ACTION_HELPERS" ]]; then
 fi
 
 JSON_OUTPUT=false
-LOCAL_MODE=false
-VERIFY_SIGNATURE=false
-NO_PULL=false
-LOCAL_SBOM_PATH=""
-LOCAL_MANIFEST_PATH=""
+TAMPER_CHECK=false
+SIG_CHECK=false
+DEPLOYMENT_NUM=""
 GITHUB_OWNER=""
 GITHUB_REPO=""
 GH_TOKEN=""
@@ -50,28 +48,48 @@ SIGNATURE_VALID=false
 
 usage() {
   cat <<EOF
-Usage: $(basename "$0") [OPTIONS]
+Usage: $(basename "$0") [MODE] [OPTIONS]
 
-Verify an image's SBOM attestation exists in GitHub and optionally
-verify its signature.
+Verify SBOM integrity and attestation signatures for ublue-os images.
 
-Options:
-  -v, --verbose           Enable verbose output
+MODES (one is required):
+  --tamper-check           Compare embedded manifest.json against sbom.json (offline)
+  --sig-check             Verify GitHub attestation signature (requires network)
+
+OPTIONS:
+  -i, --image REF         Image reference (e.g., ghcr.io/owner/repo:tag, docker://...)
+                          If not specified, uses booted deployment
+  -d, --deployment NUM    Select ostree deployment by index (0=booted, 1=previous)
   -j, --json              Output results as JSON
-  -i, --image REF         Image reference to verify
-  -l, --local-sbom PATH  Local SBOM file to compare against image manifest
-  -m, --manifest PATH    Manifest path (extracted from image if not specified)
-  --no-pull               Don't pull image, use local only
-  -s, --verify-signature  Verify attestation signature with GitHub
-  -o, --owner OWNER       GitHub owner (org or user)
-  -r, --repo REPO          GitHub repository name
-  -t, --token TOKEN       GitHub token (default: GITHUB_TOKEN env)
+  -v, --verbose           Enable verbose output (set -x)
   -h, --help              Show this help message
 
-Exit codes:
+EXAMPLES:
+  # Check currently booted deployment
+  $(basename "$0") --tamper-check
+
+  # Check specific ostree deployment
+  $(basename "$0") --tamper-check -d 1
+
+  # Check remote image
+  $(basename "$0") --tamper-check -i ghcr.io/owner/repo:tag
+
+  # Verify signature on remote image
+  $(basename "$0") --sig-check -i ghcr.io/owner/repo:tag
+
+  # Verify signature on booted deployment
+  $(basename "$0") --sig-check
+
+  # JSON output for programmatic use
+  $(basename "$0") --tamper-check -i ghcr.io/owner/repo:tag -j
+
+ENVIRONMENT:
+  GITHUB_TOKEN             GitHub token for --sig-check (defaults to \$GITHUB_TOKEN)
+
+EXIT CODES:
   0 - Verification passed
-  1 - Verification failed (SBOM missing or packages differ)
-  2 - Error (network error, etc.)
+  1 - Verification failed (package mismatch)
+  2 - Error (missing files, network error, etc.)
   3 - Signature verification failed
 EOF
   exit 0
@@ -121,7 +139,7 @@ setup_temp() {
 }
 
 get_deployed_info() {
-  log_info "Querying currently deployed image..."
+  log_info "Querying rpm-ostree deployment..."
 
   local status_json
   status_json=$(rpm-ostree status --json) || {
@@ -129,21 +147,26 @@ get_deployed_info() {
     exit 2
   }
 
-  local first_deployment
-  first_deployment=$(echo "$status_json" | jq -r '.[0]')
+  local deployment_index=0
+  if [[ -n "$DEPLOYMENT_NUM" ]]; then
+    deployment_index="$DEPLOYMENT_NUM"
+  fi
 
-  if [[ -z "$first_deployment" ]] || [[ "$first_deployment" == "null" ]]; then
-    log_error "No deployments found"
+  local deployment
+  deployment=$(echo "$status_json" | jq -r ".[$deployment_index]" 2>/dev/null)
+
+  if [[ -z "$deployment" ]] || [[ "$deployment" == "null" ]]; then
+    log_error "No deployment found at index $deployment_index"
     exit 2
   fi
 
-  IMAGE_REF=$(echo "$first_deployment" | jq -r '.containerImageReference // .origin // empty')
+  IMAGE_REF=$(echo "$deployment" | jq -r '.containerImageReference // .origin // empty')
 
   local version_string version_tag
-  version_string=$(echo "$first_deployment" | jq -r '.version')
+  version_string=$(echo "$deployment" | jq -r '.version')
   version_tag=$(echo "$version_string" | awk '{print $1}')
 
-  IMAGE_DIGEST=$(echo "$first_deployment" | jq -r '.checksum // .containerImageDigest // empty')
+  IMAGE_DIGEST=$(echo "$deployment" | jq -r '.checksum // .containerImageDigest // empty')
 
   if [[ "$IMAGE_REF" == docker://* ]] || [[ "$IMAGE_REF" == ghcr.io* ]]; then
     :
@@ -156,19 +179,18 @@ get_deployed_info() {
     exit 2
   fi
 
-  log_info "Deployed image: ${IMAGE_REF}"
+  log_info "Deployment ${deployment_index}: ${IMAGE_REF}"
   [[ -n "${IMAGE_DIGEST}" ]] && log_info "Image digest: ${IMAGE_DIGEST}"
 }
 
 extract_sbom_from_image() {
-  local image_ref="$1"
   log_info "Extracting embedded SBOM from image..."
 
   SBOM_PATH="${TEMP_DIR}/sbom.json"
 
-  local podman_ref="$image_ref"
-  if [[ "$image_ref" != docker://* ]] && [[ "$image_ref" != containers-storage:* ]]; then
-    podman_ref="docker://${image_ref}"
+  local podman_ref="$IMAGE_REF"
+  if [[ "$IMAGE_REF" != docker://* ]] && [[ "$IMAGE_REF" != containers-storage:* ]]; then
+    podman_ref="docker://${IMAGE_REF}"
   fi
 
   podman pull "$podman_ref" >/dev/null 2>&1 || true
@@ -216,10 +238,6 @@ ensure_image_local() {
   fi
 
   if ! podman image exists "$podman_ref" 2>/dev/null; then
-    if [[ "$NO_PULL" == "true" ]]; then
-      log_error "Image not found locally and --no-pull specified"
-      exit 2
-    fi
     log_info "Pulling image: ${podman_ref}..."
     podman pull "$podman_ref" || {
       log_error "Failed to pull image: ${podman_ref}"
@@ -606,8 +624,8 @@ generate_report() {
   total_sbom=$(count_lines "${TEMP_DIR}/sbom-packages.txt")
   total_deployed=$(count_lines "${TEMP_DIR}/deployed-packages.txt")
 
-  local signature_status="not_checked"
-  [[ "$VERIFY_SIGNATURE" == "true" ]] && signature_status=$([[ "$SIGNATURE_VALID" == "true" ]] && echo "valid" || echo "invalid")
+  local sig_check_status="not_checked"
+  [[ "$SIG_CHECK" == "true" ]] && sig_check_status=$([[ "$SIGNATURE_VALID" == "true" ]] && echo "valid" || echo "invalid")
 
   if [[ "$JSON_OUTPUT" == "true" ]]; then
     local extra_json missing_json
@@ -620,10 +638,10 @@ generate_report() {
 "image": "${IMAGE_REF}",
 "digest": "${IMAGE_DIGEST}",
 "sbom_digest": "${SBOM_DIGEST}",
-"signature": {
-"verified": $(if [[ "$VERIFY_SIGNATURE" == "true" ]] && [[ "$SIGNATURE_VALID" == "true" ]]; then echo "true"; else echo "false"; fi),
-"status": "${signature_status}",
-"public_key": $(if [[ "$VERIFY_SIGNATURE" == "true" ]]; then echo "\"github\""; else echo "null"; fi)
+"sig_check": {
+"performed": $(if [[ "$SIG_CHECK" == "true" ]]; then echo "true"; else echo "false"; fi),
+"status": "${sig_check_status}",
+"public_key": $(if [[ "$SIG_CHECK" == "true" ]]; then echo "\"github\""; else echo "null"; fi)
 },
 "packages": {
 "sbom_total": ${total_sbom},
@@ -645,7 +663,7 @@ EOF
     echo -e "${BLUE}Image:${NC} ${IMAGE_REF}"
     echo -e "${BLUE}Digest:${NC} ${IMAGE_DIGEST:-N/A}"
     echo -e "${BLUE}SBOM:${NC} ${SBOM_DIGEST}"
-    [[ "$VERIFY_SIGNATURE" == "true" ]] && echo -e "${BLUE}Signature:${NC} ${signature_status}"
+    [[ "$SIG_CHECK" == "true" ]] && echo -e "${BLUE}Sig Check:${NC} ${sig_check_status}"
     echo ""
     echo "------------------------------------------------------------"
     echo " PACKAGE SUMMARY"
@@ -674,7 +692,7 @@ EOF
 
     echo "============================================================"
 
-    if [[ "$VERIFY_SIGNATURE" == "true" ]] && [[ "$SIGNATURE_VALID" != "true" ]]; then
+    if [[ "$SIG_CHECK" == "true" ]] && [[ "$SIGNATURE_VALID" != "true" ]]; then
       echo -e "${RED}[FAIL] SIGNATURE VERIFICATION FAILED${NC}"
       echo ""
       echo "The attestation signature could not be verified."
@@ -714,34 +732,17 @@ main() {
       IMAGE_REF="${2:?}"
       shift 2
       ;;
-    -l | --local-sbom)
-      LOCAL_MODE=true
-      LOCAL_SBOM_PATH="${2:?}"
+    -d | --deployment)
+      DEPLOYMENT_NUM="${2:?}"
       shift 2
       ;;
-    -m | --manifest)
-      LOCAL_MANIFEST_PATH="${2:?}"
-      shift 2
-      ;;
-    --no-pull)
-      NO_PULL=true
+    --tamper-check)
+      TAMPER_CHECK=true
       shift
       ;;
-    -s | --verify-signature)
-      VERIFY_SIGNATURE=true
+    --sig-check)
+      SIG_CHECK=true
       shift
-      ;;
-    -o | --owner)
-      GITHUB_OWNER="${2:?}"
-      shift 2
-      ;;
-    -r | --repo)
-      GITHUB_REPO="${2:?}"
-      shift 2
-      ;;
-    -t | --token)
-      GH_TOKEN="${2:?}"
-      shift 2
       ;;
     -h | --help)
       usage
@@ -755,29 +756,35 @@ main() {
 
   setup_temp
 
-  if [[ "$LOCAL_MODE" == "true" ]]; then
-    setup_local_mode
+  if [[ "$TAMPER_CHECK" == "true" ]]; then
+    if [[ -z "$IMAGE_REF" ]]; then
+      get_deployed_info
+    else
+      ensure_image_local
+    fi
+    extract_manifest_from_image
+    extract_sbom_from_image
     extract_sbom_packages
     get_deployed_packages_local
     compare_packages
     generate_report
-  elif [[ -n "$IMAGE_REF" ]]; then
-    ensure_image_local
-    extract_manifest_from_image
+  elif [[ "$SIG_CHECK" == "true" ]]; then
+    if [[ -z "$IMAGE_REF" ]]; then
+      get_deployed_info
+    else
+      ensure_image_local
+    fi
     fetch_attestation
-    [[ "$VERIFY_SIGNATURE" == "true" ]] && verify_attestation_signature || exit $?
+    verify_attestation_signature
+    extract_manifest_from_image
+    extract_sbom_from_image
     extract_sbom_packages
     get_deployed_packages_local
     compare_packages
     generate_report
   else
-    get_deployed_info
-    fetch_attestation
-    [[ "$VERIFY_SIGNATURE" == "true" ]] && verify_attestation_signature || exit $?
-    extract_sbom_packages
-    get_deployed_packages_rpm_ostree
-    compare_packages
-    generate_report
+    log_error "Must specify either --tamper-check or --sig-check"
+    usage
   fi
 }
 

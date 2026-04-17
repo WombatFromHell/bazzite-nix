@@ -117,7 +117,9 @@ runs:
         echo "::group::Fetch current SBOM"
         echo "  Image: ${IMAGE}:${{ steps.get-target.outputs.target }}"
 
-        CURRENT_DIGEST=$(skopeo inspect --auth-file <(echo "${{ inputs.github_token }}" | oras auth encode ghcr.io ${{ github.actor }} -) \
+        CURRENT_DIGEST=$(skopeo inspect \
+          --username "${{ github.actor }}" \
+          --password "${{ inputs.github_token }}" \
           "docker://${IMAGE}:${{ steps.get-target.outputs.target }}" 2>/dev/null | jq -r '.Digest')
 
         if [[ -z "$CURRENT_DIGEST" ]] || [[ "$CURRENT_DIGEST" == "null" ]]; then
@@ -155,7 +157,10 @@ runs:
         echo "::group::Fetch previous SBOM"
 
         # Get previous tag by looking at available tags
-        TAGS=$(skopeo list-tags "docker://${IMAGE}" 2>/dev/null | jq -r '.Tags[]' || echo "")
+        TAGS=$(skopeo list-tags \
+          --username "${{ github.actor }}" \
+          --password "${{ inputs.github_token }}" \
+          "docker://${IMAGE}" 2>/dev/null | jq -r '.Tags[]' || echo "")
         if [[ -z "$TAGS" ]]; then
           echo "::warning::Could not list tags, SBOM will not be available for previous version"
           echo "prev_sbom_path=" >> "$GITHUB_OUTPUT"
@@ -179,7 +184,9 @@ runs:
         else
           echo "  Previous tag: ${PREV_TAG}"
 
-          PREV_DIGEST=$(skopeo inspect --auth-file <(echo "${{ inputs.github_token }}" | oras auth encode ghcr.io ${{ github.actor }} -) \
+          PREV_DIGEST=$(skopeo inspect \
+            --username "${{ github.actor }}" \
+            --password "${{ inputs.github_token }}" \
             "docker://${IMAGE}:${PREV_TAG}" 2>/dev/null | jq -r '.Digest')
 
           if [[ -z "$PREV_DIGEST" ]] || [[ "$PREV_DIGEST" == "null" ]]; then
