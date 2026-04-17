@@ -1634,10 +1634,10 @@ class TestVersionHandlingIntegration:
         assert isinstance(result, tuple)
         assert len(result) == 2
 
-        # First element is current packages
+        # Both elements should have packages populated (from manifests when no SBOM provided)
         current, prev = result
         assert current["bazzite"]["kernel"] == "6.19.8"
-        assert prev == {}
+        assert prev["bazzite"]["kernel"] == "6.19.8"
 
 
 # =============================================================================

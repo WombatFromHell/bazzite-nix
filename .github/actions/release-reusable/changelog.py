@@ -275,65 +275,6 @@ def get_packages_from_sbom(sbom_path: str) -> dict[str, str]:
     try:
         with open(sbom_path) as f:
             data = json.load(f)
-
-        # CycloneDX has "bomFormat" field
-        bom_format = data.get("bomFormat", "")
-        if bom_format == "CycloneDX":
-            components = data.get("components", [])
-            if components:
-                for comp in components:
-                    purl = comp.get("purl", "")
-                    if purl and purl.startswith("pkg:rpm/"):
-                        result = extract_rpm_from_purl(purl)
-                        if result:
-                            name, version = result
-                            packages[name] = version
-                if packages:
-                    print(
-                        f" Parsed {len(packages)} packages from SBOM (CycloneDX RPM purl format)"
-                    )
-                return packages
-
-        print(f"Warning: No packages found in SBOM file: {sbom_path}")
-        return packages
-
-        # SPDX format has "spdxVersion"
-        spdx_version = data.get("spdxVersion", "")
-        if spdx_version:
-            # Try SPDX format (packages array) - filter by RPM purl
-            spdx_packages = data.get("packages", [])
-            if spdx_packages:
-                for pkg in spdx_packages:
-                    external_refs = pkg.get("externalRefs", [])
-                    for ref in external_refs:
-                        if ref.get("referenceType") == "purl":
-                            purl = ref.get("referenceLocator", "")
-                            result = extract_rpm_from_purl(purl)
-                            if result:
-                                name, version = result
-                                packages[name] = version
-                                break  # Found valid purl, move to next package
-                if packages:
-                    print(
-                        f" Parsed {len(packages)} packages from SBOM (SPDX RPM purl format)"
-                    )
-                return packages
-
-        # Try Syft native format (v1.x)
-        artifacts = data.get("artifacts", [])
-        if artifacts:
-            for artifact in artifacts:
-                name = artifact.get("name", "")
-                version = artifact.get("version", "")
-                if name and version:
-                    packages[name] = version
-            if packages:
-                print(f" Parsed {len(packages)} packages from SBOM (artifacts format)")
-            return packages
-
-        print(f"Warning: No packages found in SBOM file: {sbom_path}")
-        return packages
-
     except FileNotFoundError:
         print(f"Warning: SBOM file not found: {sbom_path}")
         return {}
@@ -343,11 +284,84 @@ def get_packages_from_sbom(sbom_path: str) -> dict[str, str]:
     except Exception as e:
         print(f"Warning: Failed to parse SBOM {sbom_path}: {type(e).__name__}: {e}")
         return {}
-    except json.JSONDecodeError as e:
-        print(f"Warning: Invalid JSON in SBOM file {sbom_path}: {e}")
-        return {}
+
+    # CycloneDX has "bomFormat" field
+    bom_format = data.get("bomFormat", "")
+    if bom_format == "CycloneDX":
+        components = data.get("components", [])
+        if components:
+            for comp in components:
+                purl = comp.get("purl", "")
+                if purl and purl.startswith("pkg:rpm/"):
+                    result = extract_rpm_from_purl(purl)
+                    if result:
+                        name, version = result
+                        packages[name] = version
+            if packages:
+                print(
+                    f" Parsed {len(packages)} packages from SBOM (CycloneDX RPM purl format)"
+                )
+                return packages
+
+    # Fallback: Syft native format (v1.x artifacts array)
+    artifacts = data.get("artifacts", [])
+    if artifacts:
+        for artifact in artifacts:
+            name = artifact.get("name", "")
+            version = artifact.get("version", "")
+            if name and version:
+                packages[name] = version
+        if packages:
+            print(f" Parsed {len(packages)} packages from SBOM (artifacts format)")
+            return packages
+
+    print(f"Warning: No packages found in SBOM file: {sbom_path}")
+    return packages
+
+
+def _get_packages_from_manifest(
+    manifest: dict[str, Any], img_name: str
+) -> dict[str, str]:
+    """Extract packages from manifest labels (ostree.rechunk.info or dev.hhd.rechunk.info).
+
+    Returns packages dict or empty dict if not found.
+    """
+    try:
+        labels = manifest.get("Labels", {})
+        if not labels:
+            print(f"Warning: No Labels in manifest for {img_name}")
+            return {}
+
+        rechunk_info = labels.get("ostree.rechunk.info") or labels.get(
+            "dev.hhd.rechunk.info"
+        )
+        if not rechunk_info:
+            available = list(labels.keys())
+            print(
+                f"Warning: No rechunk info label for {img_name}. Available labels: {available}"
+            )
+            return {}
+
+        try:
+            data = json.loads(rechunk_info)
+        except json.JSONDecodeError as e:
+            print(
+                f"::error::Invalid JSON in ostree.rechunk.info label for {img_name}: {e}"
+            )
+            print(f"::error::Label content (first 200 chars): {rechunk_info[:200]}")
+            raise
+
+        if "packages" not in data:
+            print(
+                f"Warning: No 'packages' key in rechunk info for {img_name}. Keys: {list(data.keys())}"
+            )
+            return {}
+
+        return data["packages"]
+    except json.JSONDecodeError:
+        raise
     except Exception as e:
-        print(f"Warning: Failed to parse SBOM {sbom_path}: {type(e).__name__}: {e}")
+        print(f"Failed to get packages for {img_name}: {type(e).__name__}: {e}")
         return {}
 
 
@@ -360,73 +374,43 @@ def get_packages(
 
     Returns (current_packages, prev_packages) where each is {image_name: {pkg: version}}.
 
-    Prefers SBOM data when available, falls back to manifest labels.
+    Prefers SBOM CycloneDX data when available, falls back to ostree.rechunk.info labels.
     """
     current_packages: dict[str, dict[str, str]] = {}
     prev_packages: dict[str, dict[str, str]] = {}
 
-    # Try to load from SBOM files first (image-agnostic, same packages for all variants)
+    sbom_available = False
+
     if sbom_path:
         sbom_pkgs = get_packages_from_sbom(sbom_path)
         if sbom_pkgs:
             print(f"Using SBOM for current packages: {sbom_path}")
-            # Apply same packages to all images
             for img in manifests.keys():
                 current_packages[img] = sbom_pkgs.copy()
+            sbom_available = True
+        else:
+            print(f"::warning::SBOM file not found or empty: {sbom_path}")
+            print(f"::warning::Falling back to manifest labels for current packages")
 
     if prev_sbom_path:
-        # We need manifests to know which images to apply prev packages to
-        # For now, use manifests to determine image list
-        pass
+        prev_sbom_pkgs = get_packages_from_sbom(prev_sbom_path)
+        if prev_sbom_pkgs:
+            print(f"Using SBOM for previous packages: {prev_sbom_path}")
+            for img in manifests.keys():
+                prev_packages[img] = prev_sbom_pkgs.copy()
+        else:
+            print(f"::warning::Previous SBOM file not found or empty: {prev_sbom_path}")
+            print(f"::warning::Falling back to manifest labels for previous packages")
 
-    # Fallback to manifest labels if SBOM not available
-    if not current_packages:
-        print("SBOM not available, falling back to manifest labels")
+    if not sbom_available:
+        print("Using manifest labels for current packages")
         for img, manifest in manifests.items():
-            try:
-                labels = manifest.get("Labels", {})
-                if not labels:
-                    print(f"Warning: No Labels in manifest for {img}")
-                    current_packages[img] = {}
-                    continue
+            current_packages[img] = _get_packages_from_manifest(manifest, img)
 
-                # Try newer ostree.rechunk.info label first, then fallback to dev.hhd.rechunk.info
-                rechunk_info = labels.get("ostree.rechunk.info") or labels.get(
-                    "dev.hhd.rechunk.info"
-                )
-                if not rechunk_info:
-                    available = list(labels.keys())
-                    print(
-                        f"Warning: No rechunk info label for {img}. Available labels: {available}"
-                    )
-                    current_packages[img] = {}
-                    continue
-
-                try:
-                    data = json.loads(rechunk_info)
-                except json.JSONDecodeError as e:
-                    print(
-                        f"::error::Invalid JSON in ostree.rechunk.info label for {img}: {e}"
-                    )
-                    print(
-                        f"::error::Label content (first 200 chars): {rechunk_info[:200]}"
-                    )
-                    raise
-
-                if "packages" not in data:
-                    print(
-                        f"Warning: No 'packages' key in rechunk info for {img}. Keys: {list(data.keys())}"
-                    )
-                    current_packages[img] = {}
-                    continue
-
-                current_packages[img] = data["packages"]
-            except json.JSONDecodeError:
-                # Re-raise JSON errors to fail the build
-                raise
-            except Exception as e:
-                print(f"Failed to get packages for {img}: {type(e).__name__}: {e}")
-                current_packages[img] = {}
+    if not prev_packages:
+        print("Using manifest labels for previous packages")
+        for img, manifest in manifests.items():
+            prev_packages[img] = _get_packages_from_manifest(manifest, img)
 
     return current_packages, prev_packages
 
