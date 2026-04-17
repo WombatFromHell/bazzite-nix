@@ -111,24 +111,24 @@ runs:
           echo "sbom_path=" >> "$GITHUB_OUTPUT"
         else
           echo "  Current digest: ${CURRENT_DIGEST}"
-
-        mkdir -p ./sbom
-        if oras pull "${IMAGE}@${CURRENT_DIGEST}" \
-          --artifact-type application/vnd.cyclonedx+json \
-          --output ./sbom; then
-            SBOM_FILE=$(ls ./sbom/*.json 2>/dev/null | head -1)
-            if [[ -n "$SBOM_FILE" ]]; then
-              echo "  SBOM file: ${SBOM_FILE}"
-              echo "sbom_path=${SBOM_FILE}" >> "$GITHUB_OUTPUT"
-            else
-              echo "::warning::No SBOM file found after oras pull"
-              echo "sbom_path=" >> "$GITHUB_OUTPUT"
-            fi
-        else
-          echo "::warning::Failed to pull SBOM from registry"
-          echo "sbom_path=" >> "$GITHUB_OUTPUT"
+          mkdir -p ./sbom
+          if oras pull "${IMAGE}@${CURRENT_DIGEST}" \
+            --artifact-type application/vnd.cyclonedx+json \
+            --output ./sbom; then
+              SBOM_FILE=$(ls ./sbom/*.json 2>/dev/null | head -1)
+              if [[ -n "$SBOM_FILE" ]]; then
+                echo "  SBOM file: ${SBOM_FILE}"
+                echo "sbom_path=${SBOM_FILE}" >> "$GITHUB_OUTPUT"
+              else
+                echo "::warning::No SBOM file found after oras pull"
+                echo "sbom_path=" >> "$GITHUB_OUTPUT"
+              fi
+          else
+            echo "::warning::Failed to pull SBOM from registry"
+            echo "sbom_path=" >> "$GITHUB_OUTPUT"
+          fi
+          echo "::endgroup::"
         fi
-        echo "::endgroup::"
 
     - name: Fetch previous SBOM from registry
       id: fetch-prev-sbom
