@@ -62,60 +62,42 @@ EOF
 }
 
 create_container() {
-  local assemble_file
-  assemble_file=$(mktemp)
+  local additional_flags=""
 
-  # Ensure cleanup on function exit
-  trap 'rm -f "${assemble_file:-}"' RETURN
-
-  # Remove existing container if present
-  if dbx_container_exists "$CONTAINER_NAME" "true"; then
-    dbx_log "Container '${CONTAINER_NAME}' already exists, removing..."
-    distrobox rm -f --root "${CONTAINER_NAME}" 2>/dev/null || true
-  fi
-  if podman container exists "${CONTAINER_NAME}" 2>/dev/null; then
-    dbx_log "Container '${CONTAINER_NAME}' found via podman, removing..."
-    podman rm -f "${CONTAINER_NAME}" 2>/dev/null || true
-  fi
-
-  # Prepare dynamic flags
-  local additional_flags=(
-    "--volume ${TPM_DEVICE}:${TPM_DEVICE}"
-    "--device /dev/dri"
-    "--device /dev/kvm"
-    "--security-opt label=disable"
-  )
+  additional_flags="--volume ${TPM_DEVICE}:${TPM_DEVICE}"
+  additional_flags="${additional_flags} --device /dev/dri"
+  additional_flags="${additional_flags} --device /dev/kvm"
+  additional_flags="${additional_flags} --security-opt label=disable"
 
   # Add vhost-net conditionally
   if [[ -e /dev/vhost-net ]]; then
-    additional_flags+=("--device /dev/vhost-net")
+    additional_flags="${additional_flags} --device /dev/vhost-net"
   fi
 
-  # Join flags into a single string for the INI file
-  local flags_str="${additional_flags[*]}"
-  local pkgs_str="${PACKAGES[*]}"
+  dbx_log "Creating container..."
+  distrobox create \
+    --root \
+    -Y \
+    --name "${CONTAINER_NAME}" \
+    --image "${CONTAINER_IMAGE}" \
+    --pull \
+    --init \
+    --additional-packages "${PACKAGES[*]}" \
+    --additional-flags "${additional_flags}"
 
-  dbx_log "Creating container configuration..."
-  cat >"${assemble_file}" <<EOF
-[${CONTAINER_NAME}]
-image=${CONTAINER_IMAGE}
-pull=true
-init=true
-root=true
-start_now=true
-unshare_all=true
-additional_packages="${pkgs_str}"
-additional_flags="${flags_str}"
-init_hooks=useradd -m -s /bin/bash ${USER} 2>/dev/null || true;
-init_hooks=usermod -aG libvirt,kvm,wheel ${USER} 2>/dev/null || true;
-init_hooks=echo 'seccomp_sandbox = 0' >> /etc/libvirt/qemu.conf;
-init_hooks=systemctl enable --now virtqemud.socket virtnetworkd.socket virtstoraged.socket virtnodedevd.socket || true;
-init_hooks=setenforce 0 || true;
-exported_apps="virt-manager"
-EOF
+  # Enter to trigger init system startup
+  dbx_log "Starting container..."
+  distrobox enter --root "${CONTAINER_NAME}" -- echo "Container started"
 
-  dbx_log "Assembling container..."
-  distrobox assemble create --file "${assemble_file}" --replace
+  # Run initialization hooks (already root in --root mode)
+  dbx_log "Running init hooks..."
+  distrobox enter --root "${CONTAINER_NAME}" -- bash -c '
+    sudo useradd -m -s /bin/bash '"${USER}"' 2>/dev/null || true;
+    sudo usermod -aG libvirt,kvm,wheel '"${USER}"' 2>/dev/null || true;
+    sudo grep -q "seccomp_sandbox = 0" /etc/libvirt/qemu.conf || echo "seccomp_sandbox = 0" | sudo tee -a /etc/libvirt/qemu.conf;
+    sudo systemctl enable --now virtqemud.socket virtnetworkd.socket virtstoraged.socket virtnodedevd.socket || true;
+    sudo setenforce 0 || true;
+  '
 }
 
 do_export() {
@@ -171,7 +153,7 @@ main() {
         fi
       fi
       dbx_log "Recreating container..."
-      dbx_remove_container "$CONTAINER_NAME"
+      dbx_remove_container "$CONTAINER_NAME" "true"
       dbx_cleanup_desktop_files "$CONTAINER_NAME"
       create_container
     elif dbx_container_exists "$CONTAINER_NAME" "true"; then
@@ -200,7 +182,7 @@ main() {
       fi
     fi
     dbx_log "Recreating container..."
-    dbx_remove_container "$CONTAINER_NAME"
+    dbx_remove_container "$CONTAINER_NAME" "true"
     dbx_cleanup_desktop_files "$CONTAINER_NAME"
     create_container
     do_export

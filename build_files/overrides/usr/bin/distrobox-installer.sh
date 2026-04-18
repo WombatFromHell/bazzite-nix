@@ -34,6 +34,35 @@ dbx_err() { printf "\e[1;31m!!\e[0m %s\n" "$@" >&2; }
 
 dbx_is_inside_container() { [[ -f /var/run/.containerenv ]]; }
 
+# Auto-detect if sudo is needed for podman operations
+# Checks: running as root, rootful container flag, and existing rootful containers
+dbx_needs_sudo() {
+  local use_root="${1:-false}"
+
+  [[ $EUID -eq 0 ]] && return 1
+
+  [[ "$use_root" == "true" ]] && return 0
+
+  if [[ -n "${DBX_SUDO:-}" ]]; then
+    [[ "$DBX_SUDO" == "true" ]] && return 0
+    return 1
+  fi
+
+  sudo podman ps -a --format "{{.Names}}" 2>/dev/null | head -1 >/dev/null && return 0
+
+  return 1
+}
+
+# Get the proper podman command (with sudo if needed)
+dbx_get_podman_cmd() {
+  local use_root="${1:-false}"
+  if dbx_needs_sudo "$use_root"; then
+    echo "sudo podman"
+  else
+    echo "podman"
+  fi
+}
+
 # Check if a container exists
 # Usage: dbx_container_exists <name> [rootful]
 dbx_container_exists() {
@@ -94,17 +123,39 @@ dbxe() {
 # CONTAINER MANAGEMENT
 #------------------------------------------------------------------------------
 
-# Remove a container (tries distrobox first, then podman as fallback)
-# Usage: dbx_remove_container <name>
+# Remove a container (podman first to handle corrupted state, then distrobox cleanup)
+# Usage: dbx_remove_container <name> [rootful]
 dbx_remove_container() {
   local name="$1"
+  local use_root="${2:-false}"
+  local root_flag=""
+  local podman_cmd
+
+  [[ "$use_root" == "true" ]] && root_flag="--root"
+  podman_cmd=$(dbx_get_podman_cmd "$use_root")
+
   dbx_log "Removing container '${name}'..."
-  distrobox rm -f "${name}" 2>/dev/null || true
-  # Fallback: also remove via podman directly (handles out-of-sync distrobox state)
-  if podman container exists "${name}" 2>/dev/null; then
+
+  # Use podman ps to check (more robust than 'podman container exists' for corrupted state)
+  if $podman_cmd ps -a --format "{{.Names}}" 2>/dev/null | grep -qw "${name}"; then
     dbx_log "Removing container '${name}' via podman..."
-    podman rm -f "${name}" 2>/dev/null || true
+    # Kill first in case it's running, then remove
+    $podman_cmd kill "${name}" 2>/dev/null || true
+    $podman_cmd rm -f "${name}" 2>/dev/null || true
   fi
+
+  # Try distrobox rm as well (may fail if image is missing from store)
+  distrobox rm -f ${root_flag} "${name}" 2>/dev/null || true
+
+  # Final cleanup via podman in case distrobox left artifacts
+  if $podman_cmd ps -a --format "{{.Names}}" 2>/dev/null | grep -qw "${name}"; then
+    dbx_log "Force removing via podman..."
+    $podman_cmd kill "${name}" 2>/dev/null || true
+    $podman_cmd rm -f "${name}" 2>/dev/null || true
+  fi
+
+  # Unstage any stopped containers that may be lingering
+  $podman_cmd container prune -f 2>/dev/null || true
 }
 
 # Create a new container
@@ -113,18 +164,15 @@ dbx_create_container() {
   local name="$1"
   local image="$2"
   local use_root="${3:-false}"
-  # Shift past the 3 fixed params (name, image, use_root)
-  shift 2 || true # consume name, image
-  shift || true   # consume use_root
 
-  dbx_remove_container "$name"
+  dbx_remove_container "$name" "$use_root"
   dbx_log "Creating container '${name}' with ${image}..."
 
   local root_flag=""
   [[ "$use_root" == "true" ]] && root_flag="--root"
 
   # Remaining args are extra flags for distrobox create
-  local extra_flags=("$@")
+  local extra_flags=("${@:3}")
 
   if [[ ${#extra_flags[@]} -gt 0 ]]; then
     distrobox create $root_flag -Y -i "${image}" --name "${name}" "${extra_flags[@]}"
