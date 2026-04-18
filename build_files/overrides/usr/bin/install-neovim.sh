@@ -31,13 +31,15 @@ usage() {
 Usage: $(basename "$0") [OPTIONS]
 
 Options:
-  --install <version>    Install Neovim version (e.g., stable, nightly)
-  --uninstall <version>  Remove a specific Neovim version
+  --install [version]    Install Neovim version (e.g., stable, nightly). Default: stable
+  --uninstall [version]  Remove a specific Neovim version. Default: stable
   --help                 Show this help message
 
 Examples:
+  $(basename "$0") --install
   $(basename "$0") --install stable
   $(basename "$0") --install nightly
+  $(basename "$0") --uninstall
   $(basename "$0") --uninstall stable
   $(basename "$0") --uninstall nightly
 EOF
@@ -60,7 +62,7 @@ get_meta_path() {
 get_stable_version() {
   # Follow redirect from /releases/latest to get the current stable version tag
   local redirect_url
-  redirect_url=$(curl --silent --location --write-out '%{url_effective}' --output /dev/null "$LATEST_RELEASE_URL")
+  redirect_url=$(curl --silent --location --connect-timeout 10 --max-time 10 --write-out '%{url_effective}' --output /dev/null "$LATEST_RELEASE_URL")
   # Extract version tag from URL (e.g., v0.12.0 from .../tag/v0.12.0)
   basename "$redirect_url"
 }
@@ -87,7 +89,7 @@ ensure_install_dir() {
 # Fetches only the response headers for $url and writes them to stdout.
 fetch_headers() {
   local url="$1"
-  curl --silent --fail --location --head "$url"
+  curl --silent --fail --location --connect-timeout 10 --max-time 10 --head "$url"
 }
 
 # Extracts a named header value (case-insensitive) from a block of headers on stdin.
@@ -150,7 +152,7 @@ download_version() {
     log_info "Downloading nightly build..."
     local response_headers_file
     response_headers_file=$(mktemp)
-    if curl --fail --location --remote-time \
+    if curl --fail --location --connect-timeout 10 --max-time 300 --remote-time \
       --dump-header "$response_headers_file" \
       "$url" -o "$file_path"; then
       chmod 0755 "$file_path"
@@ -178,7 +180,7 @@ download_version() {
     fi
 
     log_info "Downloading Neovim version: $version..."
-    if curl -fLR "$url" -o "$file_path"; then
+    if curl -fLR --connect-timeout 10 --max-time 300 "$url" -o "$file_path"; then
       chmod 0755 "$file_path"
       return 0 # Download performed
     else
@@ -258,15 +260,23 @@ main() {
     case "$1" in
     --install)
       action="install"
-      if [[ -z "${2:-}" ]]; then die "Missing argument for --install"; fi
-      version="$2"
-      shift 2
+      if [[ -n "${2:-}" && "${2}" != --* ]]; then
+        version="$2"
+        shift 2
+      else
+        version="stable"
+        shift
+      fi
       ;;
     --uninstall)
       action="uninstall"
-      if [[ -z "${2:-}" ]]; then die "Missing argument for --uninstall"; fi
-      version="$2"
-      shift 2
+      if [[ -n "${2:-}" && "${2}" != --* ]]; then
+        version="$2"
+        shift 2
+      else
+        version="stable"
+        shift
+      fi
       ;;
     --help)
       usage
