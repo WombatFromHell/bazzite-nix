@@ -21,7 +21,6 @@ clean_artifacts() {
   find . -maxdepth 1 -name "*_build*" -exec rm -rf {} \;
   rm -f previous.manifest.json changelog.md output.env
   rm -rf output/
-  touch _build
 }
 
 # Clean OCI layout directory if it exists
@@ -33,7 +32,29 @@ clean_oci_layout() {
   fi
 }
 
-# Clean podman images: localhost/raw-img, dangling layers, build inputs/outputs
+# Clean podman images (light): removes only locally generated images, keeps pulled base images
+clean_podman_images_light() {
+  # Remove build output images (localhost/bazzite-nix:*)
+  local tag
+  while read -r tag; do
+    [[ -z "$tag" ]] && continue
+    echo "  Removing build output: localhost/bazzite-nix:$tag"
+    sudo podman rmi --force "localhost/bazzite-nix:$tag" 2>/dev/null || true
+  done < <(sudo podman images "localhost/bazzite-nix" --no-trunc | tail -n +2 | awk '{print $2}')
+
+  # Remove localhost/raw-img
+  sudo podman rmi --force localhost/raw-img 2>/dev/null || true
+
+  # Remove dangling (<none>:<none>) intermediate build layers
+  local id
+  while read -r id; do
+    [[ -z "$id" ]] && continue
+    echo "  Removing dangling podman layer: $id"
+    sudo podman rmi --force "$id" 2>/dev/null || true
+  done < <(sudo podman images --filter "dangling=true" --no-trunc | tail -n +2 | awk '{print $3}')
+}
+
+# Clean podman images: removes all including pulled base images, dangling layers, build inputs/outputs
 clean_podman_images() {
   local bib_image="${1:?bib_image required}"
 
@@ -95,19 +116,24 @@ clean_buildah_images() {
   done
 }
 
-# Remove intermediate build containers (working-container, *-working-container)
+# Remove intermediate build containers (working-container, *-working-container, scratch)
 # Skip named containers like distroboxes (e.g. 'libvirtbox')
 clean_buildah_containers() {
   local cid cname
   sudo buildah ps --all | tail -n +2 | awk '{print $1}' | while read -r cid; do
     [[ -z "$cid" ]] && continue
-    cname=$(sudo buildah inspect "$cid" 2>/dev/null | jq -r '.Container // empty' || true)
-    if [[ "$cname" == *-working-container* ]] || [[ "$cname" == "working-container" ]]; then
+    cname=$(sudo buildah inspect "$cid" --format '{{.Container}}' 2>/dev/null || true)
+    case "$cname" in
+    working-container | *-working-container | scratch)
       echo "  Removing build container: $cname ($cid)"
       sudo buildah rm "$cid" 2>/dev/null || true
-    elif [[ -n "$cname" && "$cname" != "$cid" ]]; then
-      echo "  Skipping named container: $cname ($cid)"
-    fi
+      ;;
+    *)
+      if [[ -n "$cname" && "$cname" != "$cid" ]]; then
+        echo "  Skipping named container: $cname ($cid)"
+      fi
+      ;;
+    esac
   done
 }
 

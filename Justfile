@@ -36,9 +36,22 @@ fix:
     source "{{ just_helpers }}"
     fix_just_files
 
-# Clean repo build artifacts
+# Clean repo build artifacts (keeps pulled base images)
 [group('Utility')]
 clean:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source "{{ just_helpers }}"
+    clean_artifacts
+    echo "=== Cleaning rootful build artifacts ==="
+    clean_oci_layout "{{ oci_output_dir }}"
+    clean_podman_images_light
+    clean_buildah_images
+    clean_buildah_containers
+
+# Aggressive clean (removes everything including pulled base images)
+[group('Utility')]
+cleaner:
     #!/usr/bin/env bash
     set -euo pipefail
     source "{{ just_helpers }}"
@@ -65,6 +78,7 @@ lint:
     set -euo pipefail
     source "{{ just_helpers }}"
     lint_scripts
+    check_just_files
 
 # Run shfmt on all Bash scripts
 [group('Utility')]
@@ -73,6 +87,7 @@ format:
     set -euo pipefail
     source "{{ just_helpers }}"
     format_scripts
+    fix_just_files
 
 # ── Build commands (sources .github/actions/build-reusable/helpers.sh) ────────
 # Build a container image (stages to localhost/raw-img)
