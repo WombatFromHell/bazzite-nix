@@ -45,6 +45,10 @@ sed -i '/^OnlyShowIn=/d' "$XWVB_XDG_TGT" && echo "OnlyShowIn=KDE;GNOME;" | tee -
 # append our justfile fragment to our existing ujust file
 cat "$OVERRIDES_ROOT"/usr/share/ublue-os/justfile.fragment \
   >>/usr/share/ublue-os/justfile
+# include a helper for SBOM/attestation verification against a remote (GHCR)
+install -Z -m 0755 \
+  "$OVERRIDES_ROOT"/usr/bin/verify-attestation.sh \
+  /usr/bin/verify-attestation
 # include a few distrobox related helpers (and .just files for ease of use)
 install -Z -m 0755 \
   "$OVERRIDES_ROOT"/usr/bin/distrobox-installer.sh \
