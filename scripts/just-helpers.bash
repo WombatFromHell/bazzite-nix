@@ -350,22 +350,16 @@ resolve_variant() {
 
 # ── VM image building ───────────────────────────────────────────────────────
 
-# Build BIB VM image from podman storage
-build_bib() {
-  local target_image="${1:?target_image required}"
-  local tag="${2:?tag required}"
-  local type="${3:?type required}"
-  local config="${4:?config required}"
-  local output_dir="${5:-}"
-  local bib_image="${6:?bib_image required}"
+# Internal: Core BIB build logic (called by build_bib)
+# Usage: _build_bib source_image type config out_dir bib_image
+_build_bib() {
+  local source_image="${1:?source_image required}"
+  local type="${2:?type required}"
+  local config="${3:?config required}"
+  local out_dir="${4:?out_dir required}"
+  local bib_image="${5:?bib_image required}"
 
-  local out_dir disk_name disk_file args source_image BUILDTMP
-
-  out_dir="${output_dir}"
-  if [[ -z "$out_dir" ]]; then
-    out_dir="${CACHE_DIR:-$HOME/.cache/bazzite-nix}"
-  fi
-  mkdir -p "$out_dir"
+  local disk_name disk_file BUILDTMP
 
   case "$type" in
   qcow2) disk_name="disk.qcow2" ;;
@@ -373,6 +367,7 @@ build_bib() {
   *) disk_name="disk.$type" ;;
   esac
   disk_file="${out_dir}/${disk_name}"
+  BUILDTMP="${out_dir}/.bib-tmp"
 
   if [[ -f "$disk_file" ]]; then
     echo "Disk image already exists: $disk_file — skipping BIB build"
@@ -380,43 +375,42 @@ build_bib() {
     return 0
   fi
 
-  if ! sudo podman image exists "${target_image}:${tag}" 2>/dev/null; then
-    echo "Image ${target_image}:${tag} not found in rootful storage."
-    if podman image exists "${target_image}:${tag}" 2>/dev/null; then
-      echo "Found in rootless storage, copying to rootful..."
-      podman save "${target_image}:${tag}" | sudo podman load
-    else
-      echo "Image not found in rootless storage either. Pulling..."
-      sudo podman pull "${target_image}:${tag}"
+  if [[ -f "${BUILDTMP}/.bib-build-complete" && -d "$BUILDTMP" ]]; then
+    local tmp_disk="${BUILDTMP}/${disk_name}"
+    if [[ -f "$tmp_disk" ]]; then
+      echo "Found disk in .bib-tmp from previous run, moving to final location..."
+      sudo mv -f "$tmp_disk" "$disk_file"
+      sudo rmdir "$BUILDTMP" 2>/dev/null || true
+      sudo chown "$USER:$USER" "$disk_file"
+      echo "Disk image recovered: $disk_file"
+      return 0
     fi
   fi
 
-  args="--type $type --use-librepo=True --rootfs=btrfs"
-
-  if [[ "$target_image" == localhost/* ]]; then
-    source_image="${target_image}:${tag}"
-  else
-    source_image="localhost/${target_image}:${tag}"
-  fi
-
-  BUILDTMP="${out_dir}/.bib-tmp"
-  rm -rf "$BUILDTMP"
+  sudo rm -rf "$BUILDTMP"
   mkdir -p "$BUILDTMP"
 
   # shellcheck disable=SC2086
-  sudo podman run --rm -it --privileged \
-    --pull=newer \
-    --net=host \
-    --security-opt label=type:unconfined_t \
-    -v "$(pwd)/${config}:/config.toml:ro" \
-    -v "$BUILDTMP:/output" \
-    -v /var/lib/containers/storage:/var/lib/containers/storage \
-    "$bib_image" \
-    $args \
+  if
+    sudo podman run --rm -it --privileged \
+      --pull=newer \
+      --net=host \
+      --security-opt label=type:unconfined_t \
+      -v "$(pwd)/${config}:/config.toml:ro" \
+      -v "$BUILDTMP:/output" \
+      -v /var/lib/containers/storage:/var/lib/containers/storage \
+      "$bib_image" \
+      --type $type --use-librepo=True --rootfs=btrfs
     "$source_image"
+  then
+    sudo touch "${BUILDTMP}/.bib-build-complete"
+  else
+    echo "Error: something went wrong with our BIB build!"
+    return 1
+  fi
 
   local item
-  for item in "$BUILDTMP"/*; do
+  for item in "$BUILDTMP"/* "$BUILDTMP"/.*; do
     if [[ -d "$item" ]]; then
       sudo mv -f "$item"/* "$out_dir"/
       sudo rmdir "$item"
@@ -424,21 +418,29 @@ build_bib() {
       sudo mv -f "$item" "$out_dir"/
     fi
   done
-  sudo rmdir "$BUILDTMP"
+  sudo rm -rf "$BUILDTMP"
   sudo chown -R "$USER:$USER" "$out_dir"
 }
 
-# Build BIB VM image from an OCI layout ref (avoids full image copy)
-build_bib_oci() {
-  local source_image="${1:?source_image required}"
-  local tag="${2:?tag required}"
-  local type="${3:?type required}"
-  local config="${4:?config required}"
-  local output_dir="${5:-}"
-  local target_image="${6:-localhost/rechunked}"
+# Build BIB VM image (unified function for podman and OCI sources)
+# Usage: build_bib <source_type> <source> <tag> <type> <config> <output_dir> <bib_image>
+#   source_type: "podman" or "oci"
+#   source:      image name (podman) or OCI layout ref (oci)
+#   tag:         image tag
+#   type:        qcow2, raw, etc.
+#   config:      config.toml path
+#   output_dir:  output directory (defaults to CACHE_DIR)
+#   bib_image:   BIB container image
+build_bib() {
+  local source_type="${1:?source_type required (podman or oci)}"
+  local source="${2:?source required}"
+  local tag="${3:?tag required}"
+  local type="${4:?type required}"
+  local config="${5:?config required}"
+  local output_dir="${6:-}"
   local bib_image="${7:?bib_image required}"
 
-  local out_dir disk_name disk_file args source_image_ref BUILDTMP
+  local out_dir source_image
 
   out_dir="${output_dir}"
   if [[ -z "$out_dir" ]]; then
@@ -446,55 +448,53 @@ build_bib_oci() {
   fi
   mkdir -p "$out_dir"
 
+  local disk_name
   case "$type" in
   qcow2) disk_name="disk.qcow2" ;;
   raw) disk_name="disk.raw" ;;
   *) disk_name="disk.$type" ;;
   esac
-  disk_file="${out_dir}/${disk_name}"
-
-  if [[ -f "$disk_file" ]]; then
-    echo "Disk image already exists: $disk_file — skipping BIB build"
+  if [[ -f "${out_dir}/${disk_name}" ]]; then
+    echo "Disk image already exists: ${out_dir}/${disk_name} — skipping BIB build"
     echo "Use force_rebuild=1 to force regeneration"
     return 0
   fi
 
-  # Import OCI layout into containers-storage so BIB can resolve it
-  sudo skopeo copy "$source_image" containers-storage:"${target_image}:${tag}"
-
-  args="--type $type --use-librepo=True --rootfs=btrfs"
-  source_image_ref="${target_image}:${tag}"
-
-  BUILDTMP="${out_dir}/.bib-tmp"
-  rm -rf "$BUILDTMP"
-  mkdir -p "$BUILDTMP"
-
-  # shellcheck disable=SC2086
-  sudo podman run --rm -it --privileged \
-    --pull=newer \
-    --net=host \
-    --security-opt label=type:unconfined_t \
-    -v "$(pwd)/${config}:/config.toml:ro" \
-    -v "$BUILDTMP:/output" \
-    -v /var/lib/containers/storage:/var/lib/containers/storage \
-    "$bib_image" \
-    $args \
-    "$source_image_ref"
-
-  # Clean up the imported image (OCI layout stays on disk)
-  sudo podman rmi --force "$source_image_ref" 2>/dev/null || true
-
-  local item
-  for item in "$BUILDTMP"/*; do
-    if [[ -d "$item" ]]; then
-      sudo mv -f "$item"/* "$out_dir"/
-      sudo rmdir "$item"
-    else
-      sudo mv -f "$item" "$out_dir"/
+  case "$source_type" in
+  podman)
+    if ! sudo podman image exists "${source}:${tag}" 2>/dev/null; then
+      echo "Image ${source}:${tag} not found in rootful storage."
+      if podman image exists "${source}:${tag}" 2>/dev/null; then
+        echo "Found in rootless storage, copying to rootful..."
+        podman save "${source}:${tag}" | sudo podman load
+      else
+        echo "Image not found in rootless storage either. Pulling..."
+        sudo podman pull "${source}:${tag}"
+      fi
     fi
-  done
-  sudo rmdir "$BUILDTMP"
-  sudo chown -R "$USER:$USER" "$out_dir"
+
+    if [[ "$source" == localhost/* ]]; then
+      source_image="${source}:${tag}"
+    else
+      source_image="localhost/${source}:${tag}"
+    fi
+    ;;
+  oci)
+    local target_image="localhost/rechunked"
+    sudo skopeo copy "$source" containers-storage:"${target_image}:${tag}"
+    source_image="${target_image}:${tag}"
+    ;;
+  *)
+    echo "Unknown source_type: $source_type" >&2
+    return 1
+    ;;
+  esac
+
+  _build_bib "$source_image" "$type" "$config" "$out_dir" "$bib_image"
+
+  if [[ "$source_type" == "oci" ]]; then
+    sudo podman rmi --force "$source_image" 2>/dev/null || true
+  fi
 }
 
 # Build VM image (shared helper for build-qcow2 and build-raw)
@@ -537,7 +537,7 @@ build_vm_image() {
   # Check for a rechunked OCI layout first (avoids full image copy)
   if [[ "$force_rebuild" != "1" && -d "$oci_output_dir" && -f "$oci_output_dir/index.json" ]]; then
     echo "Using existing rechunked OCI layout: ${OCI_LAYOUT}"
-    build_bib_oci "$OCI_LAYOUT" "$TAG" "$type" "image.toml" "$output_dir" "$TARGET_IMAGE" "$bib_image"
+    build_bib "oci" "$OCI_LAYOUT" "$TAG" "$type" "image.toml" "$output_dir" "$bib_image"
     return 0
   fi
 
@@ -555,7 +555,7 @@ build_vm_image() {
   # Tag for BIB — bootc-image-builder reads from podman storage
   sudo podman tag localhost/raw-img "${TARGET_IMAGE}:${TAG}" 2>/dev/null || true
 
-  build_bib "$TARGET_IMAGE" "$TAG" "$type" "image.toml" "$output_dir" "$bib_image"
+  build_bib "podman" "$TARGET_IMAGE" "$TAG" "$type" "image.toml" "$output_dir" "$bib_image"
 }
 
 # ── VM execution ────────────────────────────────────────────────────────────
@@ -605,7 +605,7 @@ run_vm() {
       sudo podman image exists "$bib_image" 2>/dev/null || sudo podman pull "$bib_image"
       sudo podman image exists "docker.io/qemux/qemu:latest" 2>/dev/null || sudo podman pull "docker.io/qemux/qemu:latest"
       echo "Building disk image..."
-      build_bib_oci "$OCI_LAYOUT" "$tag" "$type" "$config" "$OUTPUT_DIR" "$target_image" "$bib_image"
+      build_bib "oci" "$OCI_LAYOUT" "$tag" "$type" "$config" "$OUTPUT_DIR" "$bib_image"
     elif [[ "$is_local" == "true" ]]; then
       if ! sudo podman image exists "${target_image}:${tag}" 2>/dev/null; then
         echo "Image ${target_image}:${tag} not found in rootful storage."
@@ -615,14 +615,14 @@ run_vm() {
       sudo podman image exists "$bib_image" 2>/dev/null || sudo podman pull "$bib_image"
       sudo podman image exists "docker.io/qemux/qemu:latest" 2>/dev/null || sudo podman pull "docker.io/qemux/qemu:latest"
       echo "Building disk image..."
-      build_bib "$target_image" "$tag" "$type" "$config" "$OUTPUT_DIR" "$bib_image"
+      build_bib "podman" "$target_image" "$tag" "$type" "$config" "$OUTPUT_DIR" "$bib_image"
     else
       echo "Pulling ${target_image}:${tag}..."
       sudo podman pull "${target_image}:${tag}"
       sudo podman image exists "$bib_image" 2>/dev/null || sudo podman pull "$bib_image"
       sudo podman image exists "docker.io/qemux/qemu:latest" 2>/dev/null || sudo podman pull "docker.io/qemux/qemu:latest"
       echo "Building disk image..."
-      build_bib "$target_image" "$tag" "$type" "$config" "$OUTPUT_DIR" "$bib_image"
+      build_bib "podman" "$target_image" "$tag" "$type" "$config" "$OUTPUT_DIR" "$bib_image"
     fi
   fi
 

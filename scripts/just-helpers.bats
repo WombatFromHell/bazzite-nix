@@ -165,25 +165,25 @@ EOF
     [[ "$output" == *'TAG="testing"'* ]]
 }
 
-# ── build_bib and build_bib_oci ─────────────────────────────────────────────
+# ── build_bib (unified podman/oci) ───────────────────────────────────────────────
 
-@test "build_bib skips when disk file exists" {
+@test "build_bib podman skips when disk file exists" {
     local test_dir
     test_dir="$(mktemp -d)"
     touch "$test_dir/disk.qcow2"
 
     local output
-    output=$(build_bib "localhost/test" "latest" "qcow2" "config.toml" "$test_dir" "quay.io/centos-bootc/bootc-image-builder:latest" 2>&1)
+    output=$(build_bib "podman" "localhost/test" "latest" "qcow2" "config.toml" "$test_dir" "quay.io/centos-bootc/bootc-image-builder:latest" 2>&1)
     [[ "$output" == *"Disk image already exists"* ]]
 }
 
-@test "build_bib_oci skips when disk file exists" {
+@test "build_bib oci skips when disk file exists" {
     local test_dir
     test_dir="$(mktemp -d)"
     touch "$test_dir/disk.raw"
 
     local output
-    output=$(build_bib_oci "oci:/test:latest" "latest" "raw" "config.toml" "$test_dir" "localhost/rechunked" "quay.io/centos-bootc/bootc-image-builder:latest" 2>&1)
+    output=$(build_bib "oci" "oci:/test:latest" "latest" "raw" "config.toml" "$test_dir" "quay.io/centos-bootc/bootc-image-builder:latest" 2>&1)
     [[ "$output" == *"Disk image already exists"* ]]
 }
 
