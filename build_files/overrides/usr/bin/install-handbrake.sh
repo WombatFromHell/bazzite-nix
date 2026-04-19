@@ -7,6 +7,15 @@ set -euo pipefail
 readonly CONTAINER_NAME="${CONTAINER_NAME:-encoderbox}"
 readonly CONTAINER_IMAGE="${CONTAINER_IMAGE:-archlinux:latest}"
 
+readonly POST_HOOKS=(
+  "rm -rf /tmp/yay-bin &&"
+  "git clone https://aur.archlinux.org/yay-bin.git /tmp/yay-bin &&"
+  "cd /tmp/yay-bin && makepkg -si --noconfirm &&"
+  "rm -rf /tmp/yay-bin"
+  "yay -Syu --noconfirm handbrake gst-plugins-good gst-libav xdg-desktop-portal-gtk"
+  "distrobox-export -a ghb"
+)
+
 # Source the shared helper
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/distrobox-installer.sh"
@@ -39,22 +48,12 @@ Description:
 EOF
 }
 
-setup_handbrake() {
-  dbx_log "Installing HandBrake inside container..."
-
-  # Step 1: Install git, base-devel, and yay-bin from AUR
-  dbxe -- bash -c '
-    sudo pacman -S --needed --noconfirm git base-devel && \
-    git clone https://aur.archlinux.org/yay-bin.git /tmp/yay-bin && \
-    cd /tmp/yay-bin && \
-    makepkg -si --noconfirm && \
-    cd .. && rm -rf /tmp/yay-bin
-  '
-
-  # Step 2: Install amf-amdgpu-pro and handbrake via yay
-  dbxe -- yay -Syu --noconfirm amf-amdgpu-pro handbrake gst-plugins-good gst-libav xdg-desktop-portal-gtk
-
-  dbx_log "HandBrake installation complete."
+create_container() {
+  dbx_assemble_container \
+    --name "${CONTAINER_NAME}" \
+    --image "${CONTAINER_IMAGE}" \
+    --packages "git base-devel" \
+    --post-hooks "${POST_HOOKS[@]}"
 }
 
 #==============================================================================
@@ -98,19 +97,12 @@ main() {
       dbx_log "Recreating container..."
       dbx_remove_container "$CONTAINER_NAME"
       dbx_cleanup_desktop_files "$CONTAINER_NAME"
-      dbx_create_container "$CONTAINER_NAME" "$CONTAINER_IMAGE"
-      setup_handbrake
+      create_container
     elif dbx_container_exists "$CONTAINER_NAME"; then
       dbx_log "Container '${CONTAINER_NAME}' exists."
-      # Check if HandBrake is actually installed
-      if ! dbxe -- which ghb &>/dev/null; then
-        dbx_log "HandBrake not found in container, installing..."
-        setup_handbrake
-      fi
     else
       dbx_log "Container not found. Creating..."
-      dbx_create_container "$CONTAINER_NAME" "$CONTAINER_IMAGE"
-      setup_handbrake
+      create_container
     fi
     if dbx_is_exported "$CONTAINER_NAME" "ghb"; then
       dbx_log "HandBrake already exported."
@@ -129,30 +121,23 @@ main() {
     dbx_log "Recreating container..."
     dbx_remove_container "$CONTAINER_NAME"
     dbx_cleanup_desktop_files "$CONTAINER_NAME"
-    dbx_create_container "$CONTAINER_NAME" "$CONTAINER_IMAGE"
-    setup_handbrake
+    create_container
     do_export
     dbx_log "Installation complete."
     ;;
   default)
     if dbx_container_exists "$CONTAINER_NAME"; then
       dbx_log "Container '${CONTAINER_NAME}' exists."
-      # Check if HandBrake is actually installed
-      if ! dbxe -- which ghb &>/dev/null; then
-        dbx_log "HandBrake not found in container, installing..."
-        setup_handbrake
-      fi
-      if ! dbx_is_exported "$CONTAINER_NAME" "ghb"; then
-        dbx_log "Export missing. Re-exporting..."
-        do_export
-      fi
     else
       dbx_log "Container not found. Creating..."
-      dbx_create_container "$CONTAINER_NAME" "$CONTAINER_IMAGE"
-      setup_handbrake
-      do_export
-      dbx_log "Installation complete."
+      create_container
     fi
+    if dbx_is_exported "$CONTAINER_NAME" "ghb"; then
+      dbx_log "HandBrake already exported."
+    else
+      do_export
+    fi
+    dbx_log "Installation complete."
     ;;
   esac
 }

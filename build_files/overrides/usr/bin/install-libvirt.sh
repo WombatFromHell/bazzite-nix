@@ -8,9 +8,7 @@ readonly CONTAINER_NAME="${CONTAINER_NAME:-libvirtbox}"
 readonly CONTAINER_IMAGE="${CONTAINER_IMAGE:-fedora:43}"
 readonly TPM_DEVICE="${TPM_DEVICE:-/dev/tpm0}"
 
-# Packages to install (Fedora naming). Systemd is required for init.
 readonly PACKAGES=(
-  "systemd"
   "qemu-system-x86-core"
   "qemu-img"
   "libvirt"
@@ -23,6 +21,21 @@ readonly PACKAGES=(
   "swtpm"
   "swtpm-tools"
   "qemu-device-display-virtio-gpu"
+)
+
+readonly ADDITIONAL_FLAGS=(
+  "--volume ${TPM_DEVICE}:${TPM_DEVICE}"
+  "--device /dev/dri"
+  "--device /dev/kvm"
+  "--security-opt label=disable"
+)
+
+readonly INIT_HOOKS=(
+  "useradd -m -s /bin/bash ${USER} 2>/dev/null || true"
+  "usermod -aG libvirt,kvm,wheel ${USER} 2>/dev/null || true"
+  "echo 'seccomp_sandbox = 0' >> /etc/libvirt/qemu.conf || true"
+  "setenforce 0 || true"
+  "systemctl enable --now virtqemud.socket virtnetworkd.socket virtstoraged.socket virtnodedevd.socket || true"
 )
 
 # Source the shared helper
@@ -62,47 +75,26 @@ EOF
 }
 
 create_container() {
-  local additional_flags=""
-
-  additional_flags="--volume ${TPM_DEVICE}:${TPM_DEVICE}"
-  additional_flags="${additional_flags} --device /dev/dri"
-  additional_flags="${additional_flags} --device /dev/kvm"
-  additional_flags="${additional_flags} --security-opt label=disable"
-
-  # Add vhost-net conditionally
+  local additional_flags=("${ADDITIONAL_FLAGS[@]}")
   if [[ -e /dev/vhost-net ]]; then
-    additional_flags="${additional_flags} --device /dev/vhost-net"
+    additional_flags+=("--device /dev/vhost-net")
   fi
 
-  dbx_log "Creating container..."
-  distrobox create \
-    --root \
-    -Y \
+  dbx_assemble_container \
     --name "${CONTAINER_NAME}" \
     --image "${CONTAINER_IMAGE}" \
-    --pull \
-    --init \
-    --additional-packages "${PACKAGES[*]}" \
-    --additional-flags "${additional_flags}"
-
-  # Enter to trigger init system startup
-  dbx_log "Starting container..."
-  distrobox enter --root "${CONTAINER_NAME}" -- echo "Container started"
-
-  # Run initialization hooks (already root in --root mode)
-  dbx_log "Running init hooks..."
-  distrobox enter --root "${CONTAINER_NAME}" -- bash -c '
-    sudo useradd -m -s /bin/bash '"${USER}"' 2>/dev/null || true;
-    sudo usermod -aG libvirt,kvm,wheel '"${USER}"' 2>/dev/null || true;
-    sudo grep -q "seccomp_sandbox = 0" /etc/libvirt/qemu.conf || echo "seccomp_sandbox = 0" | sudo tee -a /etc/libvirt/qemu.conf;
-    sudo systemctl enable --now virtqemud.socket virtnetworkd.socket virtstoraged.socket virtnodedevd.socket || true;
-    sudo setenforce 0 || true;
-  '
+    --root \
+    --init "systemd" \
+    --packages "${PACKAGES[*]}" \
+    --flags "${additional_flags[*]}" \
+    --unshare-all \
+    --hooks-array "${INIT_HOOKS[@]}" \
+    --exports "virt-manager"
 }
 
 do_export() {
   dbx_log "Exporting virt-manager..."
-  if distrobox-enter --root "${CONTAINER_NAME}" -- distrobox-export -a virt-manager 2>&1; then
+  if dbxe --root -- distrobox-export -a virt-manager 2>&1; then
     dbx_log "Export successful."
   else
     if dbx_is_exported "$CONTAINER_NAME" "virt-manager"; then
@@ -146,20 +138,20 @@ main() {
     ;;
   install)
     if [[ "$RECREATE" == "true" ]]; then
-      if dbx_container_exists "$CONTAINER_NAME" "true"; then
-        if ! dbx_confirm "This will recreate the '${CONTAINER_NAME}' container. All existing data and exports will be lost."; then
-          dbx_log "Recreation cancelled."
-          exit 0
-        fi
+      if ! dbx_confirm "This will recreate the '${CONTAINER_NAME}' container. All existing data and exports will be lost."; then
+        dbx_log "Recreation cancelled."
+        exit 0
       fi
       dbx_log "Recreating container..."
-      dbx_remove_container "$CONTAINER_NAME" "true"
-      dbx_cleanup_desktop_files "$CONTAINER_NAME"
+      if dbx_container_exists "$CONTAINER_NAME" "true"; then
+        dbx_remove_container "$CONTAINER_NAME" "true"
+        dbx_cleanup_desktop_files "$CONTAINER_NAME"
+      fi
       create_container
     elif dbx_container_exists "$CONTAINER_NAME" "true"; then
       dbx_log "Container '${CONTAINER_NAME}' exists."
       # Check if virt-manager is actually installed
-      if ! distrobox-enter --root "${CONTAINER_NAME}" -- which virt-manager &>/dev/null; then
+      if ! dbxe --root -- which virt-manager &>/dev/null; then
         dbx_log "virt-manager not found in container, reinstalling..."
         create_container
       fi
@@ -175,37 +167,18 @@ main() {
     dbx_log "Installation complete."
     ;;
   recreate)
-    if dbx_container_exists "$CONTAINER_NAME" "true"; then
-      if ! dbx_confirm "This will recreate the '${CONTAINER_NAME}' container. All existing data and exports will be lost."; then
-        dbx_log "Recreation cancelled."
-        exit 0
-      fi
+    if ! dbx_confirm "This will recreate the '${CONTAINER_NAME}' container. All existing data and exports will be lost."; then
+      dbx_log "Recreation cancelled."
+      exit 0
     fi
     dbx_log "Recreating container..."
-    dbx_remove_container "$CONTAINER_NAME" "true"
-    dbx_cleanup_desktop_files "$CONTAINER_NAME"
+    if dbx_container_exists "$CONTAINER_NAME" "true"; then
+      dbx_remove_container "$CONTAINER_NAME" "true"
+      dbx_cleanup_desktop_files "$CONTAINER_NAME"
+    fi
     create_container
     do_export
     dbx_log "Installation complete."
-    ;;
-  default)
-    if dbx_container_exists "$CONTAINER_NAME" "true"; then
-      dbx_log "Container '${CONTAINER_NAME}' exists."
-      # Check if virt-manager is actually installed
-      if ! distrobox-enter --root "${CONTAINER_NAME}" -- which virt-manager &>/dev/null; then
-        dbx_log "virt-manager not found in container, reinstalling..."
-        create_container
-      fi
-      if ! dbx_is_exported "$CONTAINER_NAME" "virt-manager"; then
-        dbx_log "Export missing. Re-exporting..."
-        do_export
-      fi
-    else
-      dbx_log "Container not found. Creating..."
-      create_container
-      do_export
-      dbx_log "Installation complete."
-    fi
     ;;
   esac
 }
