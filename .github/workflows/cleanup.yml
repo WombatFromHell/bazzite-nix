@@ -31,7 +31,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set lowercase GHCR refs
         id: ghcr
@@ -154,7 +154,7 @@ jobs:
           echo "::endgroup::"
 
       - name: Upload digest artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: digests-${{ matrix.package }}
           path: /tmp/digests.txt
@@ -194,7 +194,6 @@ jobs:
           package: ${{ matrix.package }}
           older-than: 60 days
           keep-n-tagged: 24
-          keep-n-untagged: 5
           delete-untagged: true
           delete-partial-images: true
           delete-orphaned-images: true
@@ -226,7 +225,7 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Download pre-cleanup digests
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: digests-${{ matrix.package }}
           path: /tmp/before
@@ -242,6 +241,7 @@ jobs:
 
           PKG_ENCODED=$(python3 -c "import urllib.parse; print(urllib.parse.quote('${PACKAGE}', safe=''))")
 
+          mkdir -p /tmp/after
           # SC2129 fix: Group command with redirect
           {
             curl -s -f \
