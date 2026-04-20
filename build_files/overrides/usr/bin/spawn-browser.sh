@@ -5,45 +5,154 @@ set -euo pipefail
 
 URL="${1:-}"
 
+readonly SEARCH_PATHS=(
+  "$HOME/.local/share/applications"
+  "$HOME/.local/share/flatpak/exports/share/applications"
+  /usr/local/share/applications
+  /usr/share/applications
+  /var/lib/flatpak/exports/share/applications
+)
+
+find_desktop_path() {
+  local desktop_file="$1"
+
+  for dir in "${SEARCH_PATHS[@]}"; do
+    [[ -f "$dir/$desktop_file" ]] && {
+      echo "$dir/$desktop_file"
+      return 0
+    }
+  done
+
+  echo ""
+  return 1
+}
+
+is_flatpak_desktop_file() {
+  [[ "$1" =~ ^[a-z][a-z0-9]*\.[a-z][a-z0-9-]*\.[a-z][a-z0-9]*\.desktop$ ]]
+}
+
+extract_exec_line() {
+  local desktop_path="$1"
+  grep -m1 '^Exec=' "$desktop_path" | sed 's/^Exec=//'
+}
+
+strip_field_codes() {
+  local exec_line="$1"
+  echo "$exec_line" | sed 's/%[a-zA-Z]//g; s/@@[^ ]*//g; s/^ *//; s/ *$//'
+}
+
+detect_launcher_type() {
+  local exec_line="$1"
+
+  if [[ "$exec_line" =~ ^(/usr/bin/)?flatpak[[:space:]]+run ]]; then
+    echo "flatpak"
+  elif [[ "$exec_line" =~ ^distrobox[[:space:]]+run[[:space:]]+([^[:space:]]+) ]]; then
+    echo "distrobox"
+  elif [[ "$exec_line" =~ ^[/\~] ]]; then
+    echo "native"
+  else
+    return 1
+  fi
+}
+
+substitute_url() {
+  local cmd="$1"
+  local url="$2"
+
+  if [[ -n "$url" ]]; then
+    echo "$cmd" | sed "s|%U|$url|g; s|%u|$url|g; s|%[a-zA-Z]||g; s|@@[^ ]*||g" | xargs
+  else
+    echo "$cmd" | sed 's|%[a-zA-Z]||g; s|@@[^ ]*||g' | xargs
+  fi
+}
+
+if [[ "${1:-}" == "--helper-find-path" ]]; then
+  DESKTOP_FILE="$(</dev/stdin)"
+  find_desktop_path "$DESKTOP_FILE"
+  exit 0
+fi
+
+if [[ "${1:-}" == "--helper-extract-exec" ]]; then
+  extract_exec_line "$2"
+  exit 0
+fi
+
+if [[ "${1:-}" == "--helper-strip-field-codes" ]]; then
+  strip_field_codes "$2"
+  exit 0
+fi
+
+if [[ "${1:-}" == "--helper-detect-launcher" ]]; then
+  detect_launcher_type "$(</dev/stdin)"
+  exit 0
+fi
+
+if [[ "${1:-}" == "--helper-substitute-url" ]]; then
+  substitute_url "$2" "$3"
+  exit 0
+fi
+
+build_spawn_cmd() {
+  local launcher_type="$1"
+  local target="$2"
+  local browser_name="$3"
+
+  local new_window_flag="--new-window"
+  case "$browser_name" in
+  firefox* | librewolf* | waterfox* | google-chrome* | chromium* | brave* | microsoft-edge* | vivaldi* | floorp* | epiphany* | gnome-web*)
+    ;;
+  *)
+    new_window_flag=""
+    ;;
+  esac
+
+  case "$launcher_type" in
+  flatpak)
+    if [[ -n "$new_window_flag" ]]; then
+      echo "flatpak run $target $new_window_flag"
+    else
+      echo "flatpak run $target"
+    fi
+    ;;
+  distrobox)
+    if [[ -n "$new_window_flag" ]]; then
+      echo "distrobox run $target -- $new_window_flag"
+    else
+      echo "distrobox run $target --"
+    fi
+    ;;
+  native)
+    if [[ -n "$new_window_flag" ]]; then
+      echo "$target $new_window_flag"
+    else
+      echo "$target"
+    fi
+    ;;
+  esac
+}
+
+if [[ "${1:-}" == "--helper-build-cmd" ]]; then
+  build_spawn_cmd "$2" "$3" "$4"
+  exit 0
+fi
+
+if [[ "${1:-}" == "--helper-find-desktop-file" ]]; then
+  mock_xdg="$(</dev/stdin)"
+  if [[ -z "$mock_xdg" ]]; then
+    echo "Error: could not determine default browser" >&2
+    exit 1
+  fi
+  echo "$mock_xdg"
+  exit 0
+fi
+
 # Get the .desktop file name for the default browser
 DESKTOP_FILE="$(xdg-settings get default-web-browser 2>/dev/null)" || {
   echo "Error: could not determine default browser" >&2
   exit 1
 }
 
-# Search for .desktop file - check flatpak paths first for common flatpak browser IDs
-# Flatpak app IDs follow reverse-DNS pattern (e.g., com.brave.Browser.desktop)
-if [[ "$DESKTOP_FILE" =~ ^[a-z][a-z0-9]*\.[a-z][a-z0-9.-]*\.[a-z][a-z0-9.-]*\.desktop$ ]]; then
-  # Likely a flatpak app - check flatpak paths first
-  DESKTOP_PATH="$(
-    for dir in \
-      "$HOME/.local/share/flatpak/exports/share/applications" \
-      /var/lib/flatpak/exports/share/applications \
-      "$HOME/.local/share/applications" \
-      /usr/local/share/applications \
-      /usr/share/applications; do
-      [[ -f "$dir/$DESKTOP_FILE" ]] && {
-        echo "$dir/$DESKTOP_FILE"
-        break
-      }
-    done
-  )"
-else
-  # Native app - check standard paths first
-  DESKTOP_PATH="$(
-    for dir in \
-      "$HOME/.local/share/applications" \
-      /usr/local/share/applications \
-      /usr/share/applications \
-      "$HOME/.local/share/flatpak/exports/share/applications" \
-      /var/lib/flatpak/exports/share/applications; do
-      [[ -f "$dir/$DESKTOP_FILE" ]] && {
-        echo "$dir/$DESKTOP_FILE"
-        break
-      }
-    done
-  )"
-fi
+DESKTOP_PATH="$(find_desktop_path "$DESKTOP_FILE")"
 
 [[ -z "$DESKTOP_PATH" ]] && {
   echo "Error: .desktop file not found for '$DESKTOP_FILE'" >&2
@@ -70,7 +179,6 @@ fi
 # Legacy path: extract browser binary and spawn via spawn_browser()
 EXEC_LINE="$(echo "$RAW_EXEC_LINE" | sed 's/%[a-zA-Z]//g; s/@@[^ ]*//g; s/^ *//; s/ *$//')"
 
-# Helper: extract browser name and spawn based on launcher type
 spawn_browser() {
   local launcher_type="$1"
   local target="$2"
@@ -78,55 +186,25 @@ spawn_browser() {
   shift 3
   local extra_args=("$@")
 
-  # Build the command array
   local cmd=()
 
-  # Add PREFIX if set (e.g., for env vars or wrappers)
   if [[ -n "${PREFIX:-}" ]]; then
-    # shellcheck disable=SC2086
     cmd+=("$PREFIX")
   fi
 
   case "$browser_name" in
-  firefox* | librewolf* | waterfox*)
-    if [[ "$launcher_type" == "flatpak" ]]; then
-      cmd+=(flatpak run "$target" --new-window)
-    elif [[ "$launcher_type" == "distrobox" ]]; then
-      cmd+=(distrobox run "$target" -- --new-window)
-    else
-      cmd+=("$target" --new-window)
-    fi
-    ;;
-  google-chrome* | chromium* | brave* | microsoft-edge* | vivaldi* | floorp*)
-    if [[ "$launcher_type" == "flatpak" ]]; then
-      cmd+=(flatpak run "$target" --new-window)
-    elif [[ "$launcher_type" == "distrobox" ]]; then
-      cmd+=(distrobox run "$target" -- --new-window)
-    else
-      cmd+=("$target" --new-window)
-    fi
-    ;;
-  epiphany* | gnome-web*)
-    if [[ "$launcher_type" == "flatpak" ]]; then
-      cmd+=(flatpak run "$target" --new-window)
-    elif [[ "$launcher_type" == "distrobox" ]]; then
-      cmd+=(distrobox run "$target" -- --new-window)
-    else
-      cmd+=("$target" --new-window)
-    fi
+  firefox* | librewolf* | waterfox* | google-chrome* | chromium* | brave* | microsoft-edge* | vivaldi* | floorp* | epiphany* | gnome-web*)
     ;;
   *)
-    # Best-effort fallback
     echo "Warning: unknown browser '$browser_name', trying without --new-window" >&2
-    if [[ "$launcher_type" == "flatpak" ]]; then
-      cmd+=(flatpak run "$target")
-    elif [[ "$launcher_type" == "distrobox" ]]; then
-      cmd+=(distrobox run "$target" --)
-    else
-      cmd+=("$target")
-    fi
     ;;
   esac
+
+  local spawn_cmd
+  spawn_cmd="$(build_spawn_cmd "$launcher_type" "$target" "$browser_name")"
+
+  read -ra cmd_parts <<<"$spawn_cmd"
+  cmd+=("${cmd_parts[@]}")
 
   exec "${cmd[@]}" "${extra_args[@]}"
 }
