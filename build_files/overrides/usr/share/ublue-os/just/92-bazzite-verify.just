@@ -97,4 +97,4 @@ verify-image:
 # Verify attestation of currently deployed ostree image
 [group("security")]
 verify-attestation *args="-d 0":
-    /usr/bin/verify-attestation {{ args }}
+    /usr/bin/verify-attestation.sh {{ args }}

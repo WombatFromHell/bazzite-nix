@@ -1,36 +1,29 @@
 #!/usr/bin/env bash
+# shellcheck disable=SC2034
 set -euo pipefail
 
 #==============================================================================
 # CONFIGURATION
 #==============================================================================
-readonly CONTAINER_NAME="${CONTAINER_NAME:-libvirtbox}"
-readonly CONTAINER_IMAGE="${CONTAINER_IMAGE:-fedora:43}"
+CONTAINER_NAME="${CONTAINER_NAME:-libvirtbox}"
+CONTAINER_IMAGE="${CONTAINER_IMAGE:-fedora:43}"
 readonly TPM_DEVICE="${TPM_DEVICE:-/dev/tpm0}"
+DBX_USE_ROOT="true"
+DBX_EXPORT_APP="virt-manager"
+DBX_INIT="systemd"
+DBX_UNSHARE_ALL="true"
 
-readonly PACKAGES=(
-  "qemu-system-x86-core"
-  "qemu-img"
-  "libvirt"
-  "libvirt-daemon"
-  "libvirt-daemon-config-network"
-  "virt-manager"
-  "virt-install"
-  "virt-viewer"
-  "edk2-ovmf"
-  "swtpm"
-  "swtpm-tools"
-  "qemu-device-display-virtio-gpu"
-)
+DBX_PACKAGES="qemu-system-x86-core qemu-img libvirt libvirt-daemon libvirt-daemon-config-network virt-manager virt-install virt-viewer edk2-ovmf swtpm swtpm-tools qemu-device-display-virtio-gpu"
 
-readonly ADDITIONAL_FLAGS=(
-  "--volume ${TPM_DEVICE}:${TPM_DEVICE}"
-  "--device /dev/dri"
-  "--device /dev/kvm"
-  "--security-opt label=disable"
-)
+DBX_FLAGS="--volume ${TPM_DEVICE}:${TPM_DEVICE} --device /dev/dri --device /dev/kvm --security-opt label=disable"
 
-readonly INIT_HOOKS=(
+_dbx_libvirt_add_vhost_net() {
+  [[ -e /dev/vhost-net ]] && echo "--device /dev/vhost-net"
+}
+
+DBX_CHECK_APP="virt-manager"
+
+DBX_INIT_HOOKS=(
   "useradd -m -s /bin/bash ${USER} 2>/dev/null || true"
   "usermod -aG libvirt,kvm,wheel ${USER} 2>/dev/null || true"
   "echo 'seccomp_sandbox = 0' >> /etc/libvirt/qemu.conf || true"
@@ -38,12 +31,18 @@ readonly INIT_HOOKS=(
   "systemctl enable --now virtqemud.socket virtnetworkd.socket virtstoraged.socket virtnodedevd.socket || true"
 )
 
-# Source the shared helper
+DBX_POST_HOOKS=(
+  "distrobox-export -a virt-manager"
+)
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/distrobox-installer.sh"
 
+# Also add vhost-net if available
+DBX_FLAGS="${DBX_FLAGS} $(_dbx_libvirt_add_vhost_net)"
+
 #==============================================================================
-# ACTIONS
+# HELP
 #==============================================================================
 
 show_help() {
@@ -52,6 +51,7 @@ Usage: ${0##*/} [OPTIONS]
 
 Options:
   --recreate     Force recreation of the container
+  --freshen     Re-run post-hooks, refresh exports
   --install      Install and export virt-manager to host (idempotent)
   --uninstall    Remove virt-manager export from host (does not uninstall from container)
   --rm           Also remove container (use with --uninstall)
@@ -63,6 +63,7 @@ Examples:
   ${0##*/} --uninstall       # Remove export from host
   ${0##*/} --rm --uninstall  # Remove export and delete container
   ${0##*/} --recreate        # Recreate container and reinstall
+  ${0##*/} --freshen        # Re-run post-hooks
 
 Description:
   Installs QEMU with TPM passthrough support, libvirt, and virt-manager
@@ -74,113 +75,12 @@ Requirements:
 EOF
 }
 
-create_container() {
-  local additional_flags=("${ADDITIONAL_FLAGS[@]}")
-  if [[ -e /dev/vhost-net ]]; then
-    additional_flags+=("--device /dev/vhost-net")
-  fi
-
-  dbx_assemble_container \
-    --name "${CONTAINER_NAME}" \
-    --image "${CONTAINER_IMAGE}" \
-    --root \
-    --init "systemd" \
-    --packages "${PACKAGES[*]}" \
-    --flags "${additional_flags[*]}" \
-    --unshare-all \
-    --hooks-array "${INIT_HOOKS[@]}" \
-    --exports "virt-manager"
-}
-
-do_export() {
-  dbx_log "Exporting virt-manager..."
-  if dbxe --root -- distrobox-export -a virt-manager 2>&1; then
-    dbx_log "Export successful."
-  else
-    if dbx_is_exported "$CONTAINER_NAME" "virt-manager"; then
-      dbx_log "Export successful (verified)."
-    else
-      dbx_err "Export failed."
-      return 1
-    fi
-  fi
-}
-
 #==============================================================================
 # MAIN
 #==============================================================================
 
 main() {
-  if dbx_is_inside_container; then
-    exit 0
-  fi
-
-  # Parse arguments via helper (sets ACTION, INSTALL_TYPE, RM_CONTAINER, RECREATE)
-  local parse_result=0
-  dbx_parse_args "$@" || parse_result=$?
-
-  if [[ $parse_result -eq 0 ]]; then
-    show_help
-    exit 0
-  elif [[ $parse_result -eq 1 ]]; then
-    show_help
-    exit 1
-  fi
-
-  case "$ACTION" in
-  uninstall)
-    if [[ "$RM_CONTAINER" == "true" ]]; then
-      dbx_do_remove "$CONTAINER_NAME" "virt-manager" "true"
-    else
-      dbx_do_uninstall "$CONTAINER_NAME" "virt-manager" "true"
-    fi
-    exit 0
-    ;;
-  install)
-    if [[ "$RECREATE" == "true" ]]; then
-      if ! dbx_confirm "This will recreate the '${CONTAINER_NAME}' container. All existing data and exports will be lost."; then
-        dbx_log "Recreation cancelled."
-        exit 0
-      fi
-      dbx_log "Recreating container..."
-      if dbx_container_exists "$CONTAINER_NAME" "true"; then
-        dbx_remove_container "$CONTAINER_NAME" "true"
-        dbx_cleanup_desktop_files "$CONTAINER_NAME"
-      fi
-      create_container
-    elif dbx_container_exists "$CONTAINER_NAME" "true"; then
-      dbx_log "Container '${CONTAINER_NAME}' exists."
-      # Check if virt-manager is actually installed
-      if ! dbxe --root -- which virt-manager &>/dev/null; then
-        dbx_log "virt-manager not found in container, reinstalling..."
-        create_container
-      fi
-    else
-      dbx_log "Container not found. Creating..."
-      create_container
-    fi
-    if dbx_is_exported "$CONTAINER_NAME" "virt-manager"; then
-      dbx_log "virt-manager already exported."
-    else
-      do_export
-    fi
-    dbx_log "Installation complete."
-    ;;
-  recreate)
-    if ! dbx_confirm "This will recreate the '${CONTAINER_NAME}' container. All existing data and exports will be lost."; then
-      dbx_log "Recreation cancelled."
-      exit 0
-    fi
-    dbx_log "Recreating container..."
-    if dbx_container_exists "$CONTAINER_NAME" "true"; then
-      dbx_remove_container "$CONTAINER_NAME" "true"
-      dbx_cleanup_desktop_files "$CONTAINER_NAME"
-    fi
-    create_container
-    do_export
-    dbx_log "Installation complete."
-    ;;
-  esac
+  dbx_main "$(show_help)" "$@"
 }
 
 main "$@"
