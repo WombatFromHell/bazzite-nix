@@ -19,6 +19,7 @@
           actionlint
           bashInteractive
           crane
+          go
           grype
           oras
           python3
@@ -27,7 +28,6 @@
           shellcheck
           shfmt
           syft
-          go
         ];
 
         shellHook = ''
