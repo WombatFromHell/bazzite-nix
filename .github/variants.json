@@ -53,8 +53,7 @@
       "tags": {
         "versioned": ["{branch}", "{branch}-{canonical}"]
       },
-      "cleanup": true,
-      "disabled": true
+      "cleanup": true
     },
     {
       "name": "nvidia-open",
