@@ -67,3 +67,7 @@ install -Z -m 0644 \
 install -Z -m 0755 \
   "$OVERRIDES_ROOT"/usr/bin/urh.pyz \
   /usr/bin/urh
+# include our 'gamemode.pyz' helper
+install -Z -m 0755 \
+  "$OVERRIDES_ROOT"/usr/bin/gamemode.pyz \
+  /usr/bin/gamemode
