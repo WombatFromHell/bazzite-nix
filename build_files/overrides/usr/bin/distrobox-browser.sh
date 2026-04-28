@@ -389,7 +389,13 @@ dbx_browser_create_xdg_bridge() {
 
   dbx_log "Creating XDG open bridge for container→host integration"
   dbxe -- sudo install -m 755 /dev/stdin "$target" <<'EOF'
-#!/usr/bin/python3
+#!/usr/bin/env bash
+# Smart xdg-open wrapper for distrobox
+# Inside container: forwards to host via D-Bus portals
+# Outside container: delegates to real xdg-open
+
+if [[ -f /run/.containerenv ]] || [[ -f /var/run/.containerenv ]] || [[ -n "${CONTAINER_ID:-}" ]]; then
+    exec python3 -c '
 import sys, dbus, os
 os.environ["DBUS_SESSION_BUS_ADDRESS"] = f"unix:path=/run/user/{os.getuid()}/bus"
 try:
@@ -397,8 +403,11 @@ try:
     obj = bus.get_object("org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop")
     dbus.Interface(obj, "org.freedesktop.portal.OpenURI").OpenURI("", sys.argv[1], {})
 except Exception: pass
+' "$@"
+else
+    exec /usr/bin/xdg-open "$@"
+fi
 EOF
-  dbxe -- sudo ln -sf "$target" /usr/local/bin/distrobox-host-exec 2>/dev/null || true
   dbx_log "Created XDG open bridge"
 }
 

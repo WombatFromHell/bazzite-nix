@@ -172,14 +172,15 @@ dbxe() {
     return 1
   fi
 
-  local root_flag=""
-  [[ "$use_root" == "true" ]] && root_flag="--root "
-  distrobox-enter "${root_flag:-}""${container_name}" -- "${cmd[@]}"
+  local root_flag=()
+  [[ "$use_root" == "true" ]] && root_flag=("--root")
+  distrobox-enter "${root_flag[@]}" "${container_name}" -- "${cmd[@]}"
 }
 
 dbx_get_container_prefix() {
   local container_name="${1:-${CONTAINER_NAME:-}}"
   if dbx_is_inside_container; then
+    # shellcheck disable=SC1091
     source /var/run/.containerenv 2>/dev/null || true
     echo "${CONTAINER_ID:-}"
   else
@@ -194,28 +195,22 @@ dbx_get_container_prefix() {
 dbx_remove_container() {
   local name="${1:-${CONTAINER_NAME:-}}"
   local use_root="${2:-${DBX_USE_ROOT:-false}}"
-  local root_flag=""
+  local -a root_flag=()
   local podman_cmd
 
-  [[ "$use_root" == "true" ]] && root_flag="--root "
+  [[ "$use_root" == "true" ]] && root_flag=("--root")
   podman_cmd=$(dbx_get_podman_cmd "$use_root")
 
+  # No-op if already gone
+  if ! $podman_cmd ps -a --format "{{.Names}}" 2>/dev/null | grep -qw "${name}" &&
+    ! distrobox list "${root_flag[@]}" 2>/dev/null | grep -qw "${name}"; then
+    return 0
+  fi
+
   dbx_log "Removing container '${name}'..."
-
-  if $podman_cmd ps -a --format "{{.Names}}" 2>/dev/null | grep -qw "${name}"; then
-    dbx_log "Removing container '${name}' via podman..."
-    $podman_cmd kill "${name}" 2>/dev/null || true
-    $podman_cmd rm -f "${name}" 2>/dev/null || true
-  fi
-
-  distrobox rm -f "${root_flag}" "${name}" 2>/dev/null || true
-
-  if $podman_cmd ps -a --format "{{.Names}}" 2>/dev/null | grep -qw "${name}"; then
-    dbx_log "Force removing via podman..."
-    $podman_cmd kill "${name}" 2>/dev/null || true
-    $podman_cmd rm -f "${name}" 2>/dev/null || true
-  fi
-
+  $podman_cmd kill "${name}" 2>/dev/null || true
+  $podman_cmd rm -f "${name}" 2>/dev/null || true
+  distrobox rm -f "${root_flag[@]}" "${name}" 2>/dev/null || true
   $podman_cmd container prune -f 2>/dev/null || true
 }
 
@@ -304,8 +299,8 @@ dbx_assemble_container() {
   dbx_remove_container "$name" "$use_root"
   dbx_log "Creating container '${name}' with ${image}..."
 
-  local root_flag=""
-  [[ "$use_root" == "true" ]] && root_flag="root=true"
+  local ini_root_flag=""
+  [[ "$use_root" == "true" ]] && ini_root_flag="root=true"
   [[ "$DBX_UNSHARE_ALL" == "true" ]] && unshare_flags+=("all=true")
 
   local flags_str="${additional_flags[*]:-${DBX_FLAGS:-}}"
@@ -322,7 +317,7 @@ dbx_assemble_container() {
     printf '%s=%s\n' "pull" "true"
     [[ -n "$init_pkg" ]] && printf '%s=%s\n' "init" "true"
     printf '%s=%s\n' "start_now" "true"
-    [[ -n "$root_flag" ]] && printf '%s\n' "$root_flag"
+    [[ -n "$ini_root_flag" ]] && printf '%s\n' "$ini_root_flag"
     for unshare in "${unshare_flags[@]}"; do
       [[ -n "$unshare" ]] || continue
       printf '%s=%s\n' "unshare_${unshare%=*}" "${unshare#*=}"
@@ -354,7 +349,6 @@ dbx_assemble_container() {
   fi
 
   if [[ ${#post_hooks[@]} -gt 0 ]]; then
-    [[ "$use_root" == "true" ]] && root_flag="--root "
     dbx_log "Running post-hooks..."
 
     local hook_script
@@ -452,16 +446,24 @@ dbx_do_remove() {
 
 dbx_cleanup_desktop_files() {
   local container_name="${1:-${CONTAINER_NAME:-}}"
-  dbx_log "Cleaning up old desktop files..."
   local apps_dir="$HOME/.local/share/applications"
+  local found=false
 
-  for f in "${apps_dir}/${container_name}"-*.desktop; do
+  for f in "${apps_dir}/${container_name}"-*.desktop \
+    "${apps_dir}/${container_name}"-*.desktop.bak; do
     [[ -f "$f" ]] || continue
     [[ "$(basename "$f")" == "${container_name}.desktop" ]] && continue
-    rm -f "$f"
+    found=true
+    break
   done
-  for f in "${apps_dir}/${container_name}"-*.desktop.bak; do
+
+  [[ "$found" == "false" ]] && return 0
+
+  dbx_log "Cleaning up old desktop files..."
+  for f in "${apps_dir}/${container_name}"-*.desktop \
+    "${apps_dir}/${container_name}"-*.desktop.bak; do
     [[ -f "$f" ]] || continue
+    [[ "$(basename "$f")" == "${container_name}.desktop" ]] && continue
     rm -f "$f"
   done
   update-desktop-database "${apps_dir}" 2>/dev/null || true
@@ -695,8 +697,7 @@ dbx_main() {
   local parse_result=0
   dbx_parse_args "${cli_args[@]}" || parse_result=$?
 
-  if [[ $parse_result -eq 0 || $parse_result -eq 1 ]]; then
-    # shellcheck disable=SC2317
+  if [[ $parse_result -ne 2 ]]; then
     dbx_show_help "$0" "$help_text"
   fi
 
@@ -730,14 +731,12 @@ dbx_main() {
           exit 0
         fi
       fi
-      dbx_log "Recreating container..."
       dbx_remove_container "$container_name" "$use_root"
       dbx_cleanup_desktop_files "$container_name"
-      dbx_ensure_container "true"
+      dbx_ensure_container
     elif ! dbx_container_exists "$container_name" "$use_root"; then
       dbx_ensure_container
     fi
-
     dbx_ensure_exported "$export_app"
     dbx_log "Installation complete."
     ;;
