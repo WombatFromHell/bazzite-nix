@@ -213,8 +213,8 @@ def get_tags(target: str, manifests: dict[str, Any]):
             if other_start_pattern(target).match(tag):
                 tags.add(tag)
         else:
-            # For stable, match tags ending with the version pattern
-            if STABLE_START_PATTERN.search(tag):
+            # For stable, match tags starting with the version pattern
+            if STABLE_START_PATTERN.match(tag):
                 tags.add(tag)
 
     # Remove tags not present in all images
