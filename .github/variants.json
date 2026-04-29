@@ -35,8 +35,7 @@
     {
       "name": "stable",
       "base_image": "ghcr.io/ublue-os/bazzite:stable",
-      "cleanup": true,
-      "disabled": true
+      "cleanup": true
     },
     {
       "name": "testing",
@@ -53,7 +52,8 @@
       "tags": {
         "versioned": ["{branch}", "{branch}-{canonical}"]
       },
-      "cleanup": true
+      "cleanup": true,
+      "disabled": true
     },
     {
       "name": "nvidia-open",
