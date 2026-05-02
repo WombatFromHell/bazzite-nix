@@ -272,12 +272,10 @@ remove_version() {
   local symlink_path="$2"
   local version="$3"
   local force_delete="${4:-false}"
-  local check_stable="${5:-false}"
   local file_path
   local resolved_version="$version"
 
   if [[ "$version" == "stable" ]]; then
-    check_stable=true
     resolved_version=$(get_installed_version "$install_dir") || resolved_version=""
   fi
 
