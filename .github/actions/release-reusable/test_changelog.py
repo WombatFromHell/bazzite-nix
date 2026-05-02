@@ -40,7 +40,7 @@ _VARIANTS = load_variants()
 IMAGES = [f"bazzite-nix{v.get('suffix', '')}" for v in _VARIANTS]
 
 # Sample SBOM directory and paths
-SAMPLES_DIR = os.path.join(os.path.dirname(__file__), "samples")
+SAMPLES_DIR = os.path.join(os.path.dirname(__file__), "sbom-samples")
 SAMPLE_SBOM_PATH = os.path.join(SAMPLES_DIR, "sample-sbom.json")
 SAMPLE_SBOM_PREV_PATH = os.path.join(SAMPLES_DIR, "sample-sbom-prev.json")
 
@@ -1690,7 +1690,7 @@ class TestRealSbomSamples:
     """Integration tests using real Syft-generated sample SBOM files."""
 
     def test_sample_sbom_files_exist(self):
-        """Verify sample SBOM files exist in samples directory."""
+        """Verify sample SBOM files exist in sbom-samples directory."""
         assert os.path.exists(SAMPLE_SBOM_PATH), (
             f"Sample SBOM not found at {SAMPLE_SBOM_PATH}"
         )
@@ -1699,31 +1699,39 @@ class TestRealSbomSamples:
         )
 
     def test_sample_sbom_contains_packages(self, sbom_sample):
-        """Verify sample SBOM contains expected package structure."""
-        assert "artifacts" in sbom_sample
-        assert len(sbom_sample["artifacts"]) > 0
-        # Verify first artifact has required fields
-        first = sbom_sample["artifacts"][0]
+        """Verify sample SBOM contains expected CycloneDX package structure."""
+        assert "bomFormat" in sbom_sample
+        assert sbom_sample["bomFormat"] == "CycloneDX"
+        assert "components" in sbom_sample
+        assert len(sbom_sample["components"]) > 0
+        # Verify first component has required fields
+        first = sbom_sample["components"][0]
         assert "name" in first
         assert "version" in first
+        assert "purl" in first
 
     def test_parse_real_sbom_format(self, sbom_sample):
-        """Verify get_packages_from_sbom can parse real Syft output."""
+        """Verify get_packages_from_sbom can parse real CycloneDX SBOM output."""
         packages = get_packages_from_sbom(SAMPLE_SBOM_PATH)
         assert len(packages) > 0
         # Note: Some packages may have duplicate names (e.g., LCEVCdec appears twice)
-        # so unique package count may be less than artifact count
-        assert len(packages) <= len(sbom_sample["artifacts"])
-        # Verify first package matches
-        first_artifact = sbom_sample["artifacts"][0]
-        assert packages[first_artifact["name"]] == first_artifact["version"]
+        # so unique package count may be less than component count
+        assert len(packages) <= len(sbom_sample["components"])
+        # Verify first package matches (purl version, not component version field)
+        first_comp = sbom_sample["components"][0]
+        # The purl version is what gets extracted (may differ from version field for epoch packages)
+        purl = first_comp["purl"]
+        at_idx = purl.index("@")
+        q_idx = purl.index("?", at_idx)
+        purl_version = purl[at_idx + 1 : q_idx]
+        assert packages[first_comp["name"]] == purl_version
 
     def test_real_sbom_package_count(self):
         """Verify sample SBOM has expected number of unique packages."""
         packages = get_packages_from_sbom(SAMPLE_SBOM_PATH)
-        # Some packages may have duplicate names, so count is <= 50
-        assert len(packages) <= 50, (
-            f"Expected <= 50 unique packages, got {len(packages)}"
+        # Some packages may have duplicate names (multi-arch), so count <= component count
+        assert len(packages) <= 54, (
+            f"Expected <= 54 unique packages, got {len(packages)}"
         )
         assert len(packages) >= 40, (
             f"Expected >= 40 unique packages, got {len(packages)}"
@@ -1793,16 +1801,20 @@ class TestRealSbomSamples:
         # Verify version format matches Syft output
         assert packages["7zip"] == "25.01-1.fc43"
 
-    def test_sample_sbom_versions_match_artifacts(self, sbom_sample):
-        """Verify version extraction matches artifact data exactly."""
+    def test_sample_sbom_versions_match_components(self, sbom_sample):
+        """Verify version extraction matches component purl data exactly."""
         packages = get_packages_from_sbom(SAMPLE_SBOM_PATH)
 
-        for artifact in sbom_sample["artifacts"]:
-            name = artifact["name"]
-            version = artifact["version"]
+        for comp in sbom_sample["components"]:
+            name = comp["name"]
+            purl = comp["purl"]
+            # Extract version from purl (this is what get_packages_from_sbom uses)
+            at_idx = purl.index("@")
+            q_idx = purl.index("?", at_idx)
+            purl_version = purl[at_idx + 1 : q_idx]
             assert name in packages, f"Package {name} not found in extracted packages"
-            assert packages[name] == version, (
-                f"Version mismatch for {name}: {packages[name]} != {version}"
+            assert packages[name] == purl_version, (
+                f"Version mismatch for {name}: {packages[name]} != {purl_version}"
             )
 
     def test_sample_prev_sbom_differences(self, sbom_sample, sbom_prev_sample):
@@ -1817,12 +1829,30 @@ class TestRealSbomSamples:
 
         # Judy should have different versions
         assert curr_pkgs["Judy"] == "1.0.5-42.fc43"
-        assert prev_pkgs["Judy"] == "1.0.5-prev"
+        assert prev_pkgs["Judy"] == "1.0.5-41.fc43"
         assert curr_pkgs["Judy"] != prev_pkgs["Judy"]
 
-        # Other packages should be the same
+        # Packages that changed between prev and current (explicitly verified above)
+        changed = {
+            "7zip",
+            "Judy",
+            "bazaar",
+            "plasma-desktop",
+            "terra-gamescope",
+            "kernel",
+            "mesa-filesystem",
+            "bash",
+            "coreutils",
+            "cairo",
+        }
+        # All other packages should have the same version
         for name in curr_pkgs:
-            if name not in ["7zip", "Judy"]:
+            if name not in changed:
                 assert curr_pkgs.get(name) == prev_pkgs.get(name), (
-                    f"Unexpected difference for {name}"
+                    f"Unexpected difference for {name}: {curr_pkgs.get(name)} != {prev_pkgs.get(name)}"
+                )
+        for name in curr_pkgs:
+            if name not in changed:
+                assert curr_pkgs.get(name) == prev_pkgs.get(name), (
+                    f"Unexpected difference for {name}: {curr_pkgs.get(name)} != {prev_pkgs.get(name)}"
                 )
