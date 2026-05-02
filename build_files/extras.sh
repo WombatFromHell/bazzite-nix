@@ -71,3 +71,7 @@ install -Z -m 0755 \
 install -Z -m 0755 \
   "$OVERRIDES_ROOT"/usr/bin/gamemode.pyz \
   /usr/bin/gamemode
+# include our 'protonfetcher.pyz' helper
+install -Z -m 0755 \
+  "$OVERRIDES_ROOT"/usr/bin/protonfetcher.pyz \
+  /usr/bin/protonfetcher
