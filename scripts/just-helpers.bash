@@ -18,7 +18,10 @@ readonly JUST_HELPERS_BUILD="${JUST_HELPERS_BUILD:-.github/actions/build-reusabl
 # Clean root filesystem build artifacts
 clean_artifacts() {
   # shellcheck disable=SC2035
-  find . -maxdepth 1 -name "*_build*" -exec rm -rf {} \;
+  find "$PWD" -maxdepth 1 -name "*_build*" -exec rm -rf {} \;
+  find "$PWD" \( -name ".pytest_cache" -type d -o \
+    -name ".ruff_cache" -type d -o \
+    -name "__pycache__" -type d \) -exec rm -rf {} \;
   rm -f previous.manifest.json changelog.md output.env
   rm -rf output/
 }
