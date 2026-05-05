@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 
-# bring in some useful qt5/qt6 tools
+# bring in some useful tools
 dnf5 -y install --enable-repo=terra \
+  rocm-smi \
   qt5-qttools qt6-qttools tmux gvfs-smb gvfs-fuse
 
 # include niri + DMS and friends from a verified repo
