@@ -68,6 +68,10 @@ install -Z -m 0644 \
 install -Z -m 0755 \
   "$OVERRIDES_ROOT"/usr/bin/urh.pyz \
   /usr/bin/urh
+# include our 'nscb.pyz' helper
+install -Z -m 0755 \
+  "$OVERRIDES_ROOT"/usr/bin/nscb.pyz \
+  /usr/bin/nscb
 # include our 'gamemode.pyz' helper
 install -Z -m 0755 \
   "$OVERRIDES_ROOT"/usr/bin/gamemode.pyz \
