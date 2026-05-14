@@ -145,7 +145,7 @@ rechunk_image() {
     --volume /var/lib/containers:/var/lib/containers \
     quay.io/centos-bootc/centos-bootc:stream10 \
     rpm-ostree compose build-chunked-oci \
-    --bootc --max-layers 128 --format-version 2 \
+    --bootc --max-layers 127 --format-version 2 \
     --from localhost/raw-img \
     --output oci:/var/lib/containers/oci:latest \
     "${label_args[@]}"
