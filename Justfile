@@ -45,6 +45,7 @@ clean:
     clean_artifacts
     echo "=== Cleaning rootful build artifacts ==="
     clean_oci_layout "{{ oci_output_dir }}"
+    clean_rechunk_images
     clean_podman_images_light
     clean_buildah_images
     clean_buildah_containers
@@ -58,6 +59,7 @@ cleaner:
     clean_artifacts
     echo "=== Cleaning rootful build artifacts ==="
     clean_oci_layout "{{ oci_output_dir }}"
+    clean_rechunk_images
     clean_podman_images "{{ bib_image }}"
     clean_buildah_images
     clean_buildah_containers

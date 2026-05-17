@@ -35,8 +35,13 @@ clean_oci_layout() {
 
 # Clean containers-storage images from rechunking
 clean_rechunk_images() {
+  local img tag
   for img in localhost/chunked-img localhost/rechunk-img; do
-    sudo buildah rmi --force "$img" 2>/dev/null || true
+    while read -r tag; do
+      [[ -z "$tag" ]] && continue
+      echo "  Removing rechunked image: $img:$tag"
+      sudo podman rmi --force "$img:$tag" 2>/dev/null || true
+    done < <(sudo podman images --no-trunc "$img" 2>/dev/null | tail -n +2 | awk '{print $2}')
   done
 }
 
@@ -48,10 +53,15 @@ clean_podman_images_light() {
     [[ -z "$tag" ]] && continue
     echo "  Removing build output: localhost/bazzite-nix:$tag"
     sudo buildah rmi --force "localhost/bazzite-nix:$tag" 2>/dev/null || true
-  done < <(sudo buildah images --no-trunc "localhost/bazzite-nix" | tail -n +2 | awk '{print $2}')
+  done < <(sudo buildah images --no-trunc "localhost/bazzite-nix" 2>/dev/null | tail -n +2 | awk '{print $2}')
 
-  # Remove localhost/raw-img
-  sudo buildah rmi --force localhost/raw-img 2>/dev/null || true
+  # Remove localhost/raw-img (all tags)
+  local raw_tag
+  while read -r raw_tag; do
+    [[ -z "$raw_tag" ]] && continue
+    echo "  Removing build output: localhost/raw-img:$raw_tag"
+    sudo podman rmi --force "localhost/raw-img:$raw_tag" 2>/dev/null || true
+  done < <(sudo podman images --no-trunc localhost/raw-img 2>/dev/null | tail -n +2 | awk '{print $2}')
 
   # Remove dangling (<none>:<none>) intermediate build layers
   local id
@@ -59,7 +69,7 @@ clean_podman_images_light() {
     [[ -z "$id" ]] && continue
     echo "  Removing dangling buildah layer: $id"
     sudo buildah rmi --force "$id" 2>/dev/null || true
-  done < <(sudo buildah images --filter "dangling=true" --no-trunc | tail -n +2 | awk '{print $3}')
+  done < <(sudo buildah images --filter "dangling=true" --no-trunc 2>/dev/null | tail -n +2 | awk '{print $3}')
 }
 
 # Clean podman images: removes all including pulled base images, dangling layers, build inputs/outputs
@@ -72,29 +82,34 @@ clean_podman_images() {
     while read -r tag; do
       [[ -z "$tag" ]] && continue
       echo "  Removing build input: $img:$tag"
-      sudo buildah rmi --force "$img:$tag" 2>/dev/null || true
-    done < <(sudo buildah images --no-trunc "$img" | tail -n +2 | awk '{print $2}')
+      sudo podman rmi --force "$img:$tag" 2>/dev/null || true
+    done < <(sudo podman images --no-trunc "$img" 2>/dev/null | tail -n +2 | awk '{print $2}')
   done
 
   # Remove BIB image if present
-  sudo buildah rmi --force "$bib_image" 2>/dev/null || true
+  sudo podman rmi --force "$bib_image" 2>/dev/null || true
 
   # Remove build output images (localhost/bazzite-nix:*)
   while read -r tag; do
     [[ -z "$tag" ]] && continue
     echo "  Removing build output: localhost/bazzite-nix:$tag"
     sudo buildah rmi --force "localhost/bazzite-nix:$tag" 2>/dev/null || true
-  done < <(sudo buildah images --no-trunc "localhost/bazzite-nix" | tail -n +2 | awk '{print $2}')
+  done < <(sudo buildah images --no-trunc "localhost/bazzite-nix" 2>/dev/null | tail -n +2 | awk '{print $2}')
 
-  # Remove localhost/raw-img
-  sudo buildah rmi --force localhost/raw-img 2>/dev/null || true
+  # Remove localhost/raw-img (all tags)
+  local raw_tag
+  while read -r raw_tag; do
+    [[ -z "$raw_tag" ]] && continue
+    echo "  Removing build output: localhost/raw-img:$raw_tag"
+    sudo podman rmi --force "localhost/raw-img:$raw_tag" 2>/dev/null || true
+  done < <(sudo podman images --no-trunc localhost/raw-img 2>/dev/null | tail -n +2 | awk '{print $2}')
 
   # Remove dangling (<none>:<none>) intermediate build layers
   while read -r id; do
     [[ -z "$id" ]] && continue
     echo "  Removing dangling buildah layer: $id"
     sudo buildah rmi --force "$id" 2>/dev/null || true
-  done < <(sudo buildah images --filter "dangling=true" --no-trunc | tail -n +2 | awk '{print $3}')
+  done < <(sudo buildah images --filter "dangling=true" --no-trunc 2>/dev/null | tail -n +2 | awk '{print $3}')
 }
 
 # Clean dangling buildah images (<none>:<none>) — intermediate build artifacts
