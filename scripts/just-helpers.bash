@@ -17,11 +17,9 @@ readonly JUST_HELPERS_BUILD="${JUST_HELPERS_BUILD:-.github/actions/build-reusabl
 
 # Clean root filesystem build artifacts
 clean_artifacts() {
-  # shellcheck disable=SC2035
-  find "$PWD" -maxdepth 1 -name "*_build*" -exec rm -rf {} \;
-  find "$PWD" \( -name ".pytest_cache" -type d -o \
-    -name ".ruff_cache" -type d -o \
-    -name "__pycache__" -type d \) -exec rm -rf {} \;
+  find "$PWD" -maxdepth 1 -name "*_build*" -exec rm -rf {} \; 2>/dev/null || true
+  rm -rf .pytest_cache .ruff_cache
+  find "$PWD" -name "__pycache__" -type d -exec rm -rf {} \; 2>/dev/null || true
   rm -f previous.manifest.json changelog.md output.env
   rm -rf output/
 }
@@ -35,6 +33,13 @@ clean_oci_layout() {
   fi
 }
 
+# Clean containers-storage images from rechunking
+clean_rechunk_images() {
+  for img in localhost/chunked-img localhost/rechunk-img; do
+    sudo buildah rmi --force "$img" 2>/dev/null || true
+  done
+}
+
 # Clean podman images (light): removes only locally generated images, keeps pulled base images
 clean_podman_images_light() {
   # Remove build output images (localhost/bazzite-nix:*)
@@ -42,19 +47,19 @@ clean_podman_images_light() {
   while read -r tag; do
     [[ -z "$tag" ]] && continue
     echo "  Removing build output: localhost/bazzite-nix:$tag"
-    sudo podman rmi --force "localhost/bazzite-nix:$tag" 2>/dev/null || true
-  done < <(sudo podman images "localhost/bazzite-nix" --no-trunc | tail -n +2 | awk '{print $2}')
+    sudo buildah rmi --force "localhost/bazzite-nix:$tag" 2>/dev/null || true
+  done < <(sudo buildah images --no-trunc "localhost/bazzite-nix" | tail -n +2 | awk '{print $2}')
 
   # Remove localhost/raw-img
-  sudo podman rmi --force localhost/raw-img 2>/dev/null || true
+  sudo buildah rmi --force localhost/raw-img 2>/dev/null || true
 
   # Remove dangling (<none>:<none>) intermediate build layers
   local id
   while read -r id; do
     [[ -z "$id" ]] && continue
-    echo "  Removing dangling podman layer: $id"
-    sudo podman rmi --force "$id" 2>/dev/null || true
-  done < <(sudo podman images --filter "dangling=true" --no-trunc | tail -n +2 | awk '{print $3}')
+    echo "  Removing dangling buildah layer: $id"
+    sudo buildah rmi --force "$id" 2>/dev/null || true
+  done < <(sudo buildah images --filter "dangling=true" --no-trunc | tail -n +2 | awk '{print $3}')
 }
 
 # Clean podman images: removes all including pulled base images, dangling layers, build inputs/outputs
@@ -67,29 +72,29 @@ clean_podman_images() {
     while read -r tag; do
       [[ -z "$tag" ]] && continue
       echo "  Removing build input: $img:$tag"
-      sudo podman rmi --force "$img:$tag" 2>/dev/null || true
-    done < <(sudo podman images "$img" --no-trunc | tail -n +2 | awk '{print $2}')
+      sudo buildah rmi --force "$img:$tag" 2>/dev/null || true
+    done < <(sudo buildah images --no-trunc "$img" | tail -n +2 | awk '{print $2}')
   done
 
   # Remove BIB image if present
-  sudo podman rmi --force "$bib_image" 2>/dev/null || true
+  sudo buildah rmi --force "$bib_image" 2>/dev/null || true
 
   # Remove build output images (localhost/bazzite-nix:*)
   while read -r tag; do
     [[ -z "$tag" ]] && continue
     echo "  Removing build output: localhost/bazzite-nix:$tag"
-    sudo podman rmi --force "localhost/bazzite-nix:$tag" 2>/dev/null || true
-  done < <(sudo podman images "localhost/bazzite-nix" --no-trunc | tail -n +2 | awk '{print $2}')
+    sudo buildah rmi --force "localhost/bazzite-nix:$tag" 2>/dev/null || true
+  done < <(sudo buildah images --no-trunc "localhost/bazzite-nix" | tail -n +2 | awk '{print $2}')
 
   # Remove localhost/raw-img
-  sudo podman rmi --force localhost/raw-img 2>/dev/null || true
+  sudo buildah rmi --force localhost/raw-img 2>/dev/null || true
 
   # Remove dangling (<none>:<none>) intermediate build layers
   while read -r id; do
     [[ -z "$id" ]] && continue
-    echo "  Removing dangling podman layer: $id"
-    sudo podman rmi --force "$id" 2>/dev/null || true
-  done < <(sudo podman images --filter "dangling=true" --no-trunc | tail -n +2 | awk '{print $3}')
+    echo "  Removing dangling buildah layer: $id"
+    sudo buildah rmi --force "$id" 2>/dev/null || true
+  done < <(sudo buildah images --filter "dangling=true" --no-trunc | tail -n +2 | awk '{print $3}')
 }
 
 # Clean dangling buildah images (<none>:<none>) — intermediate build artifacts
@@ -186,51 +191,49 @@ run_rebuild() {
   source "$helpers_build"
   eval "$(resolve_variant "$variant_or_spec" "$variants_config" "$image_name")"
   [[ -n "$base_image_override" ]] && BASE_IMAGE="$base_image_override"
-  sudo podman rmi localhost/raw-img 2>/dev/null || true
+  sudo buildah rmi localhost/raw-img 2>/dev/null || true
   build_image "$BASE_IMAGE" "$BUILD_SCRIPT" "$CANONICAL_TAG" "$VARIANT_NAME" "./Containerfile"
 }
 
-# Rechunk localhost/raw-img to OCI layout with bootc chunking
+# Relabel and rechunk raw-img to containers-storage with bootc chunking
 run_rechunk() {
   local variant_or_spec="${1:?variant_or_spec required}"
   local variants_config="${2:-.github/variants.json}"
   local image_name="${3:-bazzite-nix}"
   local image_desc="${4:-Customized Bazzite image with Nix mount support and other sugar}"
   local repo_organization="${5:?repo_organization required}"
-  local helpers_build="$JUST_HELPERS_BUILD"
-
-  local TARGET_IMAGE TAG BASE_IMAGE BUILD_SCRIPT VARIANT_NAME CANONICAL_TAG
-  local manifest_file labels_file KERNEL_VERSION SOURCE_REF BUILD_DIGEST
+  local TAG VARIANT_NAME CANONICAL_TAG
+  local manifest_file="/tmp/bazzite-nix-manifest.json" labels_file="/tmp/bazzite-nix-labels.txt" KERNEL_VERSION FULL_BUILD_DIGEST MANIFEST_PACKAGES
 
   # shellcheck disable=SC1090
-  source "$helpers_build"
+  source "$JUST_HELPERS_BUILD"
   eval "$(resolve_variant "$variant_or_spec" "$variants_config" "$image_name")"
-  manifest_file="/tmp/bazzite-nix-manifest.json"
-  labels_file="/tmp/bazzite-nix-labels.txt"
   eval "$(extract_image_info "$manifest_file")"
   assemble_labels \
-    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$image_desc" "$VARIANT_NAME" "$TAG" \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$image_desc" "$VARIANT_NAME" "$CANONICAL_TAG" \
     "$repo_organization" "$image_name" "$KERNEL_VERSION" \
     "$manifest_file" "$labels_file"
-  rechunk_image "$labels_file"
+  relabel_image "$labels_file" "$KERNEL_VERSION"
+  rechunk_image "$TAG"
   eval "$(extract_final_ref)"
 }
 
 # Run the full build pipeline for a single variant:
-#   build → extract image info → assemble labels → rechunk → extract final ref
+#   build → extract image info → assemble labels → relabel → rechunk → extract final ref
 run_pipeline() {
   local variant_or_spec="${1:?variant_or_spec required}"
   local variants_config="${2:-.github/variants.json}"
   local image_name="${3:-bazzite-nix}"
   local image_desc="${4:-Customized Bazzite image with Nix mount support and other sugar}"
   local repo_organization="${5:?repo_organization required}"
-  local oci_output_dir="${6:-/var/lib/containers/oci}"
+  # oci_output_dir is deprecated — kept for backward compatibility but no longer drives behavior
+  local _oci_output_dir="${6:-/var/lib/containers/oci}"
   local base_image_override="${7:-}"
   local force_rebuild="${8:-0}"
   local helpers_build="$JUST_HELPERS_BUILD"
 
   local TARGET_IMAGE TAG BASE_IMAGE BUILD_SCRIPT VARIANT_NAME CANONICAL_TAG
-  local manifest_file labels_file oci_layout KERNEL_VERSION MANIFEST_PACKAGES
+  local manifest_file labels_file KERNEL_VERSION MANIFEST_PACKAGES
   local SOURCE_REF FULL_BUILD_DIGEST BUILD_DIGEST
 
   # shellcheck disable=SC1090
@@ -240,16 +243,15 @@ run_pipeline() {
 
   manifest_file="/tmp/bazzite-nix-manifest.json"
   labels_file="/tmp/bazzite-nix-labels.txt"
-  oci_layout="$oci_output_dir"
 
   # Phase 1: Build container image (skip if exists and not forcing)
   echo "=== Phase 1: Build ==="
   if [[ "$force_rebuild" == "1" ]]; then
     echo "Force rebuild: removing existing container image..."
-    sudo podman rmi localhost/raw-img 2>/dev/null || true
+    sudo buildah rmi raw-img 2>/dev/null || true
     build_image "$BASE_IMAGE" "$BUILD_SCRIPT" "$CANONICAL_TAG" "$VARIANT_NAME" "./Containerfile"
-  elif sudo podman image exists localhost/raw-img 2>/dev/null; then
-    echo "Container image localhost/raw-img already exists, skipping build"
+  elif sudo buildah images --format '{{.Name}}' raw-img >/dev/null 2>&1; then
+    echo "Container image raw-img already exists, skipping build"
   else
     build_image "$BASE_IMAGE" "$BUILD_SCRIPT" "$CANONICAL_TAG" "$VARIANT_NAME" "./Containerfile"
   fi
@@ -258,16 +260,17 @@ run_pipeline() {
   echo "=== Phase 2: Extract image info ==="
   eval "$(extract_image_info "$manifest_file")"
 
-  # Phase 3: Assemble labels & Rechunk (skip if OCI layout already exists)
-  echo "=== Phase 3: Assemble labels & Rechunk ==="
-  if [[ "$force_rebuild" != "1" && -d "$oci_layout" && -f "$oci_layout/index.json" ]]; then
-    echo "OCI layout already exists at $oci_layout, skipping rechunk"
+  # Phase 3: Assemble labels & Relabel & Rechunk (skip if containers-storage already exists)
+  echo "=== Phase 3: Assemble labels & Relabel & Rechunk ==="
+  if [[ "$force_rebuild" != "1" ]] && sudo buildah images --format '{{.Name}}:{{.Tag}}' localhost/chunked-img >/dev/null 2>&1; then
+    echo "containers-storage image localhost/chunked-img already exists, skipping relabel & rechunk"
   else
     assemble_labels \
       "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$image_desc" "$VARIANT_NAME" "$CANONICAL_TAG" \
       "$repo_organization" "$image_name" "$KERNEL_VERSION" \
       "$manifest_file" "$labels_file"
-    rechunk_image "$labels_file"
+    relabel_image "$labels_file" "$KERNEL_VERSION"
+    rechunk_image "$TAG"
   fi
 
   echo "=== Phase 4: Extract final ref ==="
@@ -403,8 +406,8 @@ _build_bib() {
       -v "$BUILDTMP:/output" \
       -v /var/lib/containers/storage:/var/lib/containers/storage \
       "$bib_image" \
-      --type $type --use-librepo=True --rootfs=btrfs
-    "$source_image"
+      --type $type --use-librepo=True --rootfs=btrfs \
+      "$source_image"
   then
     sudo touch "${BUILDTMP}/.bib-build-complete"
   else
@@ -465,21 +468,28 @@ build_bib() {
 
   case "$source_type" in
   podman)
-    if ! sudo podman image exists "${source}:${tag}" 2>/dev/null; then
-      echo "Image ${source}:${tag} not found in rootful storage."
-      if podman image exists "${source}:${tag}" 2>/dev/null; then
-        echo "Found in rootless storage, copying to rootful..."
-        podman save "${source}:${tag}" | sudo podman load
+    local effective_tag="$tag"
+    if ! sudo buildah images --format '{{.Name}}:{{.Tag}}' "${source}:${tag}" >/dev/null 2>&1; then
+      # Fallback to :latest (rechunk_image may not have tagged with $TAG)
+      if sudo buildah images --format '{{.Name}}:{{.Tag}}' "${source}:latest" >/dev/null 2>&1; then
+        echo "Image ${source}:${tag} not found, using ${source}:latest"
+        effective_tag="latest"
       else
-        echo "Image not found in rootless storage either. Pulling..."
-        sudo podman pull "${source}:${tag}"
+        echo "Image ${source}:${tag} not found in rootful storage."
+        if podman image exists "${source}:${tag}" 2>/dev/null; then
+          echo "Found in rootless storage, copying to rootful..."
+          podman save "${source}:${tag}" | sudo podman load
+        else
+          echo "Image not found in rootless storage either. Pulling..."
+          sudo podman pull "${source}:${tag}"
+        fi
       fi
     fi
 
     if [[ "$source" == localhost/* ]]; then
-      source_image="${source}:${tag}"
+      source_image="${source}:${effective_tag}"
     else
-      source_image="localhost/${source}:${tag}"
+      source_image="localhost/${source}:${effective_tag}"
     fi
     ;;
   oci)
@@ -496,7 +506,7 @@ build_bib() {
   _build_bib "$source_image" "$type" "$config" "$out_dir" "$bib_image"
 
   if [[ "$source_type" == "oci" ]]; then
-    sudo podman rmi --force "$source_image" 2>/dev/null || true
+    sudo buildah rmi --force "$source_image" 2>/dev/null || true
   fi
 }
 
@@ -507,13 +517,14 @@ build_vm_image() {
   local type="${2:?type required}"
   local output_dir="${3:-}"
   local force_rebuild="${4:-0}"
-  local oci_output_dir="${5:-/var/lib/containers/oci}"
+  # oci_output_dir is deprecated — kept for backward compatibility but no longer drives behavior
+  local _oci_output_dir="${5:-/var/lib/containers/oci}"
   local cache_dir="${6:-$HOME/.cache/bazzite-nix}"
   local helpers_build="$JUST_HELPERS_BUILD"
   local bib_image="${7:-quay.io/centos-bootc/bootc-image-builder:latest}"
 
   local TARGET_IMAGE TAG BASE_IMAGE BUILD_SCRIPT VARIANT_NAME CANONICAL_TAG
-  local _out_dir _disk_name _disk_file OCI_LAYOUT
+  local _out_dir _disk_name _disk_file
 
   # shellcheck disable=SC1090
   source "$helpers_build"
@@ -535,28 +546,26 @@ build_vm_image() {
     sudo rm -f "$_disk_file"
   fi
 
-  OCI_LAYOUT="oci:${oci_output_dir}:latest"
-
-  # Check for a rechunked OCI layout first (avoids full image copy)
-  if [[ "$force_rebuild" != "1" && -d "$oci_output_dir" && -f "$oci_output_dir/index.json" ]]; then
-    echo "Using existing rechunked OCI layout: ${OCI_LAYOUT}"
-    build_bib "oci" "$OCI_LAYOUT" "$TAG" "$type" "image.toml" "$output_dir" "$bib_image"
+  # Check for a rechunked containers-storage image first (avoids full image copy)
+  if [[ "$force_rebuild" != "1" ]] && sudo buildah images --format '{{.Name}}:{{.Tag}}' localhost/chunked-img >/dev/null 2>&1; then
+    echo "Using existing rechunked containers-storage image: localhost/chunked-img"
+    build_bib "podman" "localhost/chunked-img" "$TAG" "$type" "image.toml" "$output_dir" "$bib_image"
     return 0
   fi
 
-  # Build container if needed (build_image stages to localhost/raw-img)
+  # Build container if needed (build_image stages to raw-img)
   if [[ "$force_rebuild" == "1" ]]; then
     echo "Force rebuilding container image..."
-    sudo podman rmi --force localhost/raw-img 2>/dev/null || true
+    sudo buildah rmi --force raw-img 2>/dev/null || true
     build_image "$BASE_IMAGE" "$BUILD_SCRIPT" "$CANONICAL_TAG" "$VARIANT_NAME" "./Containerfile"
-  elif sudo podman image exists localhost/raw-img 2>/dev/null; then
-    echo "Container image localhost/raw-img already exists, skipping build"
+  elif sudo buildah images --format '{{.Name}}' raw-img >/dev/null 2>&1; then
+    echo "Container image raw-img already exists, skipping build"
   else
     build_image "$BASE_IMAGE" "$BUILD_SCRIPT" "$CANONICAL_TAG" "$VARIANT_NAME" "./Containerfile"
   fi
 
   # Tag for BIB — bootc-image-builder reads from podman storage
-  sudo podman tag localhost/raw-img "${TARGET_IMAGE}:${TAG}" 2>/dev/null || true
+  sudo buildah tag raw-img "${TARGET_IMAGE}:${TAG}" 2>/dev/null || true
 
   build_bib "podman" "$TARGET_IMAGE" "$TAG" "$type" "image.toml" "$output_dir" "$bib_image"
 }
@@ -573,11 +582,12 @@ run_vm() {
   # shellcheck disable=SC2034
   local force_pull="${6:-0}"
   local clean="${7:-0}"
-  local oci_output_dir="${8:-/var/lib/containers/oci}"
+  # oci_output_dir is deprecated — kept for backward compatibility but no longer drives behavior
+  local _oci_output_dir="${8:-/var/lib/containers/oci}"
   local cache_dir="${9:-$HOME/.cache/bazzite-nix}"
   local bib_image="${10:?bib_image required}"
 
-  local OUTPUT_DIR disk_name image_file is_local OCI_LAYOUT QEMU_PID success i
+  local OUTPUT_DIR disk_name image_file is_local QEMU_PID success i
 
   OUTPUT_DIR="${output_dir}"
   [[ -z "$OUTPUT_DIR" ]] && OUTPUT_DIR="$cache_dir"
@@ -600,15 +610,13 @@ run_vm() {
     is_local=false
     [[ "$target_image" == localhost/* ]] && is_local=true
 
-    OCI_LAYOUT="oci:${oci_output_dir}:latest"
-
-    # Prefer rechunked OCI layout if available (avoids podman image copy)
-    if [[ -d "$oci_output_dir" && -f "$oci_output_dir/index.json" ]]; then
-      echo "Using existing rechunked OCI layout: ${OCI_LAYOUT}"
+    # Prefer rechunked containers-storage image if available (avoids podman image copy)
+    if sudo buildah images --format '{{.Name}}:{{.Tag}}' localhost/chunked-img >/dev/null 2>&1; then
+      echo "Using existing rechunked containers-storage image: localhost/chunked-img"
       sudo podman image exists "$bib_image" 2>/dev/null || sudo podman pull "$bib_image"
       sudo podman image exists "docker.io/qemux/qemu:latest" 2>/dev/null || sudo podman pull "docker.io/qemux/qemu:latest"
       echo "Building disk image..."
-      build_bib "oci" "$OCI_LAYOUT" "$tag" "$type" "$config" "$OUTPUT_DIR" "$bib_image"
+      build_bib "podman" "localhost/chunked-img" "$tag" "$type" "$config" "$OUTPUT_DIR" "$bib_image"
     elif [[ "$is_local" == "true" ]]; then
       if ! sudo podman image exists "${target_image}:${tag}" 2>/dev/null; then
         echo "Image ${target_image}:${tag} not found in rootful storage."
@@ -696,7 +704,8 @@ check_variants() {
 # Build all variants that need rebuilding (reads /tmp/variants_results.json)
 # Sources build-reusable helpers.sh for the full build pipeline
 build_all_variants() {
-  local oci_output_dir="${1:-/var/lib/containers/oci}"
+  # oci_output_dir is deprecated — kept for backward compatibility but no longer drives behavior
+  local _oci_output_dir="${1:-/var/lib/containers/oci}"
   local repo_organization="${2:?repo_organization required}"
   local image_name="${3:?image_name required}"
   local image_desc="${4:-Customized Bazzite image with Nix mount support and other sugar}"
@@ -729,6 +738,7 @@ build_all_variants() {
     base_image=$(echo "$variants" | jq -r ".[$i].base_image")
     build_script=$(echo "$variants" | jq -r ".[$i].build_script // \"build.sh\"")
     canonical_tag=$(echo "$variants" | jq -r ".[$i].canonical_tag")
+    tag="${base_image##*:}"
 
     echo ""
     echo "========================================"
@@ -742,23 +752,24 @@ build_all_variants() {
     labels_file="/tmp/bazzite-nix-labels.txt"
 
     # Build container image (skip if exists)
-    if sudo podman image exists localhost/raw-img 2>/dev/null; then
-      echo "Container image localhost/raw-img already exists, skipping build"
+    if sudo buildah images --format '{{.Name}}' raw-img >/dev/null 2>&1; then
+      echo "Container image raw-img already exists, skipping build"
     else
       build_image "$base_image" "$build_script" "$canonical_tag" "$variant" "./Containerfile"
     fi
 
     eval "$(extract_image_info "$manifest_file")"
 
-    # Rechunk only if OCI layout doesn't already exist
-    if [[ -d "$oci_output_dir" && -f "$oci_output_dir/index.json" ]]; then
-      echo "OCI layout already exists at $oci_output_dir, skipping rechunk for variant: $variant"
+    # Relabel & rechunk only if containers-storage doesn't already exist
+    if sudo buildah images --format '{{.Name}}:{{.Tag}}' localhost/chunked-img >/dev/null 2>&1; then
+      echo "containers-storage image localhost/chunked-img already exists, skipping relabel & rechunk for variant: $variant"
     else
       assemble_labels \
         "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$image_desc" "$variant" "$canonical_tag" \
         "$repo_organization" "$image_name" "$KERNEL_VERSION" \
         "$manifest_file" "$labels_file"
-      rechunk_image "$labels_file"
+      relabel_image "$labels_file" "$KERNEL_VERSION"
+      rechunk_image "$tag"
     fi
     eval "$(extract_final_ref)"
 

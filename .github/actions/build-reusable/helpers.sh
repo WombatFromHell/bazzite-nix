@@ -10,6 +10,7 @@ source "${BASH_SOURCE[0]%/*}/../sbom-reusable/helpers.sh"
 
 # ── build image ─────────────────────────────────────────────────────────────
 # Usage: build_image <base_image> <build_script> <canonical_tag> <variant> <containerfile_path>
+# Tags the result as both `raw-img` (default/latest) and `raw-img:<canonical_tag>`.
 
 build_image() {
   local base_image="$1"
@@ -18,8 +19,9 @@ build_image() {
   local variant="$4"
   local containerfile_path="$5"
 
-  sudo podman build \
-    --tag localhost/raw-img \
+  sudo buildah build \
+    --tag raw-img \
+    --tag "raw-img:${canonical_tag}" \
     --build-arg BASE_IMAGE="${base_image}" \
     --build-arg BUILD_SCRIPT="${build_script}" \
     --build-arg CANONICAL_TAG="${canonical_tag}" \
@@ -123,22 +125,57 @@ assemble_labels() {
   printf '%s\n' "${labels[@]}" >"${output_file}"
 }
 
-# ── rechunk image ───────────────────────────────────────────────────────────
-# Usage: rechunk_image <labels_file>
-# Rechunks localhost/raw-img with the provided labels file.
+# ── relabel image ───────────────────────────────────────────────────────────
+# Usage: relabel_image <labels_file> <kernel_version>
+# Clears inherited labels, then applies new labels and annotations via buildah.
 
-rechunk_image() {
+relabel_image() {
   local labels_file="$1"
+  local kernel_version="$2"
+  local image="raw-img"
 
-  local label_args=()
+  # Clear all inherited labels from base image
+  local container
+  container=$(sudo buildah from "$image")
+  sudo buildah config --label "-" "$container"
+  sudo buildah commit --identity-label=false --rm "$container" "$image"
+
+  # Read new labels from file
+  local labels=()
   while IFS= read -r line; do
-    [ -n "$line" ] && label_args+=(--label "$line")
+    [ -n "$line" ] && labels+=("$line")
   done <"${labels_file}"
 
-  # Initialize OCI layout on host (shared into container via the volume)
-  sudo mkdir -p /var/lib/containers/oci
-  echo '{"imageLayoutVersion":"1.0.0"}' | sudo tee /var/lib/containers/oci/oci-layout >/dev/null
-  echo '{"schemaVersion":2,"manifests":[]}' | sudo tee /var/lib/containers/oci/index.json >/dev/null
+  # Add bootc/ostree labels
+  labels+=(
+    "ostree.bootc=true"
+    "ostree.linux=${kernel_version}"
+  )
+
+  # Apply labels and annotations via buildah
+  container=$(sudo buildah from "$image")
+  for line in "${labels[@]}"; do
+    [ -z "$line" ] && continue
+    sudo buildah config --label "$line" --annotation "$line" "$container"
+  done
+  sudo buildah commit --identity-label=false --rm "$container" "$image"
+
+  # Only remove source image in CI (ephemeral runner). Locally, leave it so
+  # the user can re-run or inspect without rebuilding.
+  if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+    sudo podman image exists "$image" &&
+      sudo podman rmi --force "$image"
+  fi
+}
+
+# ── rechunk image ───────────────────────────────────────────────────────────
+# Usage: rechunk_image [tag]
+# Rechunks raw-img using containers-storage output.
+# If tag is provided, also tags the result as localhost/chunked-img:<tag>
+# so downstream steps (build_vm_image, run_vm) can find it by variant tag.
+
+rechunk_image() {
+  local tag="${1:-}"
 
   sudo podman run --rm --privileged \
     --security-opt label=disable \
@@ -147,14 +184,17 @@ rechunk_image() {
     rpm-ostree compose build-chunked-oci \
     --bootc --max-layers 127 --format-version 2 \
     --from localhost/raw-img \
-    --output oci:/var/lib/containers/oci:latest \
-    "${label_args[@]}"
+    --output containers-storage:localhost/chunked-img
 
-  # Only remove source image in CI (ephemeral runner). Locally, leave it so
-  # the user can re-run or inspect without rebuilding.
+  # Tag with the canonical tag so downstream steps find it by variant
+  if [[ -n "$tag" ]]; then
+    sudo podman tag localhost/chunked-img "localhost/chunked-img:${tag}" 2>/dev/null || true
+  fi
+
+  # Untag the source image to free storage in CI (ephemeral runner).
+  # Locally, leave it so the user can re-run or inspect without rebuilding.
   if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
-    sudo podman image exists localhost/raw-img &&
-      sudo podman rmi --force localhost/raw-img
+    sudo podman rmi --force localhost/chunked-img 2>/dev/null || true
   fi
 }
 
@@ -165,18 +205,14 @@ rechunk_image() {
 #   Local (no GITHUB_OUTPUT): uppercase KEY=value for eval
 
 extract_final_ref() {
-  local source_ref="oci:/var/lib/containers/oci:latest"
-  sudo skopeo inspect --raw "$source_ref" >/dev/null || {
-    echo "::error::Expected OCI layout ${source_ref} not found after rechunk"
+  local source_ref="containers-storage:localhost/chunked-img"
+  sudo skopeo inspect "$source_ref" >/dev/null || {
+    echo "::error::Expected containers-storage image ${source_ref} not found after rechunk"
     exit 1
   }
 
   local full_digest
-  full_digest=$(sudo skopeo inspect --raw "$source_ref" | jq -r '.config.digest // empty')
-  # Fall back to manifest digest if config digest unavailable
-  if [ -z "$full_digest" ]; then
-    full_digest=$(sudo skopeo inspect --raw "$source_ref" | jq -r '.digest // empty')
-  fi
+  full_digest=$(sudo skopeo inspect "$source_ref" | jq -r '.Digest // empty')
   if [ -z "$full_digest" ]; then
     echo "::error::Could not determine image digest from ${source_ref}"
     exit 1

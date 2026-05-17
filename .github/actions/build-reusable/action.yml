@@ -137,15 +137,23 @@ runs:
       run: |
         source "${{ github.action_path }}/helpers.sh"
         generate_and_embed_sbom \
-          "localhost/raw-img" \
+          "raw-img" \
           "${{ inputs.canonical_tag }}" \
           "${{ steps.setup-syft.outputs.cmd }}"
+
+    - name: Relabel image
+      shell: bash
+      run: |
+        source "${{ github.action_path }}/helpers.sh"
+        relabel_image \
+          "${{ steps.assemble_labels.outputs.labels_file }}" \
+          "${{ steps.labels.outputs.kernel_version }}"
 
     - name: Rechunk image
       shell: bash
       run: |
         source "${{ github.action_path }}/helpers.sh"
-        rechunk_image "${{ steps.assemble_labels.outputs.labels_file }}"
+        rechunk_image "${{ inputs.variant }}"
 
     - name: Extract final image ref
       id: final_ref
