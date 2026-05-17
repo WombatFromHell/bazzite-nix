@@ -8,6 +8,14 @@ set -euo pipefail
 # shellcheck source=../sbom-reusable/helpers.sh
 source "${BASH_SOURCE[0]%/*}/../sbom-reusable/helpers.sh"
 
+# Returns --security-opt label=disable when running outside CI.
+# CI runners (Ubuntu) don't enforce SELinux, so the flag is unnecessary there.
+security_opts() {
+  if [[ -z "${GITHUB_OUTPUT:-}" ]]; then
+    echo "--security-opt label=disable"
+  fi
+}
+
 # ── build image ─────────────────────────────────────────────────────────────
 # Usage: build_image <base_image> <build_script> <canonical_tag> <variant> <containerfile_path>
 # Tags the result as both `raw-img` (default/latest) and `raw-img:<canonical_tag>`.
@@ -26,7 +34,7 @@ build_image() {
     --build-arg BUILD_SCRIPT="${build_script}" \
     --build-arg CANONICAL_TAG="${canonical_tag}" \
     --build-arg VARIANT="${variant}" \
-    --security-opt label=disable \
+    $(security_opts) \
     --file "${containerfile_path}" .
 }
 
@@ -41,7 +49,7 @@ extract_image_info() {
   local manifest_output_file="${1:-}"
 
   local kernel_version
-  kernel_version=$(sudo podman run --rm --security-opt label=disable localhost/raw-img \
+  kernel_version=$(sudo podman run --rm $(security_opts) localhost/raw-img \
     cat /usr/share/ublue-os/kernel-version) || {
     echo "::error::Failed to read /usr/share/ublue-os/kernel-version from image"
     exit 1
@@ -52,7 +60,7 @@ extract_image_info() {
   fi
 
   local manifest
-  manifest=$(sudo podman run --rm --security-opt label=disable localhost/raw-img \
+  manifest=$(sudo podman run --rm $(security_opts) localhost/raw-img \
     cat /usr/share/ublue-os/manifest.json 2>/dev/null) || {
     echo "::error::/usr/share/ublue-os/manifest.json not found in image"
     exit 1
@@ -160,12 +168,6 @@ relabel_image() {
   done
   sudo buildah commit --identity-label=false --rm "$container" "$image"
 
-  # Only remove source image in CI (ephemeral runner). Locally, leave it so
-  # the user can re-run or inspect without rebuilding.
-  if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
-    sudo podman image exists "$image" &&
-      sudo podman rmi --force "$image"
-  fi
 }
 
 # ── rechunk image ───────────────────────────────────────────────────────────
@@ -178,9 +180,9 @@ rechunk_image() {
   local tag="${1:-}"
 
   sudo podman run --rm --privileged \
-    --security-opt label=disable \
+    $(security_opts) \
     --volume /var/lib/containers:/var/lib/containers \
-    quay.io/centos-bootc/centos-bootc:stream10 \
+    localhost/raw-img \
     rpm-ostree compose build-chunked-oci \
     --bootc --max-layers 127 --format-version 2 \
     --from localhost/raw-img \
@@ -189,12 +191,6 @@ rechunk_image() {
   # Tag with the canonical tag so downstream steps find it by variant
   if [[ -n "$tag" ]]; then
     sudo podman tag localhost/chunked-img "localhost/chunked-img:${tag}" 2>/dev/null || true
-  fi
-
-  # Untag the source image to free storage in CI (ephemeral runner).
-  # Locally, leave it so the user can re-run or inspect without rebuilding.
-  if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
-    sudo podman rmi --force localhost/chunked-img 2>/dev/null || true
   fi
 }
 
@@ -266,7 +262,7 @@ generate_and_embed_sbom() {
   echo "  Injecting SBOM into image layer with buildah..."
 
   local container
-  container=$(sudo buildah from --security-opt label=disable --name "sbom-working-${RANDOM}" "${image}") || {
+  container=$(sudo buildah from $(security_opts) --name "sbom-working-${RANDOM}" "${image}") || {
     echo "::error::Failed to create buildah container from ${image}"
     rm -rf "${sbom_dir}"
     exit 1
