@@ -15,8 +15,8 @@ on:
         required: false
         default: false
         type: boolean
-      handwritten:
-        description: "Small changelog about changes in this build"
+      variants_override:
+        description: "Override variants to build (comma delimited)"
         required: false
         type: string
 
@@ -62,6 +62,7 @@ jobs:
         with:
           force_build: ${{ github.event.inputs.force_build == 'true' }}
           variants_config: ".github/variants.json"
+          variants_override: ${{ github.event.inputs.variants_override || '' }}
           registry: ${{ steps.ghcr.outputs.registry }}
           repo: ${{ steps.ghcr.outputs.repo }}
           image_desc: ${{ env.IMAGE_DESC }}
@@ -258,7 +259,6 @@ jobs:
         uses: ./.github/actions/release-reusable
         with:
           variant: ${{ matrix.variant.variant }}
-          handwritten: ${{ github.event.inputs.handwritten || '' }}
           registry: ${{ needs.check_and_aggregate.outputs.registry }}
           repo: ${{ needs.check_and_aggregate.outputs.repo }}
           github_token: ${{ secrets.GITHUB_TOKEN }}

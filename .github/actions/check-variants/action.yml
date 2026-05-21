@@ -6,6 +6,10 @@ inputs:
     description: "Force build even if digest unchanged"
     required: false
     default: "false"
+  variants_override:
+    description: "Comma-delimited list of variant names to build (e.g., 'stable,testing'). Overrides default selection; includes disabled variants when explicitly named"
+    required: false
+    default: ""
   variants_config:
     description: "Path to variants.json config file"
     required: true
@@ -43,6 +47,7 @@ runs:
         DATE: ${{ inputs.date }}
         FORCE_BUILD: ${{ inputs.force_build }}
         VARIANTS_CONFIG: ${{ inputs.variants_config }}
+        VARIANTS_OVERRIDE: ${{ inputs.variants_override }}
       run: |
         bash "${{ github.action_path }}/check-variants.sh"
 

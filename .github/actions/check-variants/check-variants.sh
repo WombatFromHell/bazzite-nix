@@ -11,6 +11,7 @@
 #   DATE               - Build date timestamp
 #   FORCE_BUILD        - "true" to force rebuild regardless of digest
 #   VARIANTS_CONFIG    - Path to variants.json config file
+#   VARIANTS_OVERRIDE  - Comma-delimited list of variant names to build (overrides default selection)
 #
 # Output:
 #   Writes variant check results to /tmp/variants_results.json
@@ -46,6 +47,30 @@ fi
 # Ensure registry is lowercase (GHCR requirement)
 REGISTRY=$(echo "$REGISTRY" | tr '[:upper:]' '[:lower:]')
 
+# Parse variants override list if provided
+override_variants=()
+override_active=false
+if [[ -n "${VARIANTS_OVERRIDE:-}" ]]; then
+  IFS=',' read -ra override_variants <<<"$VARIANTS_OVERRIDE"
+  override_active=true
+  echo "::notice::Variants override active: ${VARIANTS_OVERRIDE}"
+
+  # Validate each override variant exists in config
+  for requested_variant in "${override_variants[@]}"; do
+    # Trim whitespace
+    requested_variant=$(echo "$requested_variant" | xargs)
+    if [[ -z "$requested_variant" ]]; then
+      continue
+    fi
+    FOUND=$(jq -r --arg v "$requested_variant" '.variants[] | select(.name == $v) | .name' "$VARIANTS_CONFIG")
+    if [[ -z "$FOUND" ]]; then
+      AVAILABLE=$(jq -r '.variants[].name' "$VARIANTS_CONFIG" | paste -sd ', ' -)
+      echo "::error::Variant '$requested_variant' not found in $VARIANTS_CONFIG. Available: $AVAILABLE"
+      exit 1
+    fi
+  done
+fi
+
 # Initialize results array
 results=()
 
@@ -65,8 +90,26 @@ for ((i = 0; i < variant_count; i++)); do
   # Default to build.sh if build_script is empty
   build_script="${build_script:-build.sh}"
 
-  # Skip disabled variants
-  if [[ "$disabled" == "true" ]]; then
+  # Check if this variant is in the override list (if override is active)
+  in_override=false
+  if [[ "$override_active" == "true" ]]; then
+    for requested in "${override_variants[@]}"; do
+      requested=$(echo "$requested" | xargs)
+      if [[ "$variant" == "$requested" ]]; then
+        in_override=true
+        break
+      fi
+    done
+
+    # If override is active but this variant is not in the list, skip it
+    if [[ "$in_override" == "false" ]]; then
+      echo "::notice::Variant $variant: not in override list, skipping"
+      continue
+    fi
+  fi
+
+  # Skip disabled variants unless they're explicitly in the override list
+  if [[ "$disabled" == "true" && "$in_override" == "false" ]]; then
     echo "::notice::Variant $variant: disabled in config, skipping"
     continue
   fi
