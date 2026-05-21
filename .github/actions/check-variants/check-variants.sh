@@ -139,8 +139,8 @@ for ((i = 0; i < variant_count; i++)); do
   output_image="${REPO}${suffix}"
   prefix="${REGISTRY}/${output_image}"
 
-  # Compute canonical tag
-  read -r canonical collision_detected <<<"$(compute_canonical_tag "$parent_version" "$prefix" "$FORCE_BUILD")"
+  # Compute canonical tag, passing base_image_tag as branch for accurate collision checks.
+  read -r canonical collision_detected <<<"$(compute_canonical_tag "$parent_version" "$prefix" "$FORCE_BUILD" "$base_image_tag")"
 
   # Generate tags
   tags=$(generate_tags "$base_image_tag" "$canonical" "$latest" "$tags_json")

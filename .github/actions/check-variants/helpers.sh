@@ -66,14 +66,16 @@ extract_image_metadata() {
 }
 
 # ── compute canonical tag ───────────────────────────────────────────────────
-# Usage: compute_canonical_tag <parent_version> <prefix> <force_build>
+# Usage: compute_canonical_tag <parent_version> <prefix> <force_build> <branch>
 # Computes canonical tag, handling version collisions when force_build is true.
+# Checks for <branch>-<canonical> tags in the registry to match what is actually pushed.
 # Prints: canonical collision_detected
 
 compute_canonical_tag() {
   local parent_version="$1"
   local prefix="$2"
   local force_build="$3"
+  local branch="${4:-}"
 
   # Strip branch prefix (e.g., "testing-") to get pure version number
   local canonical
@@ -90,12 +92,19 @@ compute_canonical_tag() {
     return 0
   fi
 
-  if ! skopeo inspect "docker://${prefix}:${canonical}" >/dev/null 2>&1; then
+  # Construct the full tag to check, matching what is actually pushed.
+  # If a branch is provided, check <branch>-<canonical> (e.g., testing-44.20260520.2).
+  local check_tag="$canonical"
+  if [[ -n "$branch" ]]; then
+    check_tag="${branch}-${canonical}"
+  fi
+
+  if ! skopeo inspect "docker://${prefix}:${check_tag}" >/dev/null 2>&1; then
     echo "$canonical $collision_detected"
     return 0
   fi
 
-  echo "::notice::Collision detected: ${canonical} exists. Calculating next version..." >&2
+  echo "::notice::Collision detected: ${check_tag} exists. Calculating next version..." >&2
   collision_detected="true"
 
   # Parse version number and increment
@@ -107,8 +116,16 @@ compute_canonical_tag() {
     next_num=$((BASH_REMATCH[2] + 1))
   fi
 
-  while skopeo inspect "docker://${search_base}.${next_num}" >/dev/null 2>&1; do
-    echo "::notice::${search_base}.${next_num} also exists, checking next..." >&2
+  while true; do
+    local next_canonical="${search_base}.${next_num}"
+    local next_check_tag="$next_canonical"
+    if [[ -n "$branch" ]]; then
+      next_check_tag="${branch}-${next_canonical}"
+    fi
+    if ! skopeo inspect "docker://${prefix}:${next_check_tag}" >/dev/null 2>&1; then
+      break
+    fi
+    echo "::notice::${next_check_tag} also exists, checking next..." >&2
     ((next_num++))
   done
 
