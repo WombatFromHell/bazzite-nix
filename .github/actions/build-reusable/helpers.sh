@@ -8,13 +8,14 @@ set -euo pipefail
 # shellcheck source=../sbom-reusable/helpers.sh
 source "${BASH_SOURCE[0]%/*}/../sbom-reusable/helpers.sh"
 
-# Returns --security-opt label=disable when running outside CI.
-# CI runners (Ubuntu) don't enforce SELinux, so the flag is unnecessary there.
-security_opts() {
-  if [[ -z "${GITHUB_OUTPUT:-}" ]]; then
-    echo "--security-opt label=disable"
-  fi
-}
+# SECURITY_OPTS array — set to --security-opt label=disable when running
+# outside CI. CI runners (Ubuntu) don't enforce SELinux, so the flag is
+# unnecessary there. Use as: sudo podman run --rm "${SECURITY_OPTS[@]}" ...
+if [[ -z "${GITHUB_OUTPUT:-}" ]]; then
+  SECURITY_OPTS=(--security-opt label=disable)
+else
+  SECURITY_OPTS=()
+fi
 
 # ── build image ─────────────────────────────────────────────────────────────
 # Usage: build_image <base_image> <build_script> <canonical_tag> <variant> <containerfile_path>
@@ -34,7 +35,7 @@ build_image() {
     --build-arg BUILD_SCRIPT="${build_script}" \
     --build-arg CANONICAL_TAG="${canonical_tag}" \
     --build-arg VARIANT="${variant}" \
-    $(security_opts) \
+    "${SECURITY_OPTS[@]}" \
     --file "${containerfile_path}" .
 }
 
@@ -49,7 +50,7 @@ extract_image_info() {
   local manifest_output_file="${1:-}"
 
   local kernel_version
-  kernel_version=$(sudo podman run --rm $(security_opts) localhost/raw-img \
+  kernel_version=$(sudo podman run --rm "${SECURITY_OPTS[@]}" localhost/raw-img \
     cat /usr/share/ublue-os/kernel-version) || {
     echo "::error::Failed to read /usr/share/ublue-os/kernel-version from image"
     exit 1
@@ -60,7 +61,7 @@ extract_image_info() {
   fi
 
   local manifest
-  manifest=$(sudo podman run --rm $(security_opts) localhost/raw-img \
+  manifest=$(sudo podman run --rm "${SECURITY_OPTS[@]}" localhost/raw-img \
     cat /usr/share/ublue-os/manifest.json 2>/dev/null) || {
     echo "::error::/usr/share/ublue-os/manifest.json not found in image"
     exit 1
@@ -180,7 +181,7 @@ rechunk_image() {
   local tag="${1:-}"
 
   sudo podman run --rm --privileged \
-    $(security_opts) \
+    "${SECURITY_OPTS[@]}" \
     --volume /var/lib/containers:/var/lib/containers \
     localhost/raw-img \
     rpm-ostree compose build-chunked-oci \
@@ -262,7 +263,7 @@ generate_and_embed_sbom() {
   echo "  Injecting SBOM into image layer with buildah..."
 
   local container
-  container=$(sudo buildah from $(security_opts) --name "sbom-working-${RANDOM}" "${image}") || {
+  container=$(sudo buildah from "${SECURITY_OPTS[@]}" --name "sbom-working-${RANDOM}" "${image}") || {
     echo "::error::Failed to create buildah container from ${image}"
     rm -rf "${sbom_dir}"
     exit 1
