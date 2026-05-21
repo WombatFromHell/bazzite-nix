@@ -6,10 +6,10 @@ dnf5 -y install --enable-repo=terra \
   qt5-qttools qt6-qttools tmux gvfs-smb gvfs-fuse
 
 # include niri + DMS and friends from a verified repo
-dnf5 -y copr enable avengemedia/dms-git &&
-  dnf5 -y copr disable avengemedia/dms-git &&
+dnf5 -y copr enable avengemedia/dms &&
+  dnf5 -y copr disable avengemedia/dms &&
   dnf5 -y install --enable-repo="*avengemedia*" \
-    quickshell-git niri dms danksearch dgop fuzzel kanshi cava matugen cups-pk-helper xdg-desktop-portal-kde qt6ct-kde \
+    quickshell niri dms danksearch dgop fuzzel kanshi cava matugen cups-pk-helper xdg-desktop-portal-kde qt6ct-kde \
     ghostty
 
 # include hyprpicker so we get a magnifying glass with our color picker
