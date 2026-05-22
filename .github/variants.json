@@ -44,7 +44,8 @@
       "tags": {
         "versioned": ["{branch}", "{branch}-{canonical}"]
       },
-      "cleanup": true
+      "cleanup": true,
+      "disabled": true
     },
     {
       "name": "unstable",

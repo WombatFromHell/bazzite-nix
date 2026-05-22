@@ -2,7 +2,7 @@ name: Clean Old Images
 
 on:
   schedule:
-    - cron: "1 7 * * 0" # 07:01 UTC every Sunday
+    - cron: "1 6 1 * *" # Runs at 06:01 UTC on the 1st of every month
   workflow_dispatch:
     inputs:
       dry_run:
