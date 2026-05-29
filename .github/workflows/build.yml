@@ -259,6 +259,7 @@ jobs:
         uses: ./.github/actions/release-reusable
         with:
           variant: ${{ matrix.variant.variant }}
+          allow_disabled: true
           registry: ${{ needs.check_and_aggregate.outputs.registry }}
           repo: ${{ needs.check_and_aggregate.outputs.repo }}
           github_token: ${{ secrets.GITHUB_TOKEN }}

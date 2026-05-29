@@ -87,5 +87,6 @@ jobs:
         uses: ./.github/actions/release-reusable
         with:
           variant: ${{ matrix.variant }}
+          allow_disabled: true
           handwritten: ${{ inputs.handwritten }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
