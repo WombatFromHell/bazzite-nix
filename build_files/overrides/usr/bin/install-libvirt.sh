@@ -6,7 +6,7 @@ set -euo pipefail
 # CONFIGURATION
 #==============================================================================
 CONTAINER_NAME="${CONTAINER_NAME:-libvirtbox}"
-CONTAINER_IMAGE="${CONTAINER_IMAGE:-fedora:43}"
+CONTAINER_IMAGE="${CONTAINER_IMAGE:-fedora:44}"
 readonly TPM_DEVICE="${TPM_DEVICE:-/dev/tpm0}"
 DBX_USE_ROOT="true"
 DBX_EXPORT_APP="virt-manager"
@@ -15,7 +15,7 @@ DBX_UNSHARE_ALL="true"
 
 DBX_PACKAGES="qemu-system-x86-core qemu-img libvirt libvirt-daemon libvirt-daemon-config-network virt-manager virt-install virt-viewer edk2-ovmf swtpm swtpm-tools qemu-device-display-virtio-gpu"
 
-DBX_FLAGS="--volume ${TPM_DEVICE}:${TPM_DEVICE} --device /dev/dri --device /dev/kvm --security-opt label=disable"
+DBX_FLAGS="--volume ${TPM_DEVICE}:${TPM_DEVICE} --net=host --device /dev/dri --device /dev/kvm --security-opt label=disable"
 
 _dbx_libvirt_add_vhost_net() {
   [[ -e /dev/vhost-net ]] && echo "--device /dev/vhost-net"
