@@ -11,6 +11,8 @@ SEARCH_PATHS=(
   /usr/local/share/applications
   /usr/share/applications
   /var/lib/flatpak/exports/share/applications
+  /run/current-system/sw/share/applications
+  "$HOME/.nix-profile/share/applications"
 )
 
 NEW_WINDOW_BROWSERS=(
@@ -77,10 +79,8 @@ detect_launcher_type() {
     echo "flatpak"
   elif [[ "$line" =~ ^distrobox[[:space:]]+run[[:space:]]+([^[:space:]]+) ]]; then
     echo "distrobox"
-  elif [[ "$line" =~ ^[/~] ]]; then
-    echo "native"
   else
-    return 1
+    echo "native"
   fi
 }
 
@@ -240,9 +240,13 @@ LAUNCHER_TYPE="$(detect_launcher_type "$EXEC_LINE")"
 case "$LAUNCHER_TYPE" in
 flatpak) resolve_flatpak "$EXEC_LINE" ;;
 distrobox) resolve_distrobox "$EXEC_LINE" ;;
-native) resolve_native "$EXEC_LINE" ;;
-*)
-  echo "Error: unrecognized launcher type in '$EXEC_LINE'" >&2
-  exit 1
+native)
+  # Sanity-check: the base command must be resolvable on PATH
+  base_cmd="${EXEC_LINE%% *}"
+  if ! command -v "$base_cmd" &>/dev/null; then
+    echo "Error: '$base_cmd' from '$EXEC_LINE' not found on PATH" >&2
+    exit 1
+  fi
+  resolve_native "$EXEC_LINE"
   ;;
 esac
