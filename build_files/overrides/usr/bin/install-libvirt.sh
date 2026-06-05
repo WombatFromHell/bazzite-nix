@@ -6,7 +6,7 @@ set -euo pipefail
 # CONFIGURATION
 #==============================================================================
 CONTAINER_NAME="${CONTAINER_NAME:-libvirtbox}"
-CONTAINER_IMAGE="${CONTAINER_IMAGE:-fedora:44}"
+CONTAINER_IMAGE="${CONTAINER_IMAGE:-fedora:43}"
 readonly TPM_DEVICE="${TPM_DEVICE:-/dev/tpm0}"
 DBX_USE_ROOT="true"
 DBX_EXPORT_APP="virt-manager"
