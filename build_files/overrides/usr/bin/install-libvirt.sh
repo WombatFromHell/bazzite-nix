@@ -6,7 +6,7 @@ set -euo pipefail
 # CONFIGURATION
 #==============================================================================
 CONTAINER_NAME="${CONTAINER_NAME:-libvirtbox}"
-CONTAINER_IMAGE="${CONTAINER_IMAGE:-fedora:43}"
+CONTAINER_IMAGE="${CONTAINER_IMAGE:-fedora:44}"
 readonly TPM_DEVICE="${TPM_DEVICE:-/dev/tpm0}"
 DBX_USE_ROOT="true"
 DBX_EXPORT_APP="virt-manager"
@@ -28,10 +28,28 @@ DBX_INIT_HOOKS=(
   "usermod -aG libvirt,kvm,wheel ${USER} 2>/dev/null || true"
   "echo 'seccomp_sandbox = 0' >> /etc/libvirt/qemu.conf || true"
   "setenforce 0 || true"
-  "systemctl enable --now virtqemud.socket virtnetworkd.socket virtstoraged.socket virtnodedevd.socket || true"
+  "systemctl enable --now virtqemud.socket virtnetworkd.service virtnetworkd.socket virtstoraged.socket virtnodedevd.socket || true"
 )
 
 DBX_POST_HOOKS=(
+  "sudo tee /etc/systemd/system/virt-libvirt-default-network.service > /dev/null << 'EOF'
+[Unit]
+Description=Start libvirt default network
+After=virtnetworkd.service
+Wants=virtnetworkd.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=true
+ExecStart=/usr/bin/bash -c '/usr/bin/virsh -c qemu:///system net-start default 2>/dev/null || :'
+
+[Install]
+WantedBy=multi-user.target
+EOF"
+  "sudo systemctl enable virt-libvirt-default-network.service || true"
+  "virsh -c qemu:///system net-define /usr/share/libvirt/networks/default.xml || true"
+  "virsh -c qemu:///system net-start default || true"
+  "virsh -c qemu:///system net-autostart default || true"
   "distrobox-export -a virt-manager"
 )
 
@@ -67,7 +85,7 @@ Examples:
 
 Description:
   Installs QEMU with TPM passthrough support, libvirt, and virt-manager
-  inside a Fedora 43 distrobox container, then exports virt-manager to host.
+  inside a Fedora 44 distrobox container, then exports virt-manager to host.
 
 Requirements:
   - TPM device at ${TPM_DEVICE}
