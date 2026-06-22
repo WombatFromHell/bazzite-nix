@@ -18,7 +18,7 @@ jobs:
       repo: ${{ steps.ghcr.outputs.repo }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Set lowercase GHCR refs
         id: ghcr
@@ -71,7 +71,7 @@ jobs:
       repo: ${{ needs.resolve-variants.outputs.repo }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Install crane
         uses: imjasonh/setup-crane@v0.6
@@ -113,7 +113,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Install crane
         uses: imjasonh/setup-crane@v0.6
