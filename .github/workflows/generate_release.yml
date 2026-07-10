@@ -21,7 +21,7 @@ jobs:
       matrix: ${{ steps.resolve.outputs.matrix }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Resolve variants
         id: resolve
@@ -79,7 +79,7 @@ jobs:
       contents: write
     steps:
       - name: Checkout last 500 commits
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           fetch-depth: 500
 

@@ -18,7 +18,7 @@ jobs:
       repo: ${{ steps.ghcr.outputs.repo }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Set lowercase GHCR refs
         id: ghcr
@@ -71,10 +71,10 @@ jobs:
       repo: ${{ needs.resolve-variants.outputs.repo }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Install crane
-        uses: imjasonh/setup-crane@v0.6
+        uses: imjasonh/setup-crane@v0.7
 
       - name: Get latest image digests from GHCR
         id: build_matrix
@@ -113,10 +113,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Install crane
-        uses: imjasonh/setup-crane@v0.6
+        uses: imjasonh/setup-crane@v0.7
 
       - name: Install oras
         uses: oras-project/setup-oras@v2
