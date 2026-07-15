@@ -362,13 +362,8 @@ environment {
 // spawn-at-startup "waybar"
 
 // attempt to unlock kwallet automatically on login
-spawn-at-startup "/usr/libexec/pam_kwallet_init"
-spawn-at-startup "/usr/libexec/kf6/polkit-kde-authentication-agent-1"
-// only uncomment below if using 'kdewallet' with blank password
-//
-spawn-sh-at-startup "/usr/bin/dbus-update-activation-environment --systemd QT_QPA_PLATFORMTHEME QT_QPA_PLATFORM QT_WAYLAND_DISABLE_WINDOWDECORATION"
-spawn-sh-at-startup "/usr/bin/systemctl --user restart xdg-desktop-portal xdg-desktop-portal-gtk plasma-xdg-desktop-portal-kde 2>/dev/null"
-//
+spawn-at-startup "/usr/bin/niri-startup.sh"
+
 // spawn-sh-at-startup "qdbus org.kde.kwalletd6 /modules/kwalletd6 org.kde.KWallet.open kdewallet 0 login"
 spawn-at-startup "/usr/bin/dms" "run"
 // don't forget to set a kanshi config in ~/.config/kanshi/config

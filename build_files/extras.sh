@@ -24,6 +24,7 @@ install -Z -b -m 644 \
   /usr/share/xdg-desktop-portal/niri-portals.conf
 # include our helpers referenced by niri
 install -Z -m 755 \
+  "$OVERRIDES_ROOT"/usr/bin/niri-startup.sh \
   "$OVERRIDES_ROOT"/usr/bin/chromium-flags.sh \
   "$OVERRIDES_ROOT"/usr/bin/spawn-browser.sh \
   "$OVERRIDES_ROOT"/usr/bin/hyprpicker.sh \
