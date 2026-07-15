@@ -13,7 +13,7 @@ sleep 1
   QT_WAYLAND_DISABLE_WINDOWDECORATION
 
 # 2. Restart portals (which now have the correct environment variables)
-systemctl --user restart xdg-desktop-portal xdg-desktop-portal-gtk plasma-xdg-desktop-portal-kde 2>/dev/null
+systemctl --user restart xdg-desktop-portal{,-gtk,-gnome} plasma-xdg-desktop-portal-kde 2>/dev/null
 
 # 3. Unlock KWallet. We use a login shell context to grab the PAM wallet key.
 if [ -x "/usr/libexec/pam_kwallet_init" ]; then
