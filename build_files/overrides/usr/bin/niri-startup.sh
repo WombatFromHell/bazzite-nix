@@ -4,7 +4,7 @@
 sleep 1
 
 # 1. Import vital display variables to systemd and dbus activation environments
-/usr/bin/dbus-update-activation-environment --systemd \
+dbus-update-activation-environment --systemd \
   WAYLAND_DISPLAY \
   XDG_CURRENT_DESKTOP \
   DISPLAY \
@@ -24,3 +24,6 @@ fi
 if [ -x "/usr/libexec/kf6/polkit-kde-authentication-agent-1" ]; then
   /usr/libexec/kf6/polkit-kde-authentication-agent-1 &
 fi
+
+# do not uncomment the command below unless you're okay with no PAM security for kwallet
+# /usr/bin/qdbus org.kde.kwalletd6 /modules/kwalletd6 org.kde.KWallet.open kdewallet 0 login
