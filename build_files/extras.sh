@@ -12,7 +12,7 @@ dnf5 -y copr enable avengemedia/dms-git &&
     quickshell-git niri dms danksearch dgop fuzzel \
     kanshi cava matugen cups-pk-helper \
     xdg-desktop-portal-kde xdg-desktop-portal-gnome \
-    qt6ct-kde ghostty
+    qt6ct-kde ghostty kdotool
 
 # include hyprpicker so we get a magnifying glass with our color picker
 dnf5 -y copr enable solopasha/hyprland &&
