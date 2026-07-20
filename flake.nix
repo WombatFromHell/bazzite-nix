@@ -2,7 +2,7 @@
   description = "Development environment with Python and pytest";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    nixpkgs.url = "https://flakehub.com/f/DeterminateSystems/nixpkgs-26.05-chilled/0.1";
     flake-utils.url = "github:numtide/flake-utils";
   };
 
