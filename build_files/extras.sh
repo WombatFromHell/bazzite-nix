@@ -1,9 +1,16 @@
 #!/usr/bin/env bash
 
-# bring in some useful tools
+OVERRIDES_ROOT="/ctx/overrides"
+
+# bring in some useful tools from Terra
+# shellcheck disable=SC2140
+dnf5 config-manager setopt "*terra*".exclude=""
 dnf5 -y install --enable-repo=terra \
   rocm-smi \
-  qt5-qttools qt6-qttools tmux gvfs-smb gvfs-fuse
+  qt5-qttools qt6-qttools tmux gvfs-smb gvfs-fuse \
+  gamescope-session-ogui-steam
+# shellcheck disable=SC2140
+dnf5 config-manager setopt "*terra*".exclude="nerd-fonts scx-tools scx-scheds python3-protobuf zlib-devel uupd"
 
 # include niri + DMS and friends from a verified repo
 dnf5 -y copr enable avengemedia/dms-git &&
@@ -19,26 +26,29 @@ dnf5 -y copr enable solopasha/hyprland &&
   dnf5 -y copr disable solopasha/hyprland &&
   dnf5 -y install --enable-repo="*solopasha*" hyprpicker
 
-OVERRIDES_ROOT="/ctx/overrides"
 # use our niri-portals.conf override customized for KDE
-install -Z -b -m 644 \
+install -Z -b -m 0644 \
   "$OVERRIDES_ROOT"/usr/share/xdg-desktop-portal/niri-portals.conf \
   /usr/share/xdg-desktop-portal/niri-portals.conf
 # include our helpers referenced by niri
-install -Z -m 755 \
+install -Z -m 0755 \
   "$OVERRIDES_ROOT"/usr/bin/niri-startup.sh \
   "$OVERRIDES_ROOT"/usr/bin/chromium-flags.sh \
   "$OVERRIDES_ROOT"/usr/bin/spawn-browser.sh \
   "$OVERRIDES_ROOT"/usr/bin/hyprpicker.sh \
   /usr/bin/
 # use our niri config override as well
-install -Z -D -m 644 \
+install -Z -D -m 0644 \
   "$OVERRIDES_ROOT"/etc/niri/config.kdl \
   /etc/niri/config.kdl
 # use our qt6ct override customized for the default Bazzite KDE theme
-install -Z -D -m 644 \
+install -Z -D -m 0644 \
   "$OVERRIDES_ROOT"/etc/xdg/qt6ct/qt6ct.conf \
   /etc/xdg/qt6ct/qt6ct.conf
+# include our 'gamescope-session' env vars
+install -Z -D -m 0644 \
+  "$OVERRIDES_ROOT"/etc/environment.d/99-gamescope-session.conf \
+  /etc/environment.d/99-gamescope-session.conf
 
 # use a workaround to avoid the "white dialog" problem in xwaylandvideobridge
 XWVB_GLOBAL_TGT="/usr/share/applications/org.kde.xwaylandvideobridge.desktop"
@@ -67,19 +77,26 @@ install -Z -m 0644 \
   "$OVERRIDES_ROOT"/usr/share/ublue-os/just/93-bazzite-nix-neovim.just \
   /usr/share/ublue-os/just/
 
-# include our 'urh.pyz' helper
+# include useful helpers
 install -Z -m 0755 \
   "$OVERRIDES_ROOT"/usr/bin/urh.pyz \
-  /usr/bin/urh
-# include our 'nscb.pyz' helper
-install -Z -m 0755 \
   "$OVERRIDES_ROOT"/usr/bin/nscb.pyz \
-  /usr/bin/nscb
-# include our 'gamemode.pyz' helper
-install -Z -m 0755 \
   "$OVERRIDES_ROOT"/usr/bin/gamemode.pyz \
-  /usr/bin/gamemode
-# include our 'protonfetcher.pyz' helper
-install -Z -m 0755 \
   "$OVERRIDES_ROOT"/usr/bin/protonfetcher.pyz \
-  /usr/bin/protonfetcher
+  /usr/bin/
+
+#
+# gamescope-session-steam enablement (with a potential UI focus bug fix)
+#
+# include our 'gamescope-session' env vars
+install -Z -D -m 0644 \
+  "$OVERRIDES_ROOT"/etc/environment.d/99-gamescope-session.conf \
+  /etc/environment.d/99-gamescope-session.conf
+# disable duplicate wayland sessions installed by 'gamescope-session-steam'
+for session in /usr/share/wayland-sessions/{gamepadui-,gamescope-session-}*.desktop; do
+  rm "$session"
+done
+#
+install -Z -m 0755 \
+  "$OVERRIDES_ROOT"/usr/bin/steamos-session-select \
+  /usr/bin/steamos-session-select
