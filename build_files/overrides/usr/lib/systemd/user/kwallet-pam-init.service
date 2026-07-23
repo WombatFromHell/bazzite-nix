@@ -1,0 +1,12 @@
+[Unit]
+Description=Initialize KWallet via PAM key
+PartOf=wayland-session@niri.target
+After=wayland-session@niri.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/pam_kwallet_init
+RemainAfterExit=yes
+
+[Install]
+WantedBy=wayland-session@niri.target

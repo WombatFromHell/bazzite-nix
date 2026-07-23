@@ -5,10 +5,9 @@ OVERRIDES_ROOT="/ctx/overrides"
 # bring in some useful tools from Terra
 # shellcheck disable=SC2140
 dnf5 config-manager setopt "*terra*".exclude=""
-dnf5 -y install --enable-repo=terra \
-  rocm-smi \
-  qt5-qttools qt6-qttools tmux gvfs-smb gvfs-fuse \
-  gamescope-session-ogui-steam
+dnf5 -y install --refresh --enable-repo=terra \
+  rocm-smi uwsm qt5-qttools qt6-qttools \
+  tmux gvfs-smb gvfs-fuse gamescope-session-ogui-steam
 # shellcheck disable=SC2140
 dnf5 config-manager setopt "*terra*".exclude="nerd-fonts scx-tools scx-scheds python3-protobuf zlib-devel uupd"
 
@@ -17,9 +16,8 @@ dnf5 -y copr enable avengemedia/dms-git &&
   dnf5 -y copr disable avengemedia/dms-git &&
   dnf5 -y install --enable-repo="*avengemedia*" \
     quickshell-git niri dms danksearch dgop fuzzel \
-    kanshi cava matugen cups-pk-helper \
-    xdg-desktop-portal-kde xdg-desktop-portal-gnome \
-    qt6ct-kde ghostty kdotool
+    cava matugen cups-pk-helper xdg-desktop-portal-kde \
+    xdg-desktop-portal-gnome qt6ct-kde ghostty
 
 # include hyprpicker so we get a magnifying glass with our color picker
 dnf5 -y copr enable solopasha/hyprland &&
@@ -32,11 +30,27 @@ install -Z -b -m 0644 \
   /usr/share/xdg-desktop-portal/niri-portals.conf
 # include our helpers referenced by niri
 install -Z -m 0755 \
-  "$OVERRIDES_ROOT"/usr/bin/niri-startup.sh \
   "$OVERRIDES_ROOT"/usr/bin/chromium-flags.sh \
   "$OVERRIDES_ROOT"/usr/bin/spawn-browser.sh \
   "$OVERRIDES_ROOT"/usr/bin/hyprpicker.sh \
   /usr/bin/
+# ensure we install a uwsm session variant for niri
+install -Z -D -m 0644 \
+  "$OVERRIDES_ROOT"/usr/share/wayland-sessions/niri-uwsm.desktop \
+  /usr/share/wayland-sessions/
+install -Z -D -m 0644 \
+  "$OVERRIDES_ROOT"/etc/xdg/uwsm/env-niri \
+  /etc/xdg/uwsm/env-niri
+# ship some critical Niri (UWSM) support services as user defaults
+install -Z -D -m 0644 \
+  "$OVERRIDES_ROOT"/usr/lib/systemd/user/*.service \
+  /usr/lib/systemd/user/
+systemctl --global enable \
+  dms-niri-uwsm.service \
+  kwallet-pam-init.service \
+  polkit-kde-agent.service \
+  ibus-daemon-uwsm.service
+systemctl --global disable dms.service
 # use our niri config override as well
 install -Z -D -m 0644 \
   "$OVERRIDES_ROOT"/etc/niri/config.kdl \
@@ -45,10 +59,6 @@ install -Z -D -m 0644 \
 install -Z -D -m 0644 \
   "$OVERRIDES_ROOT"/etc/xdg/qt6ct/qt6ct.conf \
   /etc/xdg/qt6ct/qt6ct.conf
-# include our 'gamescope-session' env vars
-install -Z -D -m 0644 \
-  "$OVERRIDES_ROOT"/etc/environment.d/99-gamescope-session.conf \
-  /etc/environment.d/99-gamescope-session.conf
 
 # use a workaround to avoid the "white dialog" problem in xwaylandvideobridge
 XWVB_GLOBAL_TGT="/usr/share/applications/org.kde.xwaylandvideobridge.desktop"
@@ -100,3 +110,8 @@ done
 install -Z -m 0755 \
   "$OVERRIDES_ROOT"/usr/bin/steamos-session-select \
   /usr/bin/steamos-session-select
+#
+# install an override for 'bluetoothd' for more consistent Bluetooth panel enablement
+install -Z -D -m 0644 \
+  "$OVERRIDES_ROOT"/etc/systemd/system/bluetooth.service.d/override.conf \
+  /etc/systemd/system/bluetooth.service.d/override.conf

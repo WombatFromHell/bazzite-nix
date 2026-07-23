@@ -355,11 +355,11 @@ layer-rule {
     clip-to-geometry true
 }
 
-environment {
-    QT_QPA_PLATFORMTHEME "qt6ct"
-    QT_QPA_PLATFORM "wayland"
-    QT_WAYLAND_DISABLE_WINDOWDECORATION "0"
-}
+// environment {
+//     QT_QPA_PLATFORMTHEME "qt6ct"
+//     QT_QPA_PLATFORM "wayland"
+//     QT_WAYLAND_DISABLE_WINDOWDECORATION "0"
+// }
 
 // Add lines like this to spawn processes at startup.
 // Note that running niri as a session supports xdg-desktop-autostart,
@@ -368,14 +368,6 @@ environment {
 
 // This line starts waybar, a commonly used bar for Wayland compositors.
 // spawn-at-startup "waybar"
-
-// attempt to unlock kwallet automatically on login
-spawn-at-startup "/usr/bin/niri-startup.sh"
-
-// spawn-sh-at-startup "qdbus org.kde.kwalletd6 /modules/kwalletd6 org.kde.KWallet.open kdewallet 0 login"
-spawn-at-startup "/usr/bin/dms" "run"
-// don't forget to set a kanshi config in ~/.config/kanshi/config
-spawn-at-startup "/usr/bin/kanshi"
 
 binds {
     // Keys consist of modifiers separated by + signs, followed by an XKB key name

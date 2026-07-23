@@ -1,0 +1,4 @@
+# niri-specific overrides for qt6ct support under UWSM
+export QT_QPA_PLATFORMTHEME="qt6ct"
+export QT_QPA_PLATFORM="wayland"
+export QT_WAYLAND_DISABLE_WINDOWDECORATION="0"
