@@ -115,3 +115,11 @@ install -Z -m 0755 \
 install -Z -D -m 0644 \
   "$OVERRIDES_ROOT"/etc/systemd/system/bluetooth.service.d/override.conf \
   /etc/systemd/system/bluetooth.service.d/override.conf
+#
+# ensure exiting the gamescope-session doesn't prevent Niri (UWSM) from starting up
+install -Z -D -m 0644 \
+  "$OVERRIDES_ROOT"/etc/systemd/logind.conf.d/kill-user-processes.conf \
+  /etc/systemd/logind.conf.d/kill-user-processes.conf
+install -Z -D -m 0755 \
+  "$OVERRIDES_ROOT"/usr/bin/gamescope-session-plus \
+  /usr/bin/gamescope-session-plus
