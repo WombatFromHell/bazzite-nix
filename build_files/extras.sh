@@ -17,7 +17,7 @@ dnf5 -y copr enable avengemedia/dms-git &&
   dnf5 -y install --enable-repo="*avengemedia*" \
     quickshell-git niri dms danksearch dgop fuzzel \
     cava matugen cups-pk-helper xdg-desktop-portal-kde \
-    xdg-desktop-portal-gnome qt6ct-kde ghostty
+    xdg-desktop-portal-gnome qt6ct-kde ghostty swayidle
 
 # include hyprpicker so we get a magnifying glass with our color picker
 dnf5 -y copr enable solopasha/hyprland &&
@@ -39,8 +39,8 @@ install -Z -D -m 0644 \
   "$OVERRIDES_ROOT"/usr/share/wayland-sessions/niri-uwsm.desktop \
   /usr/share/wayland-sessions/
 install -Z -D -m 0644 \
-  "$OVERRIDES_ROOT"/etc/xdg/uwsm/env-niri \
-  /etc/xdg/uwsm/env-niri
+  "$OVERRIDES_ROOT"/usr/share/uwsm/env-niri \
+  /usr/share/uwsm/env-niri
 # ship some critical Niri (UWSM) support services as user defaults
 install -Z -D -m 0644 \
   "$OVERRIDES_ROOT"/usr/lib/systemd/user/*.service \
@@ -48,17 +48,16 @@ install -Z -D -m 0644 \
 systemctl --global enable \
   dms-niri-uwsm.service \
   kwallet-pam-init.service \
-  polkit-kde-agent.service \
-  ibus-daemon-uwsm.service
-systemctl --global disable dms.service
+  polkit-kde-agent.service
+systemctl --global disable dms.service fumon.service
 # use our niri config override as well
 install -Z -D -m 0644 \
-  "$OVERRIDES_ROOT"/etc/niri/config.kdl \
-  /etc/niri/config.kdl
+  "$OVERRIDES_ROOT"/usr/share/factory/etc/niri/config.kdl \
+  /usr/share/factory/etc/niri/config.kdl
 # use our qt6ct override customized for the default Bazzite KDE theme
 install -Z -D -m 0644 \
-  "$OVERRIDES_ROOT"/etc/xdg/qt6ct/qt6ct.conf \
-  /etc/xdg/qt6ct/qt6ct.conf
+  "$OVERRIDES_ROOT"/usr/share/factory/etc/xdg/qt6ct/qt6ct.conf \
+  /usr/share/factory/etc/xdg/qt6ct/qt6ct.conf
 
 # use a workaround to avoid the "white dialog" problem in xwaylandvideobridge
 XWVB_GLOBAL_TGT="/usr/share/applications/org.kde.xwaylandvideobridge.desktop"
@@ -96,12 +95,12 @@ install -Z -m 0755 \
   /usr/bin/
 
 #
-# gamescope-session-steam enablement (with a potential UI focus bug fix)
+# gamescope-session-steam enablement
 #
-# include our 'gamescope-session' env vars
+# include our global-default 'gamescope-session' env vars
 install -Z -D -m 0644 \
-  "$OVERRIDES_ROOT"/etc/environment.d/99-gamescope-session.conf \
-  /etc/environment.d/99-gamescope-session.conf
+  "$OVERRIDES_ROOT"/usr/lib/environment.d/99-gamescope-session.conf \
+  /usr/lib/environment.d/99-gamescope-session.conf
 # disable duplicate wayland sessions installed by 'gamescope-session-steam'
 for session in /usr/share/wayland-sessions/{gamepadui-,gamescope-session-}*.desktop; do
   rm "$session"
@@ -111,15 +110,14 @@ install -Z -m 0755 \
   "$OVERRIDES_ROOT"/usr/bin/steamos-session-select \
   /usr/bin/steamos-session-select
 #
-# install an override for 'bluetoothd' for more consistent Bluetooth panel enablement
+# install an override for 'bluetoothd' for advanced Bluetooth panel enablement
 install -Z -D -m 0644 \
-  "$OVERRIDES_ROOT"/etc/systemd/system/bluetooth.service.d/override.conf \
-  /etc/systemd/system/bluetooth.service.d/override.conf
+  "$OVERRIDES_ROOT"/usr/lib/systemd/system/bluetooth.service.d/override.conf \
+  /usr/lib/systemd/system/bluetooth.service.d/override.conf
 #
 # ensure exiting the gamescope-session doesn't prevent Niri (UWSM) from starting up
-install -Z -D -m 0644 \
-  "$OVERRIDES_ROOT"/etc/systemd/logind.conf.d/kill-user-processes.conf \
-  /etc/systemd/logind.conf.d/kill-user-processes.conf
+#
+# catch some leftovers the packaged 'gamescope-session-plus' leaves behind
 install -Z -D -m 0755 \
   "$OVERRIDES_ROOT"/usr/bin/gamescope-session-plus \
   /usr/bin/gamescope-session-plus
