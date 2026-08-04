@@ -7,15 +7,17 @@ OVERRIDES_ROOT="/ctx/overrides"
 dnf5 config-manager setopt "*terra*".exclude=""
 dnf5 -y install --refresh --enable-repo=terra \
   rocm-smi uwsm qt5-qttools qt6-qttools \
-  tmux gvfs-smb gvfs-fuse gamescope-session-ogui-steam
+  tmux gvfs-smb gvfs-fuse gamescope-session-steam
 # shellcheck disable=SC2140
 dnf5 config-manager setopt "*terra*".exclude="nerd-fonts scx-tools scx-scheds python3-protobuf zlib-devel uupd"
 
-# include niri + DMS and friends from a verified repo
+# use our pre-built niri-spicy RPM
+dnf5 install -y https://github.com/WombatFromHell/niri-spicy-builder/releases/download/v26.4.0-1/niri-26.4.0-1.x86_64.rpm
+# include DMS and friends from a verified repo
 dnf5 -y copr enable avengemedia/dms-git &&
   dnf5 -y copr disable avengemedia/dms-git &&
   dnf5 -y install --enable-repo="*avengemedia*" \
-    quickshell-git niri dms danksearch dgop fuzzel \
+    quickshell-git dms danksearch dgop fuzzel \
     cava matugen cups-pk-helper xdg-desktop-portal-kde \
     xdg-desktop-portal-gnome qt6ct-kde ghostty swayidle
 
@@ -101,14 +103,6 @@ install -Z -m 0755 \
 install -Z -D -m 0644 \
   "$OVERRIDES_ROOT"/usr/lib/environment.d/99-gamescope-session.conf \
   /usr/lib/environment.d/99-gamescope-session.conf
-# disable duplicate wayland sessions installed by 'gamescope-session-steam'
-for session in /usr/share/wayland-sessions/{gamepadui-,gamescope-session-}*.desktop; do
-  rm "$session"
-done
-#
-install -Z -m 0755 \
-  "$OVERRIDES_ROOT"/usr/bin/steamos-session-select \
-  /usr/bin/steamos-session-select
 #
 # install an override for 'bluetoothd' for advanced Bluetooth panel enablement
 install -Z -D -m 0644 \
