@@ -96,6 +96,11 @@ install -Z -m 0755 \
   "$OVERRIDES_ROOT"/usr/bin/protonfetcher.pyz \
   /usr/bin/
 
+# enable openrgb (flatpak) udev rules
+install -Z -m 0644 \
+  "$OVERRIDES_ROOT"/usr/lib/udev/rules.d/60-openrgb.rules \
+  /usr/lib/udev/rules.d/60-openrgb.rules
+
 #
 # gamescope-session-steam enablement
 #
