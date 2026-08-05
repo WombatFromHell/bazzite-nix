@@ -7,17 +7,16 @@ OVERRIDES_ROOT="/ctx/overrides"
 dnf5 config-manager setopt "*terra*".exclude=""
 dnf5 -y install --refresh --enable-repo=terra \
   rocm-smi uwsm qt5-qttools qt6-qttools \
-  tmux gvfs-smb gvfs-fuse gamescope-session-steam
+  tmux gvfs-smb gvfs-fuse openrgb openrgb-udev-rules \
+  gamescope-session-steam
 # shellcheck disable=SC2140
 dnf5 config-manager setopt "*terra*".exclude="nerd-fonts scx-tools scx-scheds python3-protobuf zlib-devel uupd"
 
-# use our pre-built niri-spicy RPM
-dnf5 install -y https://github.com/WombatFromHell/niri-spicy-builder/releases/download/v26.4.0-1/niri-26.4.0-1.x86_64.rpm
 # include DMS and friends from a verified repo
 dnf5 -y copr enable avengemedia/dms-git &&
   dnf5 -y copr disable avengemedia/dms-git &&
   dnf5 -y install --enable-repo="*avengemedia*" \
-    quickshell-git dms danksearch dgop fuzzel \
+    quickshell-git niri dms danksearch dgop fuzzel \
     cava matugen cups-pk-helper xdg-desktop-portal-kde \
     xdg-desktop-portal-gnome qt6ct-kde ghostty swayidle
 
@@ -95,11 +94,6 @@ install -Z -m 0755 \
   "$OVERRIDES_ROOT"/usr/bin/gamemode.pyz \
   "$OVERRIDES_ROOT"/usr/bin/protonfetcher.pyz \
   /usr/bin/
-
-# enable openrgb (flatpak) udev rules
-install -Z -m 0644 \
-  "$OVERRIDES_ROOT"/usr/lib/udev/rules.d/60-openrgb.rules \
-  /usr/lib/udev/rules.d/60-openrgb.rules
 
 #
 # gamescope-session-steam enablement
