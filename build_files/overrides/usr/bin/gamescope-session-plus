@@ -3,17 +3,27 @@
 CLIENT="$1"
 
 export XDG_SESSION_TYPE=x11
+export XDG_CURRENT_DESKTOP=gamescope
+export XDG_SESSION_DESKTOP=gamescope
 
-dbus-update-activation-environment --systemd DESKTOP_SESSION "$(env | grep ^XDG_ | cut -d = -f 1)"
+# 1. Update D-Bus activation environment cleanly (unquoted expansion or explicit names)
+dbus-update-activation-environment --systemd XDG_SESSION_TYPE XDG_CURRENT_DESKTOP XDG_SESSION_DESKTOP
+
+# 2. Directly import variables into systemd user manager environment
+systemctl --user set-environment \
+  XDG_SESSION_TYPE=x11 \
+  XDG_CURRENT_DESKTOP=gamescope \
+  XDG_SESSION_DESKTOP=gamescope
 
 systemctl --user set-environment XDG_DESKTOP_PORTAL_DIR=""
 systemctl --user unset-environment DISPLAY XAUTHORITY
+systemctl --user restart wireplumber.service
 
 cleanup() {
   systemctl --user stop gamescope-session-plus@"${CLIENT}".service
   systemctl --user stop 'app-gamescope\x2dsession\x2dplus.slice'
   systemctl --user stop graphical-session.target
-  systemctl --user unset-environment XDG_DESKTOP_PORTAL_DIR
+  systemctl --user unset-environment XDG_DESKTOP_PORTAL_DIR XDG_CURRENT_DESKTOP XDG_SESSION_DESKTOP XDG_SESSION_TYPE
 }
 trap cleanup EXIT HUP INT TERM
 
