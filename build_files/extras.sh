@@ -12,11 +12,13 @@ dnf5 -y install --refresh --enable-repo=terra \
 # shellcheck disable=SC2140
 dnf5 config-manager setopt "*terra*".exclude="nerd-fonts scx-tools scx-scheds python3-protobuf zlib-devel uupd"
 
+# use our pre-built niri-spicy RPM
+dnf5 install -y https://github.com/WombatFromHell/niri-spicy-builder/releases/download/v26.04-1.fc44/niri-26.04-1.fc44.x86_64.rpm
 # include DMS and friends from a verified repo
 dnf5 -y copr enable avengemedia/dms-git &&
   dnf5 -y copr disable avengemedia/dms-git &&
   dnf5 -y install --enable-repo="*avengemedia*" \
-    quickshell-git niri dms danksearch dgop fuzzel \
+    quickshell-git dms danksearch dgop fuzzel \
     cava matugen cups-pk-helper xdg-desktop-portal-kde \
     xdg-desktop-portal-gnome qt6ct-kde ghostty swayidle
 
