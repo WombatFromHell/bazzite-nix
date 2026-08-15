@@ -178,20 +178,44 @@ relabel_image() {
 # so downstream steps (build_vm_image, run_vm) can find it by variant tag.
 
 rechunk_image() {
-  local tag="${1:-}"
+  local tag="${1:-latest}"
+  local rechunk_image="quay.io/centos-bootc/centos-bootc:stream10"
+  local from_image="localhost/raw-img"
+  local to_image="localhost/chunked-img:${tag}"
 
+  # Pull the rechunk tool image explicitly
+  if ! sudo podman image exists "$rechunk_image"; then
+    sudo podman pull "$rechunk_image"
+  fi
+
+  # Clean transient state from base image before chunking
+  local container
+  container=$(sudo buildah from "$from_image")
+
+  local mnt
+  mnt=$(sudo buildah mount "$container")
+
+  if [[ -n "$mnt" ]]; then
+    sudo bash -c "rm -rf ${mnt}/run/.* ${mnt}/run/* ${mnt}/tmp/.* ${mnt}/tmp/* 2>/dev/null || true"
+    sudo buildah umount "$container"
+  fi
+
+  sudo buildah commit --identity-label=false --rm "$container" "$from_image"
+
+  # Run bootc-base-imagectl rechunk — no /etc/containers mount needed
+  # Storage driver/options are inherited from shared /var/lib/containers store
   sudo podman run --rm --privileged \
     "${SECURITY_OPTS[@]}" \
     --volume /var/lib/containers:/var/lib/containers \
-    localhost/raw-img \
-    rpm-ostree compose build-chunked-oci \
-    --bootc --max-layers 127 --format-version 2 \
-    --from localhost/raw-img \
-    --output containers-storage:localhost/chunked-img
+    "$rechunk_image" \
+    /usr/libexec/bootc-base-imagectl rechunk \
+    --max-layers 127 \
+    "$from_image" \
+    "$to_image"
 
-  # Tag with the canonical tag so downstream steps find it by variant
-  if [[ -n "$tag" ]]; then
-    sudo podman tag localhost/chunked-img "localhost/chunked-img:${tag}" 2>/dev/null || true
+  # Ensure untagged canonical ref exists for downstream variant resolution
+  if [[ -n "$tag" && "$tag" != "latest" ]]; then
+    sudo podman tag "$to_image" "localhost/chunked-img:latest" 2>/dev/null || true
   fi
 }
 

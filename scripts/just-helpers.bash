@@ -218,18 +218,40 @@ run_rechunk() {
   local image_desc="${4:-Customized Bazzite image with Nix mount support and other sugar}"
   local repo_organization="${5:?repo_organization required}"
   local TAG VARIANT_NAME CANONICAL_TAG
-  local manifest_file="/tmp/bazzite-nix-manifest.json" labels_file="/tmp/bazzite-nix-labels.txt" KERNEL_VERSION FULL_BUILD_DIGEST MANIFEST_PACKAGES
+  local manifest_file="/tmp/bazzite-nix-manifest.json"
+  local labels_file="/tmp/bazzite-nix-labels.txt"
+  local KERNEL_VERSION FULL_BUILD_DIGEST MANIFEST_PACKAGES
 
   # shellcheck disable=SC1090
   source "$JUST_HELPERS_BUILD"
+
+  # Resolve variant metadata and extract image info
   eval "$(resolve_variant "$variant_or_spec" "$variants_config" "$image_name")"
   eval "$(extract_image_info "$manifest_file")"
+
+  # Validate base image exists before attempting rechunk
+  if ! sudo podman image exists localhost/raw-img; then
+    echo "ERROR: Base image 'localhost/raw-img' not found. Run build step first." >&2
+    return 1
+  fi
+
+  # Assemble and apply OCI labels
   assemble_labels \
-    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$image_desc" "$VARIANT_NAME" "$CANONICAL_TAG" \
-    "$repo_organization" "$image_name" "$KERNEL_VERSION" \
-    "$manifest_file" "$labels_file"
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    "$image_desc" \
+    "$VARIANT_NAME" \
+    "$CANONICAL_TAG" \
+    "$repo_organization" \
+    "$image_name" \
+    "$KERNEL_VERSION" \
+    "$manifest_file" \
+    "$labels_file"
   relabel_image "$labels_file" "$KERNEL_VERSION"
+
+  # Rechunk using updated helper (now uses positional arg + explicit BIB pull)
   rechunk_image "$TAG"
+
+  # Extract final reference for downstream consumption
   eval "$(extract_final_ref)"
 }
 

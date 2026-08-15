@@ -17,7 +17,7 @@ dnf5 install -y https://github.com/WombatFromHell/niri-spicy-builder/releases/do
 # include DMS and friends from a verified repo
 dnf5 -y copr enable avengemedia/dms-git &&
   dnf5 -y copr disable avengemedia/dms-git &&
-  dnf5 -y install --enable-repo="*avengemedia*" \
+  dnf5 -y install --refresh --enable-repo="*avengemedia*" \
     quickshell-git dms danksearch dgop fuzzel \
     cava matugen cups-pk-helper xdg-desktop-portal-kde \
     xdg-desktop-portal-gnome qt6ct-kde ghostty swayidle
@@ -25,7 +25,7 @@ dnf5 -y copr enable avengemedia/dms-git &&
 # include hyprpicker so we get a magnifying glass with our color picker
 dnf5 -y copr enable solopasha/hyprland &&
   dnf5 -y copr disable solopasha/hyprland &&
-  dnf5 -y install --enable-repo="*solopasha*" hyprpicker
+  dnf5 -y install --refresh --enable-repo="*solopasha*" hyprpicker
 
 # use our niri-portals.conf override customized for KDE
 install -Z -b -m 0644 \
