@@ -44,7 +44,8 @@ dnf5 -y copr enable avengemedia/dms-git &&
   dnf5_retry -y install --refresh --enable-repo="*avengemedia*" \
     quickshell-git dms danksearch dgop fuzzel \
     cava matugen cups-pk-helper xdg-desktop-portal-kde \
-    xdg-desktop-portal-gnome qt6ct-kde ghostty swayidle
+    xdg-desktop-portal-gnome qt6ct-kde ghostty swayidle \
+    xwayland-satellite
 
 # include hyprpicker so we get a magnifying glass with our color picker
 dnf5 -y copr enable solopasha/hyprland &&
