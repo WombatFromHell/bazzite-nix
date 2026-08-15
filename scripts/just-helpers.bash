@@ -235,7 +235,10 @@ run_rechunk() {
     return 1
   fi
 
-  # Assemble and apply OCI labels
+  # Rechunk using updated helper (now uses positional arg + explicit BIB pull)
+  rechunk_image "$TAG"
+
+  # Assemble and apply OCI labels (post-rechunk, targets chunked-img)
   assemble_labels \
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     "$image_desc" \
@@ -246,10 +249,7 @@ run_rechunk() {
     "$KERNEL_VERSION" \
     "$manifest_file" \
     "$labels_file"
-  relabel_image "$labels_file" "$KERNEL_VERSION"
-
-  # Rechunk using updated helper (now uses positional arg + explicit BIB pull)
-  rechunk_image "$TAG"
+  relabel_image "$labels_file" "$KERNEL_VERSION" "$TAG"
 
   # Extract final reference for downstream consumption
   eval "$(extract_final_ref)"
@@ -306,8 +306,8 @@ run_pipeline() {
       "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$image_desc" "$VARIANT_NAME" "$CANONICAL_TAG" \
       "$repo_organization" "$image_name" "$KERNEL_VERSION" \
       "$manifest_file" "$labels_file"
-    relabel_image "$labels_file" "$KERNEL_VERSION"
     rechunk_image "$TAG"
+    relabel_image "$labels_file" "$KERNEL_VERSION" "$TAG"
   fi
 
   echo "=== Phase 4: Extract final ref ==="
@@ -805,8 +805,8 @@ build_all_variants() {
         "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$image_desc" "$variant" "$canonical_tag" \
         "$repo_organization" "$image_name" "$KERNEL_VERSION" \
         "$manifest_file" "$labels_file"
-      relabel_image "$labels_file" "$KERNEL_VERSION"
       rechunk_image "$tag"
+      relabel_image "$labels_file" "$KERNEL_VERSION" "$tag"
     fi
     eval "$(extract_final_ref)"
 

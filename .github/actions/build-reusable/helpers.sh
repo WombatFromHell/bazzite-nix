@@ -129,15 +129,16 @@ assemble_labels() {
 }
 
 # ── relabel image ───────────────────────────────────────────────────────────
-# Usage: relabel_image <labels_file> <kernel_version>
+# Usage: relabel_image <labels_file> <kernel_version> <tag>
 # Clears inherited labels, then applies new labels and annotations via buildah.
+# Operates on the rechunked image, not raw-img.
 
 relabel_image() {
   local labels_file="$1"
   local kernel_version="$2"
-  local image="raw-img"
+  local tag="${3:-latest}"
+  local image="chunked-img:${tag}"
 
-  # Read new labels from file
   local labels=()
   while IFS= read -r line; do
     [ -n "$line" ] && labels+=("--label" "$line" "--annotation" "$line")
@@ -145,18 +146,9 @@ relabel_image() {
 
   echo "Relabeling ${image}: creating working container..."
   local container
-  container=$(sudo buildah from "$image")
-
-  echo "Relabeling ${image}: cleaning transient /run and /tmp state..."
-  local mnt
-  mnt=$(sudo buildah mount "$container")
-  if [[ -n "$mnt" ]]; then
-    sudo bash -c "rm -rf ${mnt}/run/.* ${mnt}/run/* ${mnt}/tmp/.* ${mnt}/tmp/* 2>/dev/null || true"
-    sudo buildah umount "$container"
-  fi
+  container=$(sudo buildah from "localhost/${image}")
 
   echo "Relabeling ${image}: applying ${#labels[@]} labels and annotations..."
-  # Clear inherited labels, apply new labels/annotations, commit in one pass
   sudo buildah config --label "-" \
     "${labels[@]}" \
     --label "ostree.bootc=true" \
@@ -166,7 +158,7 @@ relabel_image() {
     "$container"
 
   echo "Relabeling ${image}: committing updated image..."
-  sudo buildah commit --identity-label=false --rm "$container" "$image"
+  sudo buildah commit --identity-label=false --rm "$container" "localhost/${image}"
   echo "Relabeling ${image}: done"
 }
 

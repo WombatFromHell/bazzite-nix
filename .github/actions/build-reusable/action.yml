@@ -122,19 +122,20 @@ runs:
           "${{ runner.temp }}/labels.txt"
         echo "labels_file=${{ runner.temp }}/labels.txt" >> "$GITHUB_OUTPUT"
 
+    - name: Rechunk image
+      shell: bash
+      run: |
+        source "${{ github.action_path }}/helpers.sh"
+        rechunk_image "${{ inputs.variant }}"
+
     - name: Relabel image
       shell: bash
       run: |
         source "${{ github.action_path }}/helpers.sh"
         relabel_image \
           "${{ steps.assemble_labels.outputs.labels_file }}" \
-          "${{ steps.labels.outputs.kernel_version }}"
-
-    - name: Rechunk image
-      shell: bash
-      run: |
-        source "${{ github.action_path }}/helpers.sh"
-        rechunk_image "${{ inputs.variant }}"
+          "${{ steps.labels.outputs.kernel_version }}" \
+          "${{ inputs.canonical_tag }}"
 
     - name: Extract final image ref
       id: final_ref
