@@ -228,95 +228,20 @@ def get_tags(target: str, manifests: dict[str, Any]):
     return tags[-2], tags[-1]
 
 
-def extract_rpm_from_purl(purl: str) -> tuple[str, str] | None:
-    """Extract package name and version from RPM purl.
+def get_packages(
+    manifests: dict[str, Any],
+) -> tuple[dict[str, dict[str, str]], dict[str, dict[str, str]]]:
+    """Get packages from ostree.rechunk.info manifest labels.
 
-    Purl format: pkg:rpm/<namespace>/<name>@<version>?<qualifiers>
-    Example: pkg:rpm/bazzite/kernel@6.19.8-200.ogc?arch=x86_64&distro=bazzite-43
-    Returns: (name, version) or None if not a valid RPM purl
+    Returns (current_packages, prev_packages) where each is {image_name: {pkg: version}}.
     """
-    if not purl.startswith("pkg:rpm/"):
-        return None
+    current_packages: dict[str, dict[str, str]] = {}
+    prev_packages: dict[str, dict[str, str]] = {}
 
-    # Remove pkg:rpm/<namespace>/ prefix
-    parts = purl[len("pkg:rpm/") :].split("/", 1)
-    if len(parts) != 2:
-        return None
+    for img, manifest in manifests.items():
+        current_packages[img] = _get_packages_from_manifest(manifest, img)
 
-    # Get the name@version?qualifiers part
-    name_version = parts[1]
-
-    # Split at @ to get name and version+qualifiers
-    if "@" not in name_version:
-        return None
-
-    name, version_qual = name_version.split("@", 1)
-
-    # Remove qualifiers (everything after ?)
-    version = version_qual.split("?", 1)[0]
-
-    # URL decode common characters
-    name = name.replace("%2B", "+").replace("%2b", "+")
-    name = name.replace("%2F", "/").replace("%2f", "/")
-
-    if not name or not version:
-        return None
-
-    return name, version
-
-
-def get_packages_from_sbom(sbom_path: str) -> dict[str, str]:
-    """Extract packages from SBOM files.
-
-    Supports CycloneDX format (components array with purl field).
-    Only extracts RPM packages by filtering on purl scheme.
-    """
-    packages = {}
-    try:
-        with open(sbom_path) as f:
-            data = json.load(f)
-    except FileNotFoundError:
-        print(f"Warning: SBOM file not found: {sbom_path}")
-        return {}
-    except json.JSONDecodeError as e:
-        print(f"Warning: Invalid JSON in SBOM file {sbom_path}: {e}")
-        return {}
-    except Exception as e:
-        print(f"Warning: Failed to parse SBOM {sbom_path}: {type(e).__name__}: {e}")
-        return {}
-
-    # CycloneDX has "bomFormat" field
-    bom_format = data.get("bomFormat", "")
-    if bom_format == "CycloneDX":
-        components = data.get("components", [])
-        if components:
-            for comp in components:
-                purl = comp.get("purl", "")
-                if purl and purl.startswith("pkg:rpm/"):
-                    result = extract_rpm_from_purl(purl)
-                    if result:
-                        name, version = result
-                        packages[name] = version
-            if packages:
-                print(
-                    f" Parsed {len(packages)} packages from SBOM (CycloneDX RPM purl format)"
-                )
-                return packages
-
-    # Fallback: Syft native format (v1.x artifacts array)
-    artifacts = data.get("artifacts", [])
-    if artifacts:
-        for artifact in artifacts:
-            name = artifact.get("name", "")
-            version = artifact.get("version", "")
-            if name and version:
-                packages[name] = version
-        if packages:
-            print(f" Parsed {len(packages)} packages from SBOM (artifacts format)")
-            return packages
-
-    print(f"Warning: No packages found in SBOM file: {sbom_path}")
-    return packages
+    return current_packages, prev_packages
 
 
 def _get_packages_from_manifest(
@@ -365,56 +290,6 @@ def _get_packages_from_manifest(
         return {}
 
 
-def get_packages(
-    manifests: dict[str, Any],
-    sbom_path: str | None = None,
-    prev_sbom_path: str | None = None,
-) -> tuple[dict[str, dict[str, str]], dict[str, dict[str, str]]]:
-    """Get packages from SBOM files or manifest labels.
-
-    Returns (current_packages, prev_packages) where each is {image_name: {pkg: version}}.
-
-    Prefers SBOM CycloneDX data when available, falls back to ostree.rechunk.info labels.
-    """
-    current_packages: dict[str, dict[str, str]] = {}
-    prev_packages: dict[str, dict[str, str]] = {}
-
-    sbom_available = False
-
-    if sbom_path:
-        sbom_pkgs = get_packages_from_sbom(sbom_path)
-        if sbom_pkgs:
-            print(f"Using SBOM for current packages: {sbom_path}")
-            for img in manifests.keys():
-                current_packages[img] = sbom_pkgs.copy()
-            sbom_available = True
-        else:
-            print(f"::warning::SBOM file not found or empty: {sbom_path}")
-            print(f"::warning::Falling back to manifest labels for current packages")
-
-    if prev_sbom_path:
-        prev_sbom_pkgs = get_packages_from_sbom(prev_sbom_path)
-        if prev_sbom_pkgs:
-            print(f"Using SBOM for previous packages: {prev_sbom_path}")
-            for img in manifests.keys():
-                prev_packages[img] = prev_sbom_pkgs.copy()
-        else:
-            print(f"::warning::Previous SBOM file not found or empty: {prev_sbom_path}")
-            print(f"::warning::Falling back to manifest labels for previous packages")
-
-    if not sbom_available:
-        print("Using manifest labels for current packages")
-        for img, manifest in manifests.items():
-            current_packages[img] = _get_packages_from_manifest(manifest, img)
-
-    if not prev_packages:
-        print("Using manifest labels for previous packages")
-        for img, manifest in manifests.items():
-            prev_packages[img] = _get_packages_from_manifest(manifest, img)
-
-    return current_packages, prev_packages
-
-
 def is_nvidia(img: str, lts: bool):
     if lts:
         return "nvidia" in img and "nvidia-open" not in img and "deck-nvidia" not in img
@@ -426,16 +301,14 @@ def get_package_groups(
     prev: dict[str, Any],
     manifests: dict[str, Any],
     variants: list[dict[str, Any]] | None = None,
-    sbom_path: str | None = None,
-    prev_sbom_path: str | None = None,
 ):
     if variants is None:
         variants = load_variants()
     common = set()
     others = {k: set() for k in OTHER_NAMES.keys()}
 
-    npkg, _ = get_packages(manifests, sbom_path, prev_sbom_path)
-    ppkg, _ = get_packages(prev, None, None)
+    npkg, _ = get_packages(manifests)
+    ppkg, _ = get_packages(prev)
 
     keys = set(npkg.keys()) | set(ppkg.keys())
     pkg = defaultdict(set)
@@ -490,9 +363,9 @@ def get_package_groups(
     return sorted(common), {k: sorted(v) for k, v in others.items()}
 
 
-def get_versions(manifests: dict[str, Any], sbom_path: str | None = None):
+def get_versions(manifests: dict[str, Any]):
     versions = {}
-    pkgs, _ = get_packages(manifests, sbom_path, None)
+    pkgs, _ = get_packages(manifests)
     for img, img_pkgs in pkgs.items():
         for pkg, v in img_pkgs.items():
             if is_nvidia(img, lts=True) and "nvidia" in pkg:
@@ -602,14 +475,10 @@ def generate_changelog(
     prev_manifests,
     manifests,
     variants: list[dict[str, Any]],
-    sbom_path: str | None = None,
-    prev_sbom_path: str | None = None,
 ):
-    common, others = get_package_groups(
-        prev_manifests, manifests, variants, sbom_path, prev_sbom_path
-    )
-    versions = get_versions(manifests, sbom_path)
-    prev_versions = get_versions(prev_manifests, prev_sbom_path)
+    common, others = get_package_groups(prev_manifests, manifests, variants)
+    versions = get_versions(manifests)
+    prev_versions = get_versions(prev_manifests)
 
     prev, curr = get_tags(target, manifests)
 
@@ -715,8 +584,6 @@ def main():
     parser.add_argument(
         "--variants-config", help="Path to variants.json configuration file"
     )
-    parser.add_argument("--sbom", help="Path to current SBOM JSON file")
-    parser.add_argument("--prev-sbom", help="Path to previous SBOM JSON file")
     args = parser.parse_args()
 
     # Remove refs/tags, refs/heads, refs/remotes e.g.
@@ -732,11 +599,6 @@ def main():
     print(f"Previous tag: {prev}")
     print(f" Current tag: {curr}")
 
-    if args.sbom:
-        print(f"Using SBOM for current: {args.sbom}")
-    if args.prev_sbom:
-        print(f"Using SBOM for previous: {args.prev_sbom}")
-
     prev_manifests = get_manifests(prev, variants)
     title, changelog = generate_changelog(
         args.handwritten,
@@ -746,8 +608,6 @@ def main():
         prev_manifests,
         manifests,
         variants,
-        args.sbom,
-        args.prev_sbom,
     )
 
     print(f"Changelog:\n# {title}\n{changelog}")

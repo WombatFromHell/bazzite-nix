@@ -4,10 +4,6 @@
 
 set -euo pipefail
 
-# Source shared SBOM helpers
-# shellcheck source=../sbom-reusable/helpers.sh
-source "${BASH_SOURCE[0]%/*}/../sbom-reusable/helpers.sh"
-
 # SECURITY_OPTS array — set to --security-opt label=disable when running
 # outside CI. CI runners (Ubuntu) don't enforce SELinux, so the flag is
 # unnecessary there. Use as: sudo podman run --rm "${SECURITY_OPTS[@]}" ...
@@ -49,23 +45,21 @@ build_image() {
 extract_image_info() {
   local manifest_output_file="${1:-}"
 
-  local kernel_version
-  kernel_version=$(sudo podman run --rm "${SECURITY_OPTS[@]}" localhost/raw-img \
-    cat /usr/share/ublue-os/kernel-version) || {
-    echo "::error::Failed to read /usr/share/ublue-os/kernel-version from image"
+  # Read kernel version and package manifest in a single container run.
+  # manifest.json is single-line (jq -c) so the first line is the kernel,
+  # the remainder is the manifest.
+  local output kernel_version manifest
+  output=$(sudo podman run --rm "${SECURITY_OPTS[@]}" localhost/raw-img \
+    sh -c 'cat /usr/share/ublue-os/kernel-version; echo; cat /usr/share/ublue-os/manifest.json') || {
+    echo "::error::Failed to read image metadata from image"
     exit 1
   }
+  kernel_version=${output%%$'\n'*}
+  manifest=${output#*$'\n'}
   if [ -z "$kernel_version" ]; then
     echo "::error::/usr/share/ublue-os/kernel-version is empty in image"
     exit 1
   fi
-
-  local manifest
-  manifest=$(sudo podman run --rm "${SECURITY_OPTS[@]}" localhost/raw-img \
-    cat /usr/share/ublue-os/manifest.json 2>/dev/null) || {
-    echo "::error::/usr/share/ublue-os/manifest.json not found in image"
-    exit 1
-  }
 
   # Validate the manifest contains a valid {"packages": {...}} object
   local packages_count
@@ -143,32 +137,23 @@ relabel_image() {
   local kernel_version="$2"
   local image="raw-img"
 
-  # Clear all inherited labels from base image
-  local container
-  container=$(sudo buildah from "$image")
-  sudo buildah config --label "-" "$container"
-  sudo buildah commit --identity-label=false --rm "$container" "$image"
-
   # Read new labels from file
   local labels=()
   while IFS= read -r line; do
-    [ -n "$line" ] && labels+=("$line")
+    [ -n "$line" ] && labels+=("--label" "$line" "--annotation" "$line")
   done <"${labels_file}"
 
-  # Add bootc/ostree labels
-  labels+=(
-    "ostree.bootc=true"
-    "ostree.linux=${kernel_version}"
-  )
-
-  # Apply labels and annotations via buildah
+  # Clear inherited labels, apply new labels/annotations, commit in one pass
+  local container
   container=$(sudo buildah from "$image")
-  for line in "${labels[@]}"; do
-    [ -z "$line" ] && continue
-    sudo buildah config --label "$line" --annotation "$line" "$container"
-  done
+  sudo buildah config --label "-" \
+    "${labels[@]}" \
+    --label "ostree.bootc=true" \
+    --label "ostree.linux=${kernel_version}" \
+    --annotation "ostree.bootc=true" \
+    --annotation "ostree.linux=${kernel_version}" \
+    "$container"
   sudo buildah commit --identity-label=false --rm "$container" "$image"
-
 }
 
 # ── rechunk image ───────────────────────────────────────────────────────────
@@ -227,13 +212,12 @@ rechunk_image() {
 
 extract_final_ref() {
   local source_ref="containers-storage:localhost/chunked-img"
-  sudo skopeo inspect "$source_ref" >/dev/null || {
+
+  local full_digest
+  full_digest=$(sudo skopeo inspect --format '{{.Digest}}' "$source_ref") || {
     echo "::error::Expected containers-storage image ${source_ref} not found after rechunk"
     exit 1
   }
-
-  local full_digest
-  full_digest=$(sudo skopeo inspect "$source_ref" | jq -r '.Digest // empty')
   if [ -z "$full_digest" ]; then
     echo "::error::Could not determine image digest from ${source_ref}"
     exit 1
@@ -251,63 +235,4 @@ extract_final_ref() {
     echo "FULL_BUILD_DIGEST=${full_digest}"
     echo "BUILD_DIGEST=${short_digest}"
   fi
-}
-
-# ── generate and embed SBOM ─────────────────────────────────────────────────
-# Usage: generate_and_embed_sbom <image_name> <version_tag> <syft_cmd>
-# Generates an SBOM from the image filesystem and embeds it at /usr/share/ublue-os/sbom.json
-
-generate_and_embed_sbom() {
-  local image="$1"
-  local version_tag="$2"
-  local syft_cmd="$3"
-
-  echo "::group::Generate and embed SBOM"
-
-  local mount_point
-  mount_point=$(sudo podman image mount "${image}") || {
-    echo "::error::Failed to mount image ${image}"
-    exit 1
-  }
-
-  local sbom_dir
-  sbom_dir="$(mktemp -d)"
-  local sbom_file="${sbom_dir}/sbom.json"
-
-  echo "  Mounted image at: ${mount_point}"
-
-  generate_sbom_to_file \
-    "dir:${mount_point}" \
-    "${version_tag}" \
-    "${syft_cmd}" \
-    "${sbom_file}"
-
-  sudo podman image unmount "${image}"
-
-  echo "  Injecting SBOM into image layer with buildah..."
-
-  local container
-  container=$(sudo buildah from "${SECURITY_OPTS[@]}" --name "sbom-working-${RANDOM}" "${image}") || {
-    echo "::error::Failed to create buildah container from ${image}"
-    rm -rf "${sbom_dir}"
-    exit 1
-  }
-
-  mount_point=$(sudo buildah mount "${container}") || {
-    echo "::error::Failed to mount buildah container"
-    sudo buildah rm "${container}"
-    rm -rf "${sbom_dir}"
-    exit 1
-  }
-
-  sudo mkdir -p "${mount_point}/usr/share/ublue-os"
-  sudo cp "${sbom_file}" "${mount_point}/usr/share/ublue-os/sbom.json"
-  sudo buildah unmount "${container}"
-  sudo buildah commit --quiet "${container}" "${image}"
-  sudo buildah rm "${container}"
-
-  rm -rf "${sbom_dir}"
-
-  echo "::endgroup::"
-  echo "✓ SBOM embedded successfully at /usr/share/ublue-os/sbom.json"
 }

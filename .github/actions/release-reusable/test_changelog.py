@@ -16,8 +16,6 @@ from changelog import (
     get_images,
     is_nvidia,
     get_packages,
-    get_packages_from_sbom,
-    extract_rpm_from_purl,
     get_versions,
     get_tags,
     get_package_groups,
@@ -39,33 +37,10 @@ from changelog import (
 _VARIANTS = load_variants()
 IMAGES = [f"bazzite-nix{v.get('suffix', '')}" for v in _VARIANTS]
 
-# Sample SBOM directory and paths
-SAMPLES_DIR = os.path.join(os.path.dirname(__file__), "sbom-samples")
-SAMPLE_SBOM_PATH = os.path.join(SAMPLES_DIR, "sample-sbom.json")
-SAMPLE_SBOM_PREV_PATH = os.path.join(SAMPLES_DIR, "sample-sbom-prev.json")
-
 
 # =============================================================================
 # Fixtures
 # =============================================================================
-
-
-@pytest.fixture
-def sbom_sample():
-    """Load the sample SBOM file for testing."""
-    if not os.path.exists(SAMPLE_SBOM_PATH):
-        pytest.skip(f"Sample SBOM not found at {SAMPLE_SBOM_PATH}")
-    with open(SAMPLE_SBOM_PATH) as f:
-        return json.load(f)
-
-
-@pytest.fixture
-def sbom_prev_sample():
-    """Load the previous version sample SBOM file for testing."""
-    if not os.path.exists(SAMPLE_SBOM_PREV_PATH):
-        pytest.skip(f"Previous sample SBOM not found at {SAMPLE_SBOM_PREV_PATH}")
-    with open(SAMPLE_SBOM_PREV_PATH) as f:
-        return json.load(f)
 
 
 # =============================================================================
@@ -331,7 +306,7 @@ class TestIsNvidia:
 
 
 class TestGetPackages:
-    """Tests for get_packages function that extracts packages from manifest labels or SBOM."""
+    """Tests for get_packages function that extracts packages from manifest labels."""
 
     def test_extracts_from_ostree_rechunk_info_label(self):
         packages = {"kernel": "6.19.8-200.ogc", "mesa": "26.0.3-1"}
@@ -403,202 +378,6 @@ class TestGetPackages:
         }
         result, _ = get_packages(manifests)
         assert result["bazzite"] == {}
-
-    def test_sbom_takes_precedence_over_labels(self):
-        """When SBOM path is provided, SBOM data should be used instead of labels."""
-        packages = {"kernel": "6.19.8-sbom"}
-        manifests = {"bazzite": make_manifest_with_packages({"kernel": "6.19.8-label"})}
-
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            json.dump({"artifacts": [{"name": "kernel", "version": "6.19.8-sbom"}]}, f)
-            sbom_path = f.name
-
-        try:
-            result, _ = get_packages(manifests, sbom_path=sbom_path)
-            assert result["bazzite"]["kernel"] == "6.19.8-sbom"
-        finally:
-            os.unlink(sbom_path)
-
-    def test_applies_sbom_packages_to_all_images(self):
-        """SBOM packages should be applied to all images in manifests."""
-        manifests = {
-            "bazzite": make_manifest_with_packages({"pkg-a": "1.0"}),
-            "bazzite-deck": make_manifest_with_packages({"pkg-b": "2.0"}),
-        }
-
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            json.dump(
-                {
-                    "artifacts": [
-                        {"name": "kernel", "version": "6.19.8"},
-                        {"name": "mesa", "version": "26.0.3"},
-                    ]
-                },
-                f,
-            )
-            sbom_path = f.name
-
-        try:
-            result, _ = get_packages(manifests, sbom_path=sbom_path)
-            # SBOM packages should be applied to all images
-            assert result["bazzite"]["kernel"] == "6.19.8"
-            assert result["bazzite"]["mesa"] == "26.0.3"
-            assert result["bazzite-deck"]["kernel"] == "6.19.8"
-            assert result["bazzite-deck"]["mesa"] == "26.0.3"
-        finally:
-            os.unlink(sbom_path)
-
-
-class TestGetPackagesFromSbom:
-    """Tests for get_packages_from_sbom function that parses CycloneDX JSON."""
-
-    def test_parses_cyclonedx_format(self):
-        """Test parsing CycloneDX format with components array and purl filtering."""
-        cyclonedx_data = {
-            "bomFormat": "CycloneDX",
-            "components": [
-                {
-                    "name": "kernel",
-                    "version": "6.19.8-200.ogc",
-                    "purl": "pkg:rpm/bazzite/kernel@6.19.8-200.ogc?arch=x86_64",
-                    "type": "library",
-                },
-                {
-                    "name": "mesa",
-                    "version": "26.0.3-1",
-                    "purl": "pkg:rpm/bazzite/mesa@26.0.3-1?arch=x86_64",
-                    "type": "library",
-                },
-            ],
-        }
-
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            json.dump(cyclonedx_data, f)
-            sbom_path = f.name
-
-        try:
-            result = get_packages_from_sbom(sbom_path)
-            assert result["kernel"] == "6.19.8-200.ogc"
-            assert result["mesa"] == "26.0.3-1"
-            assert len(result) == 2
-        finally:
-            os.unlink(sbom_path)
-
-    def test_returns_empty_dict_for_missing_file(self):
-        """Should return empty dict for non-existent SBOM file."""
-        result = get_packages_from_sbom("/nonexistent/path/sbom.json")
-        assert result == {}
-
-    def test_returns_empty_dict_for_invalid_json(self):
-        """Should return empty dict for invalid JSON."""
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            f.write("not valid json")
-            sbom_path = f.name
-
-        try:
-            result = get_packages_from_sbom(sbom_path)
-            assert result == {}
-        finally:
-            os.unlink(sbom_path)
-
-    def test_returns_empty_dict_for_empty_components(self):
-        """Should return empty dict when no components found."""
-        cyclonedx_data = {"bomFormat": "CycloneDX", "components": []}
-
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            json.dump(cyclonedx_data, f)
-            sbom_path = f.name
-
-        try:
-            result = get_packages_from_sbom(sbom_path)
-            assert result == {}
-        finally:
-            os.unlink(sbom_path)
-
-
-class TestExtractRpmFromPurl:
-    """Tests for extract_rpm_from_purl function."""
-
-    @pytest.mark.parametrize(
-        "purl,expected_name,expected_version",
-        [
-            (
-                "pkg:rpm/bazzite/kernel@6.19.8-200.ogc",
-                "kernel",
-                "6.19.8-200.ogc",
-            ),
-            (
-                "pkg:rpm/fedora/mesa@26.0.3-1?arch=x86_64",
-                "mesa",
-                "26.0.3-1",
-            ),
-            (
-                "pkg:rpm/bazzite/gcc-c%2B%2B@14.2.1-1?arch=x86_64",
-                "gcc-c++",
-                "14.2.1-1",
-            ),
-            (
-                "pkg:rpm/bazzite/perl-Text-Tabs%2BWrap@2024.1-1",
-                "perl-Text-Tabs+Wrap",
-                "2024.1-1",
-            ),
-            (
-                "pkg:rpm/centos/openssl@3.0.1-5.el9?arch=aarch64&distro=centos-9",
-                "openssl",
-                "3.0.1-5.el9",
-            ),
-        ],
-        ids=[
-            "basic",
-            "with_qualifiers",
-            "url_encoded_plus",
-            "url_encoded_plus_lower",
-            "complex_qualifiers",
-        ],
-    )
-    def test_extracts_name_and_version(self, purl, expected_name, expected_version):
-        result = extract_rpm_from_purl(purl)
-        assert result is not None
-        name, version = result
-        assert name == expected_name
-        assert version == expected_version
-
-    @pytest.mark.parametrize(
-        "purl",
-        [
-            "pkg:golang/github.com/example/module@v1.2.3",
-            "pkg:npm/some-package@1.0.0",
-            "pkg:oci/registry/image@sha256:abc123",
-            "pkg:deb/ubuntu/package@1.0",
-        ],
-        ids=["golang", "npm", "oci", "deb"],
-    )
-    def test_returns_none_for_non_rpm_schemes(self, purl):
-        result = extract_rpm_from_purl(purl)
-        assert result is None
-
-    @pytest.mark.parametrize(
-        "invalid_purl",
-        [
-            "",
-            "pkg:rpm/",
-            "pkg:rpm/namespace",
-            "pkg:rpm/namespace/",
-            "not-a-purl",
-            "pkg:rpm/namespace/name-without-at",
-        ],
-        ids=[
-            "empty",
-            "no_namespace",
-            "no_name",
-            "empty_name",
-            "invalid_format",
-            "no_version_separator",
-        ],
-    )
-    def test_returns_none_for_invalid_purls(self, invalid_purl):
-        result = extract_rpm_from_purl(invalid_purl)
-        assert result is None
 
 
 # =============================================================================
@@ -703,21 +482,6 @@ class TestGetVersions:
         assert result["pkg-a"] == "1.0"
         assert result["pkg-b"] == "2.0"
         assert result["pkg-c"] == "3.0"
-
-    def test_uses_sbom_when_provided(self):
-        """When sbom_path is provided, should use SBOM packages."""
-        manifests = {"bazzite": make_manifest_with_packages({"label-pkg": "1.0"})}
-
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            json.dump({"artifacts": [{"name": "sbom-pkg", "version": "2.0"}]}, f)
-            sbom_path = f.name
-
-        try:
-            result = get_versions(manifests, sbom_path=sbom_path)
-            # SBOM package should be in result
-            assert result["sbom-pkg"] == "2.0"
-        finally:
-            os.unlink(sbom_path)
 
 
 # =============================================================================
@@ -957,36 +721,6 @@ class TestGetPackageGroups:
         common, others = get_package_groups({}, manifests, multi_image_variants)
         assert common == []
         assert all(v == [] for v in others.values())
-
-    def test_uses_sbom_when_provided(self, multi_image_variants, multi_image_names):
-        """When sbom_path is provided, should use SBOM packages instead of manifest labels."""
-        # Manifests have label-pkg, SBOM has sbom-pkg
-        manifests = {
-            img: make_manifest_with_packages({"label-pkg": "1.0"})
-            for img in multi_image_names
-        }
-
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            json.dump(
-                {
-                    "artifacts": [
-                        {"name": "sbom-pkg", "version": "2.0"},
-                        {"name": "common-sbom", "version": "3.0"},
-                    ]
-                },
-                f,
-            )
-            sbom_path = f.name
-
-        try:
-            common, others = get_package_groups(
-                {}, manifests, multi_image_variants, sbom_path=sbom_path
-            )
-            # SBOM packages should be found
-            assert "sbom-pkg" in common
-            assert "common-sbom" in common
-        finally:
-            os.unlink(sbom_path)
 
 
 # =============================================================================
@@ -1590,76 +1324,14 @@ class TestVersionHandlingIntegration:
         )
         assert result == ""
 
-    def test_sbom_packages_used_for_changelog(self):
-        """Verify SBOM packages can be used for changelog generation."""
-        # Create SBOM with non-blacklisted packages
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            json.dump(
-                {
-                    "artifacts": [
-                        {"name": "gamescope-session", "version": "137.7c5ebe99-1"},
-                        {"name": "inputplumber", "version": "0.75.2-1"},
-                        {"name": "custom-package", "version": "2.0.0"},
-                    ]
-                },
-                f,
-            )
-            sbom_path = f.name
-
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            json.dump(
-                {
-                    "artifacts": [
-                        {"name": "gamescope-session", "version": "136.402bfb81-1"},
-                        {"name": "inputplumber", "version": "0.75.1-1"},
-                        {"name": "custom-package", "version": "1.0.0"},
-                    ]
-                },
-                f,
-            )
-            prev_sbom_path = f.name
-
-        try:
-            manifests = {"bazzite": make_manifest_with_packages({})}
-            prev_manifests = {"bazzite": make_manifest_with_packages({})}
-
-            # Get versions from SBOM
-            curr_versions = get_versions(manifests, sbom_path=sbom_path)
-            prev_versions = get_versions(prev_manifests, sbom_path=prev_sbom_path)
-
-            # Verify SBOM data was used
-            assert curr_versions["gamescope-session"] == "137.7c5ebe99-1"
-            assert curr_versions["custom-package"] == "2.0.0"
-            assert prev_versions["gamescope-session"] == "136.402bfb81-1"
-            assert prev_versions["custom-package"] == "1.0.0"
-
-            # Calculate changes
-            result = calculate_changes(
-                ["gamescope-session", "inputplumber", "custom-package"],
-                prev_versions,
-                curr_versions,
-            )
-
-            # All packages should show as changed
-            assert "🔄" in result
-            assert "gamescope-session" in result
-            assert "inputplumber" in result
-            assert "custom-package" in result
-
-        finally:
-            os.unlink(sbom_path)
-            os.unlink(prev_sbom_path)
-
-    def test_sbom_fallback_to_labels(self):
-        """Verify fallback to labels when SBOM is not available."""
-        # Create manifests with packages but no SBOM
+    def test_labels_used_for_versions(self):
+        """Verify package versions come from manifest labels."""
         manifests = {
             "bazzite": make_manifest_with_packages(
                 {"kernel": "6.19.8", "mesa": "26.0.3"}
             )
         }
 
-        # Get versions without SBOM (should use labels)
         versions = get_versions(manifests)
 
         assert versions["kernel"] == "6.19.8"
@@ -1675,184 +1347,7 @@ class TestVersionHandlingIntegration:
         assert isinstance(result, tuple)
         assert len(result) == 2
 
-        # Both elements should have packages populated (from manifests when no SBOM provided)
+        # Both elements should be a tuple (current packages only; no previous source)
         current, prev = result
         assert current["bazzite"]["kernel"] == "6.19.8"
-        assert prev["bazzite"]["kernel"] == "6.19.8"
-
-
-# =============================================================================
-# Integration Tests using real sample SBOM files
-# =============================================================================
-
-
-class TestRealSbomSamples:
-    """Integration tests using real Syft-generated sample SBOM files."""
-
-    def test_sample_sbom_files_exist(self):
-        """Verify sample SBOM files exist in sbom-samples directory."""
-        assert os.path.exists(SAMPLE_SBOM_PATH), (
-            f"Sample SBOM not found at {SAMPLE_SBOM_PATH}"
-        )
-        assert os.path.exists(SAMPLE_SBOM_PREV_PATH), (
-            f"Prev sample SBOM not found at {SAMPLE_SBOM_PREV_PATH}"
-        )
-
-    def test_sample_sbom_contains_packages(self, sbom_sample):
-        """Verify sample SBOM contains expected CycloneDX package structure."""
-        assert "bomFormat" in sbom_sample
-        assert sbom_sample["bomFormat"] == "CycloneDX"
-        assert "components" in sbom_sample
-        assert len(sbom_sample["components"]) > 0
-        # Verify first component has required fields
-        first = sbom_sample["components"][0]
-        assert "name" in first
-        assert "version" in first
-        assert "purl" in first
-
-    def test_parse_real_sbom_format(self, sbom_sample):
-        """Verify get_packages_from_sbom can parse real CycloneDX SBOM output."""
-        packages = get_packages_from_sbom(SAMPLE_SBOM_PATH)
-        assert len(packages) > 0
-        # Note: Some packages may have duplicate names (e.g., LCEVCdec appears twice)
-        # so unique package count may be less than component count
-        assert len(packages) <= len(sbom_sample["components"])
-        # Verify first package matches (purl version, not component version field)
-        first_comp = sbom_sample["components"][0]
-        # The purl version is what gets extracted (may differ from version field for epoch packages)
-        purl = first_comp["purl"]
-        at_idx = purl.index("@")
-        q_idx = purl.index("?", at_idx)
-        purl_version = purl[at_idx + 1 : q_idx]
-        assert packages[first_comp["name"]] == purl_version
-
-    def test_real_sbom_package_count(self):
-        """Verify sample SBOM has expected number of unique packages."""
-        packages = get_packages_from_sbom(SAMPLE_SBOM_PATH)
-        # Some packages may have duplicate names (multi-arch), so count <= component count
-        assert len(packages) <= 54, (
-            f"Expected <= 54 unique packages, got {len(packages)}"
-        )
-        assert len(packages) >= 40, (
-            f"Expected >= 40 unique packages, got {len(packages)}"
-        )
-
-    def test_detect_changes_from_sample_sboms(self, sbom_sample, sbom_prev_sample):
-        """Test changelog generation with real sample SBOMs."""
-        # Get packages from both SBOMs
-        curr_pkgs = get_packages_from_sbom(SAMPLE_SBOM_PATH)
-        prev_pkgs = get_packages_from_sbom(SAMPLE_SBOM_PREV_PATH)
-
-        # Verify we have packages
-        assert len(curr_pkgs) > 0
-        assert len(prev_pkgs) > 0
-
-        # Find changed packages
-        changed = []
-        for name in set(curr_pkgs.keys()) | set(prev_pkgs.keys()):
-            if name in curr_pkgs and name in prev_pkgs:
-                if curr_pkgs[name] != prev_pkgs[name]:
-                    changed.append(name)
-
-        # Our sample files have 2 changes: 7zip and Judy
-        assert len(changed) >= 2, (
-            f"Expected at least 2 changed packages, got {len(changed)}"
-        )
-        assert "7zip" in changed, "7zip should be in changed packages"
-        assert "Judy" in changed, "Judy should be in changed packages"
-
-    def test_changelog_generation_with_real_sbom(self, sbom_sample, sbom_prev_sample):
-        """Test full changelog generation flow with real SBOM samples."""
-        # Create manifests for testing
-        manifests = {"bazzite": make_manifest_with_packages({})}
-
-        # Get versions from SBOMs
-        curr_versions = get_versions(manifests, sbom_path=SAMPLE_SBOM_PATH)
-        prev_versions = get_versions(manifests, sbom_path=SAMPLE_SBOM_PREV_PATH)
-
-        # Verify versions were extracted
-        assert len(curr_versions) > 0
-        assert len(prev_versions) > 0
-
-        # Find all packages in both versions
-        all_pkgs = list(set(curr_versions.keys()) | set(prev_versions.keys()))
-
-        # Calculate changes
-        result = calculate_changes(all_pkgs, prev_versions, curr_versions)
-
-        # Verify changes were detected
-        assert len(result) > 0, "Expected changelog to have content"
-
-        # Verify specific packages changed
-        assert "7zip" in result, "7zip change should be in changelog"
-        # Note: FEDORA_PATTERN strips .fcXX suffix, so versions are like "24.09-1" not "24.09-1.fc43"
-        assert "24.09-1" in result, "Previous version (stripped) should be in changelog"
-        assert "25.01-1" in result, "Current version (stripped) should be in changelog"
-
-    def test_sample_sbom_known_packages(self, sbom_sample):
-        """Verify sample SBOM contains expected known packages."""
-        packages = get_packages_from_sbom(SAMPLE_SBOM_PATH)
-
-        # Verify we have some expected RPM packages (from real syft output)
-        expected_packages = ["7zip", "7zip-standalone"]
-        for pkg in expected_packages:
-            assert pkg in packages, f"Expected to find {pkg} in sample SBOM"
-
-        # Verify version format matches Syft output
-        assert packages["7zip"] == "25.01-1.fc43"
-
-    def test_sample_sbom_versions_match_components(self, sbom_sample):
-        """Verify version extraction matches component purl data exactly."""
-        packages = get_packages_from_sbom(SAMPLE_SBOM_PATH)
-
-        for comp in sbom_sample["components"]:
-            name = comp["name"]
-            purl = comp["purl"]
-            # Extract version from purl (this is what get_packages_from_sbom uses)
-            at_idx = purl.index("@")
-            q_idx = purl.index("?", at_idx)
-            purl_version = purl[at_idx + 1 : q_idx]
-            assert name in packages, f"Package {name} not found in extracted packages"
-            assert packages[name] == purl_version, (
-                f"Version mismatch for {name}: {packages[name]} != {purl_version}"
-            )
-
-    def test_sample_prev_sbom_differences(self, sbom_sample, sbom_prev_sample):
-        """Verify previous sample SBOM has expected differences."""
-        curr_pkgs = get_packages_from_sbom(SAMPLE_SBOM_PATH)
-        prev_pkgs = get_packages_from_sbom(SAMPLE_SBOM_PREV_PATH)
-
-        # 7zip should have different versions
-        assert curr_pkgs["7zip"] == "25.01-1.fc43"
-        assert prev_pkgs["7zip"] == "24.09-1.fc43"
-        assert curr_pkgs["7zip"] != prev_pkgs["7zip"]
-
-        # Judy should have different versions
-        assert curr_pkgs["Judy"] == "1.0.5-42.fc43"
-        assert prev_pkgs["Judy"] == "1.0.5-41.fc43"
-        assert curr_pkgs["Judy"] != prev_pkgs["Judy"]
-
-        # Packages that changed between prev and current (explicitly verified above)
-        changed = {
-            "7zip",
-            "Judy",
-            "bazaar",
-            "plasma-desktop",
-            "terra-gamescope",
-            "kernel",
-            "mesa-filesystem",
-            "bash",
-            "coreutils",
-            "cairo",
-        }
-        # All other packages should have the same version
-        for name in curr_pkgs:
-            if name not in changed:
-                assert curr_pkgs.get(name) == prev_pkgs.get(name), (
-                    f"Unexpected difference for {name}: {curr_pkgs.get(name)} != {prev_pkgs.get(name)}"
-                )
-        for name in curr_pkgs:
-            if name not in changed:
-                assert curr_pkgs.get(name) == prev_pkgs.get(name), (
-                    f"Unexpected difference for {name}: {curr_pkgs.get(name)} != {prev_pkgs.get(name)}"
-                )
+        assert prev == {}

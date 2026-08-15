@@ -949,39 +949,3 @@ run_vm_raw() {
   run_vm "$TARGET_IMAGE" "$TAG" "raw" "image.toml" "$output_dir" \
     "$force_pull" "$clean" "$oci_output_dir" "$cache_dir" "$bib_image"
 }
-
-# ── SBOM Verification ─────────────────────────────────────────────────────────
-
-# Verify deployed image against remote SBOM attestation
-# Usage: verify_sbom [--verbose] [--json] [--image ghcr.io/owner/repo:tag]
-verify_sbom() {
-  local verbose=""
-  local json_output=""
-  local image_arg=""
-
-  while [[ $# -gt 0 ]]; do
-    case "$1" in
-    --verbose | -v)
-      verbose="--verbose"
-      set -x
-      shift
-      ;;
-    --json | -j)
-      json_output="--json"
-      shift
-      ;;
-    --image | -i)
-      image_arg="--image $2"
-      shift 2
-      ;;
-    *)
-      shift
-      ;;
-    esac
-  done
-
-  local script_dir
-  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-
-  bash "${script_dir}/verify-ostree-sbom.sh" "$verbose" "$json_output" "$image_arg"
-}

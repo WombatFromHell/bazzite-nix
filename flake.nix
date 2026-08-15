@@ -27,7 +27,6 @@
           python3Packages.pytest-mock
           shellcheck
           shfmt
-          syft
         ];
 
         shellHook = ''

@@ -117,23 +117,6 @@ skopeo_copy_with_retry() {
     "${src}" "${dst}"
 }
 
-# ── digest verification ─────────────────────────────────────────────────────
-
-verify_digest() {
-  local ref="$1"
-  local expected="$2"
-  local actual
-  actual=$(sudo skopeo inspect \
-    --authfile /tmp/skopeo-auth/auth.json \
-    --format='{{.Digest}}' \
-    "docker://${ref}" 2>/dev/null || true)
-  if [[ "$actual" != "$expected" ]]; then
-    echo "::error::Digest mismatch — expected ${expected}, got ${actual}" >&2
-    return 1
-  fi
-  echo "  ✓ digest verified: ${actual}" >&2
-}
-
 # ── push image and additional tags ──────────────────────────────────────────
 # Usage: push_image_with_tags <source_ref> <tags_csv> <base_img>
 # Writes to stderr (logs/groups); prints to stdout for $GITHUB_OUTPUT:
@@ -155,7 +138,7 @@ push_image_with_tags() {
     "docker://${base_img}:${TAGS_ARR[0]}"
   echo "::endgroup::" >&2
 
-  echo "::group::Inspect + verify primary digest" >&2
+  echo "::group::Inspect primary digest" >&2
   local remote_digest
   remote_digest=$(sudo skopeo inspect \
     --authfile /tmp/skopeo-auth/auth.json \
@@ -167,8 +150,6 @@ push_image_with_tags() {
       echo "::error::inspect returned empty digest" >&2
       return 1
     }
-
-  verify_digest "${base_img}:${TAGS_ARR[0]}" "$remote_digest" >&2
 
   local short_digest="${remote_digest#sha256:}"
   local remote_digest_ref="${base_img}@${remote_digest}"
