@@ -159,6 +159,12 @@ relabel_image() {
 
   echo "Relabeling ${image}: committing updated image..."
   sudo buildah commit --identity-label=false --rm "$container" "localhost/${image}"
+
+  # Ensure untagged canonical ref exists for downstream digest extraction
+  if [[ -n "$tag" && "$tag" != "latest" ]]; then
+    sudo podman tag "localhost/${image}" "localhost/chunked-img:latest" 2>/dev/null || true
+  fi
+
   echo "Relabeling ${image}: done"
 }
 

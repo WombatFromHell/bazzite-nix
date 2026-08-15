@@ -135,7 +135,7 @@ runs:
         relabel_image \
           "${{ steps.assemble_labels.outputs.labels_file }}" \
           "${{ steps.labels.outputs.kernel_version }}" \
-          "${{ inputs.canonical_tag }}"
+          "${{ inputs.variant }}"
 
     - name: Extract final image ref
       id: final_ref
