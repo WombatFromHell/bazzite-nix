@@ -2,10 +2,34 @@
 
 OVERRIDES_ROOT="/ctx/overrides"
 
+# Retry dnf5, clearing the metadata cache between attempts. Mirror metadata
+# checksum mismatches (repomd.xml out of sync) are transient; the cache clean
+# forces a fresh fetch that resolves to a synced mirror. Fails hard if the
+# package is genuinely unavailable.
+# Usage: dnf5_retry <dnf5 args...>
+dnf5_retry() {
+  local attempts=3 attempt=1
+  until dnf5 "$@"; do
+    if [[ $attempt -ge $attempts ]]; then
+      return 1
+    fi
+    echo "dnf5 failed (attempt ${attempt}/${attempts}); cleaning metadata and retrying..." >&2
+    dnf5 clean all 2>/dev/null || true
+    sleep $((attempt * 10))
+    attempt=$((attempt + 1))
+  done
+}
+
 # bring in some useful tools from Terra
 # shellcheck disable=SC2140
 dnf5 config-manager setopt "*terra*".exclude=""
-dnf5 -y install --refresh --enable-repo=terra \
+# Terra's metalink checksums have been unreliable; bypass it and use the origin
+# baseurl so dnf trusts the fetched repomd.xml as authoritative. Scoped to the
+# `terra` section only (not `terra-source`) via config-manager, which edits
+# the correct section directly instead of blindly sed/grep/echo-ing the file.
+dnf5 config-manager setopt terra.metalink=
+dnf5 config-manager setopt terra.baseurl="https://repos.fyralabs.com/terra\$releasever"
+dnf5_retry -y install --refresh --enable-repo=terra \
   rocm-smi uwsm qt5-qttools qt6-qttools \
   tmux gvfs-smb gvfs-fuse openrgb openrgb-udev-rules \
   gamescope-session-steam
@@ -13,11 +37,11 @@ dnf5 -y install --refresh --enable-repo=terra \
 dnf5 config-manager setopt "*terra*".exclude="nerd-fonts scx-tools scx-scheds python3-protobuf zlib-devel uupd"
 
 # use our pre-built niri-spicy RPM
-dnf5 install -y https://github.com/WombatFromHell/niri-spicy-builder/releases/download/v26.04-1.fc44/niri-26.04-1.fc44.x86_64.rpm
+dnf5_retry install -y https://github.com/WombatFromHell/niri-spicy-builder/releases/download/v26.04-1.fc44/niri-26.04-1.fc44.x86_64.rpm
 # include DMS and friends from a verified repo
 dnf5 -y copr enable avengemedia/dms-git &&
   dnf5 -y copr disable avengemedia/dms-git &&
-  dnf5 -y install --refresh --enable-repo="*avengemedia*" \
+  dnf5_retry -y install --refresh --enable-repo="*avengemedia*" \
     quickshell-git dms danksearch dgop fuzzel \
     cava matugen cups-pk-helper xdg-desktop-portal-kde \
     xdg-desktop-portal-gnome qt6ct-kde ghostty swayidle
@@ -25,7 +49,7 @@ dnf5 -y copr enable avengemedia/dms-git &&
 # include hyprpicker so we get a magnifying glass with our color picker
 dnf5 -y copr enable solopasha/hyprland &&
   dnf5 -y copr disable solopasha/hyprland &&
-  dnf5 -y install --refresh --enable-repo="*solopasha*" hyprpicker
+  dnf5_retry -y install --refresh --enable-repo="*solopasha*" hyprpicker
 
 # use our niri-portals.conf override customized for KDE
 install -Z -b -m 0644 \
