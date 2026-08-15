@@ -48,6 +48,7 @@ EOF
         printf 'buildah %s\n' "$*" >>"$LOG"
         case "$1" in
         from) echo "container-123" ;;
+        mount) echo "/tmp/relabel-mnt" ;;
         esac
     }
 export -f buildah

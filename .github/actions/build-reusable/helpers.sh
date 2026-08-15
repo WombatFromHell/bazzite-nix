@@ -143,9 +143,20 @@ relabel_image() {
     [ -n "$line" ] && labels+=("--label" "$line" "--annotation" "$line")
   done <"${labels_file}"
 
-  # Clear inherited labels, apply new labels/annotations, commit in one pass
+  echo "Relabeling ${image}: creating working container..."
   local container
   container=$(sudo buildah from "$image")
+
+  echo "Relabeling ${image}: cleaning transient /run and /tmp state..."
+  local mnt
+  mnt=$(sudo buildah mount "$container")
+  if [[ -n "$mnt" ]]; then
+    sudo bash -c "rm -rf ${mnt}/run/.* ${mnt}/run/* ${mnt}/tmp/.* ${mnt}/tmp/* 2>/dev/null || true"
+    sudo buildah umount "$container"
+  fi
+
+  echo "Relabeling ${image}: applying ${#labels[@]} labels and annotations..."
+  # Clear inherited labels, apply new labels/annotations, commit in one pass
   sudo buildah config --label "-" \
     "${labels[@]}" \
     --label "ostree.bootc=true" \
@@ -153,7 +164,10 @@ relabel_image() {
     --annotation "ostree.bootc=true" \
     --annotation "ostree.linux=${kernel_version}" \
     "$container"
+
+  echo "Relabeling ${image}: committing updated image..."
   sudo buildah commit --identity-label=false --rm "$container" "$image"
+  echo "Relabeling ${image}: done"
 }
 
 # ── rechunk image ───────────────────────────────────────────────────────────
@@ -173,21 +187,8 @@ rechunk_image() {
     sudo podman pull "$rechunk_image"
   fi
 
-  # Clean transient state from base image before chunking
-  local container
-  container=$(sudo buildah from "$from_image")
-
-  local mnt
-  mnt=$(sudo buildah mount "$container")
-
-  if [[ -n "$mnt" ]]; then
-    sudo bash -c "rm -rf ${mnt}/run/.* ${mnt}/run/* ${mnt}/tmp/.* ${mnt}/tmp/* 2>/dev/null || true"
-    sudo buildah umount "$container"
-  fi
-
-  sudo buildah commit --identity-label=false --rm "$container" "$from_image"
-
-  # Run bootc-base-imagectl rechunk — no /etc/containers mount needed
+  # Run bootc-base-imagectl rechunk — transient /run and /tmp state was
+  # already cleaned and labels applied in relabel_image
   # Storage driver/options are inherited from shared /var/lib/containers store
   sudo podman run --rm --privileged \
     "${SECURITY_OPTS[@]}" \
