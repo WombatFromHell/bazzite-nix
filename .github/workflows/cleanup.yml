@@ -2,8 +2,7 @@ name: Clean Old Images
 
 on:
   schedule:
-    - cron: "0 3 1 * *" # Runs at 03:00 UTC on the 1st of every month
-    - cron: "0 3 1,15 * *" # Runs at 03:00 UTC on the 1st and 15th of every month
+    - cron: "42 22 2,16 * *" # Runs at 22:42 UTC on the 2nd and 16th of every month
   workflow_dispatch:
     inputs:
       dry_run:
@@ -24,7 +23,7 @@ jobs:
   # PHASE 0: Prepare — Build matrix of packages to process
   # ──────────────────────────────────────────────────────────────────────
   prepare:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     outputs:
       packages: ${{ steps.variants.outputs.packages }}
       owner_type: ${{ steps.detect_owner.outputs.owner_type }}
@@ -100,7 +99,7 @@ jobs:
   # ──────────────────────────────────────────────────────────────────────
   cleanup-images:
     needs: [prepare]
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     strategy:
       fail-fast: false
       matrix:

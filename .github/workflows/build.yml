@@ -2,7 +2,7 @@ name: Build Custom Image
 
 on:
   schedule:
-    - cron: "0 0 1,15 * *" # Runs at 00:00 UTC on the 1st and 15th of every month
+    - cron: "42 18 29,14 * *" # Runs at 18:42 UTC on the 29th and 14th of every month
   workflow_dispatch:
     inputs:
       force_build:
@@ -35,7 +35,7 @@ concurrency:
 
 jobs:
   check_and_aggregate:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     outputs:
       variants_to_build: ${{ steps.check.outputs.variants_to_build }}
       any_builds_needed: ${{ steps.check.outputs.any_builds_needed }}
@@ -72,7 +72,7 @@ jobs:
     needs: check_and_aggregate
     if: needs.check_and_aggregate.outputs.any_builds_needed == 'true'
     name: Build & Push ${{ matrix.variant_data.variant }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     strategy:
       fail-fast: false
       matrix:
@@ -123,7 +123,7 @@ jobs:
   collect_build_results:
     needs: [check_and_aggregate, build_push]
     if: needs.check_and_aggregate.outputs.any_builds_needed == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     outputs:
       successful_variants: ${{ steps.collect.outputs.successful_variants }}
       any_successful: ${{ steps.collect.outputs.any_successful }}
@@ -164,7 +164,7 @@ jobs:
       needs.collect_build_results.outputs.any_successful == 'true' &&
       (github.event.inputs.generate_release == 'true' || github.event_name == 'schedule')
     name: Generate Release ${{ matrix.variant.variant }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     permissions:
       contents: write
 
