@@ -193,7 +193,7 @@ rechunk_image() {
     --volume /var/lib/containers:/var/lib/containers \
     "$rechunk_image" \
     /usr/libexec/bootc-base-imagectl rechunk \
-    --max-layers 127 \
+    --max-layers 64 \
     "$from_image" \
     "$to_image"
 
