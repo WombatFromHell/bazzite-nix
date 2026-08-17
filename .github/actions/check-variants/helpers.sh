@@ -209,10 +209,14 @@ resolve_variant() {
     canonical="${BASH_REMATCH[1]}"
   fi
 
-  tags_csv=$(generate_tags "$tag" "$canonical" "$latest" "$tags_json" "$digest")
+  # Use the variant's config name as the branch — not $tag, which for variants
+  # like "testing" is the base image's dated suffix (e.g. "testing-44.20260814"),
+  # not a plain branch name. This mirrors check-variants.sh, which passes the
+  # variant .name into compute_canonical_tag/generate_tags.
+  tags_csv=$(generate_tags "$spec" "$canonical" "$latest" "$tags_json" "$digest")
 
   echo "TARGET_IMAGE=\"localhost/$image_name_resolved\""
-  echo "TAG=\"${tag}\""
+  echo "TAG=\"${spec}\""
   echo "BASE_IMAGE=\"${base_image}\""
   echo "BUILD_SCRIPT=\"${build_script}\""
   echo "VARIANT_NAME=\"${spec}\""

@@ -13,6 +13,12 @@ set -euo pipefail
 # Can be overridden via environment: JUST_HELPERS_BUILD=/path/to/helpers.sh
 readonly JUST_HELPERS_BUILD="${JUST_HELPERS_BUILD:-.github/actions/build-reusable/helpers.sh}"
 
+# Path to variant-resolution helpers (resolve_variant lives here, not duplicated)
+# Can be overridden via environment: CHECK_VARIANTS_HELPERS=/path/to/helpers.sh
+readonly CHECK_VARIANTS_HELPERS="${CHECK_VARIANTS_HELPERS:-.github/actions/check-variants/helpers.sh}"
+# shellcheck disable=SC1090
+source "$CHECK_VARIANTS_HELPERS"
+
 # ── Clean functions ─────────────────────────────────────────────────────────
 
 # Clean root filesystem build artifacts
@@ -314,95 +320,6 @@ run_pipeline() {
   echo "  Source ref   : $SOURCE_REF"
   echo "  Full digest  : $FULL_BUILD_DIGEST"
   echo "  Short digest : $BUILD_DIGEST"
-}
-
-# ── Variant resolution ──────────────────────────────────────────────────────
-# Resolve a variant name from variants.json into shell variable assignments
-# Usage: eval "$(resolve_variant "testing" ".github/variants.json" "bazzite-nix")"
-resolve_variant() {
-  local variant_or_spec="${1:?variant_or_spec required}"
-  local variants_config="${2:-.github/variants.json}"
-  local image_name="${3:-bazzite-nix}"
-  local check_helpers="${CHECK_VARIANTS_HELPERS:-.github/actions/check-variants/helpers.sh}"
-  local spec row base_image build_script suffix image_name_resolved tag canonical
-  local latest tags_json tags_csv digest
-
-  # shellcheck disable=SC1090
-  source "$check_helpers"
-
-  spec="$variant_or_spec"
-
-  # If it looks like an explicit image:tag or image ref, pass it through unchanged
-  if [[ "$spec" == *"/"* ]] || [[ "$spec" == *":"* ]]; then
-    tag="${spec##*:}"
-    build_script=$(jq -r --arg bi "$spec" '
-            .variants[] | select(.base_image == $bi and (.disabled // false) == false)
-            | (.build_script // "build.sh")
-        ' "$variants_config" | head -1)
-    [[ -z "$build_script" ]] && build_script="build.sh"
-    canonical=$(skopeo inspect "docker://${spec}" 2>/dev/null |
-      jq -r '.Labels["org.opencontainers.image.version"] // empty' ||
-      true)
-    [[ -z "$canonical" || "$canonical" == "null" ]] && canonical="$tag"
-    digest=$(skopeo inspect "docker://${spec}" 2>/dev/null |
-      jq -r '.Digest // empty' | sed 's/sha256://' || true)
-    # No variants.json entry to source a tags template from — single-tag fallback,
-    # $tag is genuinely the branch here since there's no config .name to prefer
-    tags_csv="$tag"
-    echo "TARGET_IMAGE=\"localhost/$image_name\""
-    echo "TAG=\"$tag\""
-    echo "BASE_IMAGE=\"$spec\""
-    echo "BUILD_SCRIPT=\"$build_script\""
-    echo "VARIANT_NAME=\"$tag\""
-    echo "CANONICAL_TAG=\"$canonical\""
-    echo "TAGS=\"$tags_csv\""
-    return 0
-  fi
-
-  # Look up variant by name
-  row=$(jq -r --arg n "$spec" '
-        .variants[]
-        | select(.name == $n and (.disabled // false) == false)
-    ' "$variants_config")
-  if [[ -z "$row" ]]; then
-    echo "ERROR: Unknown or disabled variant: $spec" >&2
-    echo "Available variants:" >&2
-    jq -r '.variants[] | select((.disabled // false) == false) | "  " + .name' "$variants_config" >&2
-    return 1
-  fi
-
-  base_image=$(echo "$row" | jq -r '.base_image')
-  build_script=$(echo "$row" | jq -r '.build_script // "build.sh"')
-  suffix=$(echo "$row" | jq -r '.suffix // ""')
-  latest=$(echo "$row" | jq -r '.latest // false')
-  tags_json=$(echo "$row" | jq -c '.tags // empty')
-  image_name_resolved="$image_name${suffix}"
-  tag="${base_image##*:}"
-
-  local inspect_json
-  inspect_json=$(skopeo inspect "docker://${base_image}" 2>/dev/null) || true
-  canonical=$(echo "$inspect_json" | jq -r '.Labels["org.opencontainers.image.version"] // empty' 2>/dev/null || true)
-  [[ -z "$canonical" || "$canonical" == "null" ]] && canonical="$tag"
-  digest=$(echo "$inspect_json" | jq -r '.Digest // empty' 2>/dev/null | sed 's/sha256://' || true)
-
-  # Strip branch prefix from canonical the same way compute_canonical_tag does
-  if [[ "$canonical" =~ ^[a-zA-Z]+-([0-9].*)$ ]]; then
-    canonical="${BASH_REMATCH[1]}"
-  fi
-
-  # Use the variant's config name as the branch — not $tag, which for variants
-  # like "testing" is the base image's dated suffix (e.g. "testing-44.20260814"),
-  # not a plain branch name. This mirrors check-variants.sh, which already
-  # passes $variant (the config .name) into compute_canonical_tag/generate_tags.
-  tags_csv=$(generate_tags "$spec" "$canonical" "$latest" "$tags_json" "$digest")
-
-  echo "TARGET_IMAGE=\"localhost/$image_name_resolved\""
-  echo "TAG=\"${spec}\""
-  echo "BASE_IMAGE=\"${base_image}\""
-  echo "BUILD_SCRIPT=\"${build_script}\""
-  echo "VARIANT_NAME=\"${spec}\""
-  echo "CANONICAL_TAG=\"$canonical\""
-  echo "TAGS=\"$tags_csv\""
 }
 
 # ── VM image building ───────────────────────────────────────────────────────

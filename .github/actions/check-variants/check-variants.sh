@@ -139,15 +139,15 @@ for ((i = 0; i < variant_count; i++)); do
   output_image="${REPO}${suffix}"
   prefix="${REGISTRY}/${output_image}"
 
-  # Compute canonical tag, passing base_image_tag as branch for accurate collision checks.
-  read -r canonical collision_detected <<<"$(compute_canonical_tag "$parent_version" "$prefix" "$FORCE_BUILD" "$base_image_tag")"
+  # Compute canonical tag, passing the variant name as branch for accurate collision checks.
+  read -r canonical collision_detected <<<"$(compute_canonical_tag "$parent_version" "$prefix" "$FORCE_BUILD" "$variant")"
 
   # Generate tags (pass digest so {sha256} placeholders can resolve)
-  tags=$(generate_tags "$base_image_tag" "$canonical" "$latest" "$tags_json" "$digest")
+  tags=$(generate_tags "$variant" "$canonical" "$latest" "$tags_json" "$digest")
 
   # Find previous build reference for rechunk
   prev_ref=""
-  if prev_ref=$(find_prev_ref "$prefix" "$base_image_tag" "$canonical" "$tags_json"); then
+  if prev_ref=$(find_prev_ref "$prefix" "$variant" "$canonical" "$tags_json"); then
     echo "::debug::Found previous build: ${prev_ref}" >&2
   else
     echo "::debug::No previous build found for ${prefix}" >&2
