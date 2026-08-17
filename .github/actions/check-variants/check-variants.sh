@@ -143,7 +143,7 @@ for ((i = 0; i < variant_count; i++)); do
   read -r canonical collision_detected <<<"$(compute_canonical_tag "$parent_version" "$prefix" "$FORCE_BUILD" "$variant")"
 
   # Generate tags (pass digest so {sha256} placeholders can resolve)
-  tags=$(generate_tags "$variant" "$canonical" "$latest" "$tags_json" "$digest")
+  tags=$(generate_tags "$variant" "$canonical" "$latest" "$tags_json" "")
 
   # Find previous build reference for rechunk
   prev_ref=""

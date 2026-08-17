@@ -205,6 +205,17 @@ rechunk_image() {
   local from_image="localhost/raw-img"
   local to_image="localhost/chunked-img:${anchor_tag}"
 
+  # Clean /run and /tmp to prevent "Too many links" errors during OSTree chunking
+  echo "Cleaning temporary files from ${from_image} before rechunking..."
+  sudo buildah unshare bash -euo pipefail -c '
+    container=$(buildah from '"${from_image}"')
+    mnt=$(buildah mount "$container")
+    rm -rf "$mnt"/run/.* "$mnt"/run/* "$mnt"/tmp/.* "$mnt"/tmp/* || true
+    buildah umount "$container"
+    buildah commit --identity-label=false --rm "$container" '"${from_image}"'
+  '
+
+  echo "Running rpm-ostree compose build-chunked-oci..."
   sudo podman run --rm --privileged \
     "${SECURITY_OPTS[@]}" \
     --volume /var/lib/containers:/var/lib/containers \
