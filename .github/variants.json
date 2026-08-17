@@ -48,7 +48,7 @@
     },
     {
       "name": "testing",
-      "base_image": "ghcr.io/ublue-os/bazzite:testing",
+      "base_image": "ghcr.io/ublue-os/bazzite:testing-44.20260814",
       "latest": true,
       "cleanup": true
     },
