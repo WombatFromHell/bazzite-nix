@@ -98,6 +98,7 @@ jobs:
           build_script: ${{ matrix.variant_data.build_script || 'build.sh' }}
           canonical_tag: ${{ matrix.variant_data.canonical_tag }}
           variant: ${{ matrix.variant_data.variant }}
+          tags: ${{ matrix.variant_data.tags }}
           parent_version: ${{ matrix.variant_data.parent_version }}
           date: ${{ needs.check_and_aggregate.outputs.date }}
           image_desc: ${{ needs.check_and_aggregate.outputs.image_desc }}

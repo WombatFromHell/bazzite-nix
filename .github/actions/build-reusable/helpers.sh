@@ -14,19 +14,22 @@ else
 fi
 
 # ── build image ─────────────────────────────────────────────────────────────
-# Usage: build_image <base_image> <build_script> <canonical_tag> <variant> <containerfile_path>
-# Tags the result as both `raw-img` (default/latest) and `raw-img:<canonical_tag>`.
-
+# Usage: build_image <base_image> <build_script> <canonical_tag> <variant> <containerfile_path> <raw_tag>
+# Tags the result as both `raw-img` (default/latest) and `raw-img:<raw_tag>`.
+# raw_tag should be the variant's full primary versioned tag (e.g. "testing-44.20260814"),
+# not the bare canonical_tag — canonical_tag is branch-stripped and only correct
+# as a label value, not as the registry tag (that's reserved for stable).
 build_image() {
   local base_image="$1"
   local build_script="$2"
   local canonical_tag="$3"
   local variant="$4"
   local containerfile_path="$5"
+  local raw_tag="${6:-$canonical_tag}"
 
   sudo buildah build \
     --tag raw-img \
-    --tag "raw-img:${canonical_tag}" \
+    --tag "raw-img:${raw_tag}" \
     --build-arg BASE_IMAGE="${base_image}" \
     --build-arg BUILD_SCRIPT="${build_script}" \
     --build-arg CANONICAL_TAG="${canonical_tag}" \
@@ -128,16 +131,36 @@ assemble_labels() {
   printf '%s\n' "${labels[@]}" >"${output_file}"
 }
 
+# ── tag variants ────────────────────────────────────────────────────────────
+# Usage: tag_variants <image_name> <canonical_tag>
+# Given a canonical tag "<branch>-<major>.<YYMMDD>.<minor>" (e.g. testing-44.20260814.1),
+# tags the image so downstream lookups can resolve by, in preference order:
+#   full canonical tag -> branch+major -> branch
+# Never touches ":latest" — that stays an explicit, caller-chosen tag.
+tag_variants() {
+  local image="$1" tag="$2"
+  local base="localhost/${image}"
+  if [[ "$tag" =~ ^([A-Za-z0-9]+)-([0-9]+)\.[0-9]{8}\.[0-9]+$ ]]; then
+    local branch="${BASH_REMATCH[1]}" major="${BASH_REMATCH[2]}"
+    sudo podman tag "${base}:${tag}" "${base}:${branch}-${major}" 2>/dev/null || true
+    sudo podman tag "${base}:${tag}" "${base}:${branch}" 2>/dev/null || true
+  fi
+}
+
 # ── relabel image ───────────────────────────────────────────────────────────
-# Usage: relabel_image <labels_file> <kernel_version> <tag>
+# Usage: relabel_image <labels_file> <kernel_version> <comma_separated_tags>
 # Clears inherited labels, then applies new labels and annotations via buildah.
-# Operates on the rechunked image, not raw-img.
+# Operates on the rechunked image (tagged with the first tag), not raw-img.
+# Remaining tags are applied as aliases after commit.
 
 relabel_image() {
   local labels_file="$1"
   local kernel_version="$2"
-  local tag="${3:-latest}"
-  local image="chunked-img:${tag}"
+  local anchor_tag="${3:?anchor_tag required}"
+  local tags_csv="${4:-latest}"
+  local tags=()
+  IFS=',' read -ra tags <<<"$tags_csv"
+  local image="chunked-img:${anchor_tag}"
 
   local labels=()
   while IFS= read -r line; do
@@ -160,57 +183,53 @@ relabel_image() {
   echo "Relabeling ${image}: committing updated image..."
   sudo buildah commit --identity-label=false --rm "$container" "localhost/${image}"
 
-  # Ensure untagged canonical ref exists for downstream digest extraction
-  if [[ -n "$tag" && "$tag" != "latest" ]]; then
-    sudo podman tag "localhost/${image}" "localhost/chunked-img:latest" 2>/dev/null || true
-  fi
-
+  local t
+  for t in "${tags[@]}"; do
+    [[ "$t" == "$anchor_tag" || -z "$t" ]] && continue
+    sudo podman tag "localhost/${image}" "localhost/chunked-img:${t}" 2>/dev/null || true
+  done
   echo "Relabeling ${image}: done"
 }
 
 # ── rechunk image ───────────────────────────────────────────────────────────
-# Usage: rechunk_image [tag]
-# Rechunks raw-img using containers-storage output.
-# If tag is provided, also tags the result as localhost/chunked-img:<tag>
-# so downstream steps (build_vm_image, run_vm) can find it by variant tag.
-
+# Usage: rechunk_image <comma_separated_tags>
+# Rechunks raw-img into containers-storage. Composes against the branch tag
+# (the stable, cache-friendly ref) so rpm-ostree can diff against the prior
+# build; all other tags are applied as aliases after.
 rechunk_image() {
-  local tag="${1:-latest}"
-  local rechunk_image="quay.io/centos-bootc/centos-bootc:stream10"
+  local anchor_tag="${1:?anchor_tag required}" # stable, cache-friendly tag — e.g. the branch
+  local tags_csv="${2:-latest}"
+  local tags=()
+  IFS=',' read -ra tags <<<"$tags_csv"
+
   local from_image="localhost/raw-img"
-  local to_image="localhost/chunked-img:${tag}"
+  local to_image="localhost/chunked-img:${anchor_tag}"
 
-  # Pull the rechunk tool image explicitly
-  if ! sudo podman image exists "$rechunk_image"; then
-    sudo podman pull "$rechunk_image"
-  fi
-
-  # Run bootc-base-imagectl rechunk — transient /run and /tmp state was
-  # already cleaned and labels applied in relabel_image
-  # Storage driver/options are inherited from shared /var/lib/containers store
   sudo podman run --rm --privileged \
     "${SECURITY_OPTS[@]}" \
     --volume /var/lib/containers:/var/lib/containers \
-    "$rechunk_image" \
-    /usr/libexec/bootc-base-imagectl rechunk \
-    --max-layers 64 \
-    "$from_image" \
-    "$to_image"
+    "${from_image}" \
+    rpm-ostree compose build-chunked-oci \
+    --bootc --max-layers 127 --format-version 2 \
+    --from "${from_image}" \
+    --output containers-storage:"${to_image}"
 
-  # Ensure untagged canonical ref exists for downstream variant resolution
-  if [[ -n "$tag" && "$tag" != "latest" ]]; then
-    sudo podman tag "$to_image" "localhost/chunked-img:latest" 2>/dev/null || true
-  fi
+  local t
+  for t in "${tags[@]}"; do
+    [[ "$t" == "$anchor_tag" || -z "$t" ]] && continue
+    sudo podman tag "$to_image" "localhost/chunked-img:${t}" 2>/dev/null || true
+  done
 }
 
 # ── extract final image ref ─────────────────────────────────────────────────
-# Usage: extract_final_ref
+# Usage: extract_final_ref <tag>
 # Prints to stdout:
 #   CI (GITHUB_OUTPUT set): lowercase key=value for >> "$GITHUB_OUTPUT"
 #   Local (no GITHUB_OUTPUT): uppercase KEY=value for eval
 
 extract_final_ref() {
-  local source_ref="containers-storage:localhost/chunked-img"
+  local tag="${1:-latest}"
+  local source_ref="containers-storage:localhost/chunked-img:${tag}"
 
   local full_digest
   full_digest=$(sudo skopeo inspect --format '{{.Digest}}' "$source_ref") || {

@@ -158,8 +158,13 @@ push_image_with_tags() {
   echo "::endgroup::" >&2
 
   echo "::group::Push additional tags" >&2
-  local tag
-  for tag in "${TAGS_ARR[@]:1}" "$short_digest"; do
+  local tag extra_tags
+  extra_tags=("${TAGS_ARR[@]:1}")
+  # {sha256} may already be in the tag list — don't push the digest twice
+  if ! printf '%s\n' "${TAGS_ARR[@]}" | grep -qx "$short_digest"; then
+    extra_tags+=("$short_digest")
+  fi
+  for tag in "${extra_tags[@]}"; do
     echo "  → ${base_img}:${tag}" >&2
     skopeo_copy_with_retry \
       "docker://${remote_digest_ref}" \

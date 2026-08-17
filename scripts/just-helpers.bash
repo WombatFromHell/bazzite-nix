@@ -182,14 +182,12 @@ run_build() {
   local image_name="${3:-bazzite-nix}"
   local base_image_override="${4:-}"
   local helpers_build="$JUST_HELPERS_BUILD"
-
-  local TARGET_IMAGE TAG BASE_IMAGE BUILD_SCRIPT VARIANT_NAME CANONICAL_TAG
-
+  local TARGET_IMAGE TAG BASE_IMAGE BUILD_SCRIPT VARIANT_NAME CANONICAL_TAG TAGS
   # shellcheck disable=SC1090
   source "$helpers_build"
   eval "$(resolve_variant "$variant_or_spec" "$variants_config" "$image_name")"
   [[ -n "$base_image_override" ]] && BASE_IMAGE="$base_image_override"
-  build_image "$BASE_IMAGE" "$BUILD_SCRIPT" "$CANONICAL_TAG" "$VARIANT_NAME" "./Containerfile"
+  build_image "$BASE_IMAGE" "$BUILD_SCRIPT" "$CANONICAL_TAG" "$VARIANT_NAME" "./Containerfile" "${TAGS%%,*}"
 }
 
 # Force-rebuild a container image, evicting any cached local image first
@@ -199,15 +197,13 @@ run_rebuild() {
   local image_name="${3:-bazzite-nix}"
   local base_image_override="${4:-}"
   local helpers_build="$JUST_HELPERS_BUILD"
-
-  local TARGET_IMAGE TAG BASE_IMAGE BUILD_SCRIPT VARIANT_NAME CANONICAL_TAG
-
+  local TARGET_IMAGE TAG BASE_IMAGE BUILD_SCRIPT VARIANT_NAME CANONICAL_TAG TAGS
   # shellcheck disable=SC1090
   source "$helpers_build"
   eval "$(resolve_variant "$variant_or_spec" "$variants_config" "$image_name")"
   [[ -n "$base_image_override" ]] && BASE_IMAGE="$base_image_override"
   sudo buildah rmi localhost/raw-img 2>/dev/null || true
-  build_image "$BASE_IMAGE" "$BUILD_SCRIPT" "$CANONICAL_TAG" "$VARIANT_NAME" "./Containerfile"
+  build_image "$BASE_IMAGE" "$BUILD_SCRIPT" "$CANONICAL_TAG" "$VARIANT_NAME" "./Containerfile" "${TAGS%%,*}"
 }
 
 # Relabel and rechunk raw-img to containers-storage with bootc chunking
@@ -217,7 +213,7 @@ run_rechunk() {
   local image_name="${3:-bazzite-nix}"
   local image_desc="${4:-Customized Bazzite image with Nix mount support and other sugar}"
   local repo_organization="${5:?repo_organization required}"
-  local TAG VARIANT_NAME CANONICAL_TAG
+  local TAG VARIANT_NAME CANONICAL_TAG TAGS
   local manifest_file="/tmp/bazzite-nix-manifest.json"
   local labels_file="/tmp/bazzite-nix-labels.txt"
   local KERNEL_VERSION FULL_BUILD_DIGEST MANIFEST_PACKAGES
@@ -225,20 +221,16 @@ run_rechunk() {
   # shellcheck disable=SC1090
   source "$JUST_HELPERS_BUILD"
 
-  # Resolve variant metadata and extract image info
   eval "$(resolve_variant "$variant_or_spec" "$variants_config" "$image_name")"
   eval "$(extract_image_info "$manifest_file")"
 
-  # Validate base image exists before attempting rechunk
   if ! sudo podman image exists localhost/raw-img; then
     echo "ERROR: Base image 'localhost/raw-img' not found. Run build step first." >&2
     return 1
   fi
 
-  # Rechunk using updated helper (now uses positional arg + explicit BIB pull)
-  rechunk_image "$TAG"
+  rechunk_image "$TAG" "$TAGS"
 
-  # Assemble and apply OCI labels (post-rechunk, targets chunked-img)
   assemble_labels \
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     "$image_desc" \
@@ -249,10 +241,10 @@ run_rechunk() {
     "$KERNEL_VERSION" \
     "$manifest_file" \
     "$labels_file"
-  relabel_image "$labels_file" "$KERNEL_VERSION" "$TAG"
 
-  # Extract final reference for downstream consumption
-  eval "$(extract_final_ref)"
+  relabel_image "$labels_file" "$KERNEL_VERSION" "$TAG" "$TAGS"
+
+  eval "$(extract_final_ref "$TAG")"
 }
 
 # Run the full build pipeline for a single variant:
@@ -268,16 +260,15 @@ run_pipeline() {
   local base_image_override="${7:-}"
   local force_rebuild="${8:-0}"
   local helpers_build="$JUST_HELPERS_BUILD"
-
-  local TARGET_IMAGE TAG BASE_IMAGE BUILD_SCRIPT VARIANT_NAME CANONICAL_TAG
+  local TARGET_IMAGE TAG BASE_IMAGE BUILD_SCRIPT VARIANT_NAME CANONICAL_TAG TAGS
   local manifest_file labels_file KERNEL_VERSION MANIFEST_PACKAGES
   local SOURCE_REF FULL_BUILD_DIGEST BUILD_DIGEST
 
   # shellcheck disable=SC1090
   source "$helpers_build"
+
   eval "$(resolve_variant "$variant_or_spec" "$variants_config" "$image_name")"
   [[ -n "$base_image_override" ]] && BASE_IMAGE="$base_image_override"
-
   manifest_file="/tmp/bazzite-nix-manifest.json"
   labels_file="/tmp/bazzite-nix-labels.txt"
 
@@ -286,11 +277,11 @@ run_pipeline() {
   if [[ "$force_rebuild" == "1" ]]; then
     echo "Force rebuild: removing existing container image..."
     sudo buildah rmi raw-img 2>/dev/null || true
-    build_image "$BASE_IMAGE" "$BUILD_SCRIPT" "$CANONICAL_TAG" "$VARIANT_NAME" "./Containerfile"
+    build_image "$BASE_IMAGE" "$BUILD_SCRIPT" "$CANONICAL_TAG" "$VARIANT_NAME" "./Containerfile" "${TAGS%%,*}"
   elif sudo buildah images --format '{{.Name}}' raw-img >/dev/null 2>&1; then
     echo "Container image raw-img already exists, skipping build"
   else
-    build_image "$BASE_IMAGE" "$BUILD_SCRIPT" "$CANONICAL_TAG" "$VARIANT_NAME" "./Containerfile"
+    build_image "$BASE_IMAGE" "$BUILD_SCRIPT" "$CANONICAL_TAG" "$VARIANT_NAME" "./Containerfile" "${TAGS%%,*}"
   fi
 
   # Phase 2: Extract image info (always safe to re-run, cheap operation)
@@ -299,24 +290,25 @@ run_pipeline() {
 
   # Phase 3: Assemble labels & Relabel & Rechunk (skip if containers-storage already exists)
   echo "=== Phase 3: Assemble labels & Relabel & Rechunk ==="
-  if [[ "$force_rebuild" != "1" ]] && sudo buildah images --format '{{.Name}}:{{.Tag}}' localhost/chunked-img >/dev/null 2>&1; then
-    echo "containers-storage image localhost/chunked-img already exists, skipping relabel & rechunk"
+  if [[ "$force_rebuild" != "1" ]] && sudo buildah images --format '{{.Name}}:{{.Tag}}' "localhost/chunked-img:${TAGS%%,*}" >/dev/null 2>&1; then
+    echo "containers-storage image localhost/chunked-img:${TAGS%%,*} already exists, skipping relabel & rechunk"
   else
     assemble_labels \
       "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$image_desc" "$VARIANT_NAME" "$CANONICAL_TAG" \
       "$repo_organization" "$image_name" "$KERNEL_VERSION" \
       "$manifest_file" "$labels_file"
-    rechunk_image "$TAG"
-    relabel_image "$labels_file" "$KERNEL_VERSION" "$TAG"
+    rechunk_image "$TAG" "$TAGS"
+    relabel_image "$labels_file" "$KERNEL_VERSION" "$TAG" "$TAGS"
   fi
 
   echo "=== Phase 4: Extract final ref ==="
-  eval "$(extract_final_ref)"
+  eval "$(extract_final_ref "$TAG")"
 
   echo ""
   echo "=== Pipeline complete ==="
   echo "  Variant      : $VARIANT_NAME"
   echo "  Version      : $CANONICAL_TAG"
+  echo "  Tags         : $TAGS"
   echo "  Kernel       : $KERNEL_VERSION"
   echo "  Manifest pkgs: $MANIFEST_PACKAGES"
   echo "  Source ref   : $SOURCE_REF"
@@ -325,14 +317,18 @@ run_pipeline() {
 }
 
 # ── Variant resolution ──────────────────────────────────────────────────────
-
 # Resolve a variant name from variants.json into shell variable assignments
 # Usage: eval "$(resolve_variant "testing" ".github/variants.json" "bazzite-nix")"
 resolve_variant() {
   local variant_or_spec="${1:?variant_or_spec required}"
   local variants_config="${2:-.github/variants.json}"
   local image_name="${3:-bazzite-nix}"
+  local check_helpers="${CHECK_VARIANTS_HELPERS:-.github/actions/check-variants/helpers.sh}"
   local spec row base_image build_script suffix image_name_resolved tag canonical
+  local latest tags_json tags_csv digest
+
+  # shellcheck disable=SC1090
+  source "$check_helpers"
 
   spec="$variant_or_spec"
 
@@ -344,17 +340,22 @@ resolve_variant() {
             | (.build_script // "build.sh")
         ' "$variants_config" | head -1)
     [[ -z "$build_script" ]] && build_script="build.sh"
-    # Extract real version from upstream image label
     canonical=$(skopeo inspect "docker://${spec}" 2>/dev/null |
       jq -r '.Labels["org.opencontainers.image.version"] // empty' ||
       true)
     [[ -z "$canonical" || "$canonical" == "null" ]] && canonical="$tag"
+    digest=$(skopeo inspect "docker://${spec}" 2>/dev/null |
+      jq -r '.Digest // empty' | sed 's/sha256://' || true)
+    # No variants.json entry to source a tags template from — single-tag fallback,
+    # $tag is genuinely the branch here since there's no config .name to prefer
+    tags_csv="$tag"
     echo "TARGET_IMAGE=\"localhost/$image_name\""
     echo "TAG=\"$tag\""
     echo "BASE_IMAGE=\"$spec\""
     echo "BUILD_SCRIPT=\"$build_script\""
     echo "VARIANT_NAME=\"$tag\""
     echo "CANONICAL_TAG=\"$canonical\""
+    echo "TAGS=\"$tags_csv\""
     return 0
   fi
 
@@ -363,7 +364,6 @@ resolve_variant() {
         .variants[]
         | select(.name == $n and (.disabled // false) == false)
     ' "$variants_config")
-
   if [[ -z "$row" ]]; then
     echo "ERROR: Unknown or disabled variant: $spec" >&2
     echo "Available variants:" >&2
@@ -374,21 +374,35 @@ resolve_variant() {
   base_image=$(echo "$row" | jq -r '.base_image')
   build_script=$(echo "$row" | jq -r '.build_script // "build.sh"')
   suffix=$(echo "$row" | jq -r '.suffix // ""')
+  latest=$(echo "$row" | jq -r '.latest // false')
+  tags_json=$(echo "$row" | jq -c '.tags // empty')
   image_name_resolved="$image_name${suffix}"
   tag="${base_image##*:}"
 
-  # Extract real version from upstream image label
-  canonical=$(skopeo inspect "docker://${base_image}" 2>/dev/null |
-    jq -r '.Labels["org.opencontainers.image.version"] // empty' ||
-    true)
+  local inspect_json
+  inspect_json=$(skopeo inspect "docker://${base_image}" 2>/dev/null) || true
+  canonical=$(echo "$inspect_json" | jq -r '.Labels["org.opencontainers.image.version"] // empty' 2>/dev/null || true)
   [[ -z "$canonical" || "$canonical" == "null" ]] && canonical="$tag"
+  digest=$(echo "$inspect_json" | jq -r '.Digest // empty' 2>/dev/null | sed 's/sha256://' || true)
+
+  # Strip branch prefix from canonical the same way compute_canonical_tag does
+  if [[ "$canonical" =~ ^[a-zA-Z]+-([0-9].*)$ ]]; then
+    canonical="${BASH_REMATCH[1]}"
+  fi
+
+  # Use the variant's config name as the branch — not $tag, which for variants
+  # like "testing" is the base image's dated suffix (e.g. "testing-44.20260814"),
+  # not a plain branch name. This mirrors check-variants.sh, which already
+  # passes $variant (the config .name) into compute_canonical_tag/generate_tags.
+  tags_csv=$(generate_tags "$spec" "$canonical" "$latest" "$tags_json" "$digest")
 
   echo "TARGET_IMAGE=\"localhost/$image_name_resolved\""
-  echo "TAG=\"${tag}\""
+  echo "TAG=\"${spec}\""
   echo "BASE_IMAGE=\"${base_image}\""
   echo "BUILD_SCRIPT=\"${build_script}\""
   echo "VARIANT_NAME=\"${spec}\""
   echo "CANONICAL_TAG=\"$canonical\""
+  echo "TAGS=\"$tags_csv\""
 }
 
 # ── VM image building ───────────────────────────────────────────────────────
@@ -559,8 +573,7 @@ build_vm_image() {
   local cache_dir="${6:-$HOME/.cache/bazzite-nix}"
   local helpers_build="$JUST_HELPERS_BUILD"
   local bib_image="${7:-quay.io/centos-bootc/bootc-image-builder:latest}"
-
-  local TARGET_IMAGE TAG BASE_IMAGE BUILD_SCRIPT VARIANT_NAME CANONICAL_TAG
+  local TARGET_IMAGE TAG BASE_IMAGE BUILD_SCRIPT VARIANT_NAME CANONICAL_TAG TAGS
   local _out_dir _disk_name _disk_file
 
   # shellcheck disable=SC1090
@@ -584,9 +597,9 @@ build_vm_image() {
   fi
 
   # Check for a rechunked containers-storage image first (avoids full image copy)
-  if [[ "$force_rebuild" != "1" ]] && sudo buildah images --format '{{.Name}}:{{.Tag}}' localhost/chunked-img >/dev/null 2>&1; then
-    echo "Using existing rechunked containers-storage image: localhost/chunked-img"
-    build_bib "podman" "localhost/chunked-img" "$TAG" "$type" "image.toml" "$output_dir" "$bib_image"
+  if [[ "$force_rebuild" != "1" ]] && sudo buildah images --format '{{.Name}}:{{.Tag}}' "localhost/chunked-img:${TAG}" >/dev/null 2>&1; then
+    echo "Using existing rechunked containers-storage image: localhost/chunked-img:${TAG}"
+    build_bib "podman" "localhost/chunked-img" "${TAG}" "$type" "image.toml" "$output_dir" "$bib_image"
     return 0
   fi
 
@@ -594,16 +607,15 @@ build_vm_image() {
   if [[ "$force_rebuild" == "1" ]]; then
     echo "Force rebuilding container image..."
     sudo buildah rmi --force raw-img 2>/dev/null || true
-    build_image "$BASE_IMAGE" "$BUILD_SCRIPT" "$CANONICAL_TAG" "$VARIANT_NAME" "./Containerfile"
+    build_image "$BASE_IMAGE" "$BUILD_SCRIPT" "$CANONICAL_TAG" "$VARIANT_NAME" "./Containerfile" "${TAGS%%,*}"
   elif sudo buildah images --format '{{.Name}}' raw-img >/dev/null 2>&1; then
     echo "Container image raw-img already exists, skipping build"
   else
-    build_image "$BASE_IMAGE" "$BUILD_SCRIPT" "$CANONICAL_TAG" "$VARIANT_NAME" "./Containerfile"
+    build_image "$BASE_IMAGE" "$BUILD_SCRIPT" "$CANONICAL_TAG" "$VARIANT_NAME" "./Containerfile" "${TAGS%%,*}"
   fi
 
   # Tag for BIB — bootc-image-builder reads from podman storage
   sudo buildah tag raw-img "${TARGET_IMAGE}:${TAG}" 2>/dev/null || true
-
   build_bib "podman" "$TARGET_IMAGE" "$TAG" "$type" "image.toml" "$output_dir" "$bib_image"
 }
 
@@ -646,10 +658,9 @@ run_vm() {
   if [[ ! -f "$image_file" ]]; then
     is_local=false
     [[ "$target_image" == localhost/* ]] && is_local=true
-
     # Prefer rechunked containers-storage image if available (avoids podman image copy)
-    if sudo buildah images --format '{{.Name}}:{{.Tag}}' localhost/chunked-img >/dev/null 2>&1; then
-      echo "Using existing rechunked containers-storage image: localhost/chunked-img"
+    if sudo buildah images --format '{{.Name}}:{{.Tag}}' "localhost/chunked-img:${tag}" >/dev/null 2>&1; then
+      echo "Using existing rechunked containers-storage image: localhost/chunked-img:${tag}"
       sudo podman image exists "$bib_image" 2>/dev/null || sudo podman pull "$bib_image"
       sudo podman image exists "docker.io/qemux/qemu:latest" 2>/dev/null || sudo podman pull "docker.io/qemux/qemu:latest"
       echo "Building disk image..."
@@ -744,13 +755,11 @@ build_all_variants() {
   # oci_output_dir is deprecated — kept for backward compatibility but no longer drives behavior
   local _oci_output_dir="${1:-/var/lib/containers/oci}"
   local repo_organization="${2:?repo_organization required}"
-  local image_name="${3:?image_name required}"
+  local image_name="${3:-bazzite-nix}"
   local image_desc="${4:-Customized Bazzite image with Nix mount support and other sugar}"
   local helpers_build="$JUST_HELPERS_BUILD"
-
-  local results_file variants count i variant base_image build_script canonical_tag
+  local results_file variants count i variant base_image build_script canonical_tag tags_csv
   local manifest_file labels_file KERNEL_VERSION SOURCE_REF BUILD_DIGEST
-
   # shellcheck disable=SC1090
   source "$helpers_build"
 
@@ -762,20 +771,18 @@ build_all_variants() {
 
   variants=$(jq -c '[.[] | select(.needs_build == true)]' "$results_file")
   count=$(echo "$variants" | jq 'length')
-
   if [[ "$count" -eq 0 ]]; then
     echo "No variants need building"
     return 0
   fi
 
   echo "Building $count variant(s)..."
-
   for ((i = 0; i < count; i++)); do
     variant=$(echo "$variants" | jq -r ".[$i].variant")
     base_image=$(echo "$variants" | jq -r ".[$i].base_image")
     build_script=$(echo "$variants" | jq -r ".[$i].build_script // \"build.sh\"")
     canonical_tag=$(echo "$variants" | jq -r ".[$i].canonical_tag")
-    tag="${base_image##*:}"
+    tags_csv=$(echo "$variants" | jq -r ".[$i].tags")
 
     echo ""
     echo "========================================"
@@ -783,6 +790,7 @@ build_all_variants() {
     echo "  Base image    : $base_image"
     echo "  Build script  : $build_script"
     echo "  Canonical tag : $canonical_tag"
+    echo "  Tags          : $tags_csv"
     echo "========================================"
 
     manifest_file="/tmp/bazzite-nix-manifest.json"
@@ -792,7 +800,7 @@ build_all_variants() {
     if sudo buildah images --format '{{.Name}}' raw-img >/dev/null 2>&1; then
       echo "Container image raw-img already exists, skipping build"
     else
-      build_image "$base_image" "$build_script" "$canonical_tag" "$variant" "./Containerfile"
+      build_image "$base_image" "$build_script" "$canonical_tag" "$variant" "./Containerfile" "${tags_csv%%,*}"
     fi
 
     eval "$(extract_image_info "$manifest_file")"
@@ -805,11 +813,11 @@ build_all_variants() {
         "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$image_desc" "$variant" "$canonical_tag" \
         "$repo_organization" "$image_name" "$KERNEL_VERSION" \
         "$manifest_file" "$labels_file"
-      rechunk_image "$tag"
-      relabel_image "$labels_file" "$KERNEL_VERSION" "$tag"
+      rechunk_image "$variant" "$tags_csv"
+      relabel_image "$labels_file" "$KERNEL_VERSION" "$variant" "$tags_csv"
     fi
-    eval "$(extract_final_ref)"
 
+    eval "$(extract_final_ref "$variant")"
     echo "Variant $variant complete: $SOURCE_REF ($BUILD_DIGEST)"
   done
 }
@@ -925,10 +933,9 @@ run_vm_qcow2() {
   local oci_output_dir="${7:-/var/lib/containers/oci}"
   local cache_dir="${8:-$HOME/.cache/bazzite-nix}"
   local bib_image="${9:-quay.io/centos-bootc/bootc-image-builder:latest}"
-
   local TARGET_IMAGE TAG
   eval "$(resolve_variant "$variant_or_spec" "$variants_config" "$image_name")"
-  run_vm "$TARGET_IMAGE" "$TAG" "qcow2" "image.toml" "$output_dir" \
+  run_vm "$TARGET_IMAGE" "${TAG}" "qcow2" "image.toml" "$output_dir" \
     "$force_pull" "$clean" "$oci_output_dir" "$cache_dir" "$bib_image"
 }
 
@@ -943,9 +950,8 @@ run_vm_raw() {
   local oci_output_dir="${7:-/var/lib/containers/oci}"
   local cache_dir="${8:-$HOME/.cache/bazzite-nix}"
   local bib_image="${9:-quay.io/centos-bootc/bootc-image-builder:latest}"
-
   local TARGET_IMAGE TAG
   eval "$(resolve_variant "$variant_or_spec" "$variants_config" "$image_name")"
-  run_vm "$TARGET_IMAGE" "$TAG" "raw" "image.toml" "$output_dir" \
+  run_vm "$TARGET_IMAGE" "${TAG}" "raw" "image.toml" "$output_dir" \
     "$force_pull" "$clean" "$oci_output_dir" "$cache_dir" "$bib_image"
 }

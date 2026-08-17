@@ -133,37 +133,129 @@ compute_canonical_tag() {
   echo "$canonical $collision_detected"
 }
 
+# ── Variant resolution ──────────────────────────────────────────────────────
+# Resolve a variant name from variants.json into shell variable assignments
+# Usage: eval "$(resolve_variant "testing" ".github/variants.json" "bazzite-nix")"
+resolve_variant() {
+  local variant_or_spec="${1:?variant_or_spec required}"
+  local variants_config="${2:-.github/variants.json}"
+  local image_name="${3:-bazzite-nix}"
+  local check_helpers="${CHECK_VARIANTS_HELPERS:-.github/actions/check-variants/helpers.sh}"
+  local spec row base_image build_script suffix image_name_resolved tag canonical
+  local latest tags_json tags_csv digest
+
+  # shellcheck disable=SC1090
+  source "$check_helpers"
+
+  spec="$variant_or_spec"
+
+  # If it looks like an explicit image:tag or image ref, pass it through unchanged
+  if [[ "$spec" == *"/"* ]] || [[ "$spec" == *":"* ]]; then
+    tag="${spec##*:}"
+    build_script=$(jq -r --arg bi "$spec" '
+            .variants[] | select(.base_image == $bi and (.disabled // false) == false)
+            | (.build_script // "build.sh")
+        ' "$variants_config" | head -1)
+    [[ -z "$build_script" ]] && build_script="build.sh"
+    # Extract real version + digest from upstream image label
+    canonical=$(skopeo inspect "docker://${spec}" 2>/dev/null |
+      jq -r '.Labels["org.opencontainers.image.version"] // empty' ||
+      true)
+    [[ -z "$canonical" || "$canonical" == "null" ]] && canonical="$tag"
+    digest=$(skopeo inspect "docker://${spec}" 2>/dev/null |
+      jq -r '.Digest // empty' | sed 's/sha256://' || true)
+    # No variants.json entry to source a tags template from — single-tag fallback
+    tags_csv="$tag"
+    echo "TARGET_IMAGE=\"localhost/$image_name\""
+    echo "TAG=\"$tag\""
+    echo "BASE_IMAGE=\"$spec\""
+    echo "BUILD_SCRIPT=\"$build_script\""
+    echo "VARIANT_NAME=\"$tag\""
+    echo "CANONICAL_TAG=\"$canonical\""
+    echo "TAGS=\"$tags_csv\""
+    return 0
+  fi
+
+  # Look up variant by name
+  row=$(jq -r --arg n "$spec" '
+        .variants[]
+        | select(.name == $n and (.disabled // false) == false)
+    ' "$variants_config")
+  if [[ -z "$row" ]]; then
+    echo "ERROR: Unknown or disabled variant: $spec" >&2
+    echo "Available variants:" >&2
+    jq -r '.variants[] | select((.disabled // false) == false) | "  " + .name' "$variants_config" >&2
+    return 1
+  fi
+
+  base_image=$(echo "$row" | jq -r '.base_image')
+  build_script=$(echo "$row" | jq -r '.build_script // "build.sh"')
+  suffix=$(echo "$row" | jq -r '.suffix // ""')
+  latest=$(echo "$row" | jq -r '.latest // false')
+  tags_json=$(echo "$row" | jq -c '.tags // empty')
+  image_name_resolved="$image_name${suffix}"
+  tag="${base_image##*:}"
+
+  # Extract real version + digest from upstream image label
+  local inspect_json
+  inspect_json=$(skopeo inspect "docker://${base_image}" 2>/dev/null) || true
+  canonical=$(echo "$inspect_json" | jq -r '.Labels["org.opencontainers.image.version"] // empty' 2>/dev/null || true)
+  [[ -z "$canonical" || "$canonical" == "null" ]] && canonical="$tag"
+  digest=$(echo "$inspect_json" | jq -r '.Digest // empty' 2>/dev/null | sed 's/sha256://' || true)
+
+  # Strip branch prefix from canonical the same way compute_canonical_tag does,
+  # so a local run's CANONICAL_TAG matches what CI would compute (minus collision handling)
+  if [[ "$canonical" =~ ^[a-zA-Z]+-([0-9].*)$ ]]; then
+    canonical="${BASH_REMATCH[1]}"
+  fi
+
+  tags_csv=$(generate_tags "$tag" "$canonical" "$latest" "$tags_json" "$digest")
+
+  echo "TARGET_IMAGE=\"localhost/$image_name_resolved\""
+  echo "TAG=\"${tag}\""
+  echo "BASE_IMAGE=\"${base_image}\""
+  echo "BUILD_SCRIPT=\"${build_script}\""
+  echo "VARIANT_NAME=\"${spec}\""
+  echo "CANONICAL_TAG=\"$canonical\""
+  echo "TAGS=\"$tags_csv\""
+}
+
 # ── generate tags ───────────────────────────────────────────────────────────
-# Usage: generate_tags <base_image_tag> <canonical> <latest> <tags_json>
+# Usage: generate_tags <base_image_tag> <canonical> <latest> <tags_json> <digest>
 # Generates comma-separated tags based on configuration.
+# Supports {canonical}, {branch}, {major}, {sha256} placeholders in tags_json.versioned.
 
 generate_tags() {
   local base_image_tag="$1"
   local canonical="$2"
   local latest="$3"
   local tags_json="$4"
+  local digest="${5:-}"
+  local major="${canonical%%.*}"
   local tags_array=()
 
-  # Add "latest" tag if latest=true
-  [[ "$latest" == "true" ]] && tags_array+=("latest")
-
-  # If tags config is provided, use explicit template
   if [[ -n "$tags_json" && "$tags_json" != "null" ]]; then
     local tags_branch tags_versioned
     tags_branch=$(echo "$tags_json" | jq -r '.branch // empty')
     tags_versioned=$(echo "$tags_json" | jq -r '.versioned // [] | .[]' 2>/dev/null)
-
-    # Use branch from config or fall back to base_image_tag
     local branch="${tags_branch:-$base_image_tag}"
 
-    # Add versioned tags with placeholder substitution
     while IFS= read -r versioned_tag; do
       if [[ -n "$versioned_tag" ]]; then
         versioned_tag="${versioned_tag//\{canonical\}/$canonical}"
         versioned_tag="${versioned_tag//\{branch\}/$branch}"
+        versioned_tag="${versioned_tag//\{major\}/$major}"
+        if [[ -n "$digest" ]]; then
+          versioned_tag="${versioned_tag//\{sha256\}/$digest}"
+        elif [[ "$versioned_tag" == *"{sha256}"* ]]; then
+          continue
+        fi
         tags_array+=("$versioned_tag")
       fi
     done <<<"$tags_versioned"
+
+    # latest goes last — it's an alias, never the anchor tag rechunk/relabel compose against
+    [[ "$latest" == "true" ]] && tags_array+=("latest")
 
     (
       IFS=,
@@ -172,8 +264,10 @@ generate_tags() {
     return 0
   fi
 
-  # Default: branch tag + versioned tags
-  tags_array+=("${base_image_tag}" "${base_image_tag}-${canonical}" "${canonical}")
+  # ponytail: default mirrors the unstable variant's versioned list; update both if unstable changes
+  tags_array+=("${base_image_tag}-${canonical}" "${base_image_tag}-${major}" "${base_image_tag}")
+  [[ -n "$digest" ]] && tags_array+=("$digest")
+  [[ "$latest" == "true" ]] && tags_array+=("latest")
 
   (
     IFS=,

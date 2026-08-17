@@ -15,6 +15,9 @@ inputs:
   variant:
     description: "Variant name"
     required: true
+  tags:
+    description: "Comma-separated tags to apply (from check-variants .tags output); first tag is primary"
+    required: true
   parent_version:
     description: "Parent image version for OCI labels"
     required: true
@@ -91,12 +94,15 @@ runs:
       shell: bash
       run: |
         source "${{ github.action_path }}/helpers.sh"
+        primary_tag="${{ inputs.tags }}"
+        primary_tag="${primary_tag%%,*}"
         build_image \
           "${{ inputs.base_image }}" \
           "${{ inputs.build_script }}" \
           "${{ inputs.canonical_tag }}" \
           "${{ inputs.variant }}" \
-          "./Containerfile"
+          "./Containerfile" \
+          "$primary_tag"
 
     - name: Extract image info
       id: labels
@@ -126,7 +132,7 @@ runs:
       shell: bash
       run: |
         source "${{ github.action_path }}/helpers.sh"
-        rechunk_image "${{ inputs.variant }}"
+        rechunk_image "${{ inputs.variant }}" "${{ inputs.tags }}"
 
     - name: Relabel image
       shell: bash
@@ -135,11 +141,12 @@ runs:
         relabel_image \
           "${{ steps.assemble_labels.outputs.labels_file }}" \
           "${{ steps.labels.outputs.kernel_version }}" \
-          "${{ inputs.variant }}"
+          "${{ inputs.variant }}" \
+          "${{ inputs.tags }}"
 
     - name: Extract final image ref
       id: final_ref
       shell: bash
       run: |
         source "${{ github.action_path }}/helpers.sh"
-        extract_final_ref >> "$GITHUB_OUTPUT"
+        extract_final_ref "${{ inputs.variant }}" >> "$GITHUB_OUTPUT"
