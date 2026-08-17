@@ -148,19 +148,21 @@ tag_variants() {
 }
 
 # ── relabel image ───────────────────────────────────────────────────────────
-# Usage: relabel_image <labels_file> <kernel_version> <comma_separated_tags>
+# Usage: relabel_image <labels_file> <kernel_version> <comma_separated_tags> [image_name]
 # Clears inherited labels, then applies new labels and annotations via buildah.
-# Operates on the rechunked image (tagged with the first tag), not raw-img.
-# Remaining tags are applied as aliases after commit.
+# Operates on the (optionally rechunked) image tagged with the first tag; the
+# remaining tags are applied as aliases after commit. image_name defaults to
+# chunked-img (rechunked path); pass raw-img to skip rechunking.
 
 relabel_image() {
   local labels_file="$1"
   local kernel_version="$2"
   local anchor_tag="${3:?anchor_tag required}"
   local tags_csv="${4:-latest}"
+  local image_name="${5:-chunked-img}"
   local tags=()
   IFS=',' read -ra tags <<<"$tags_csv"
-  local image="chunked-img:${anchor_tag}"
+  local image="${image_name}:${anchor_tag}"
 
   local labels=()
   while IFS= read -r line; do
@@ -186,7 +188,7 @@ relabel_image() {
   local t
   for t in "${tags[@]}"; do
     [[ "$t" == "$anchor_tag" || -z "$t" ]] && continue
-    sudo podman tag "localhost/${image}" "localhost/chunked-img:${t}" 2>/dev/null || true
+    sudo podman tag "localhost/${image}" "localhost/${image_name}:${t}" 2>/dev/null || true
   done
   echo "Relabeling ${image}: done"
 }
@@ -202,45 +204,43 @@ rechunk_image() {
   local tags=()
   IFS=',' read -ra tags <<<"$tags_csv"
 
-  local from_image="localhost/raw-img"
-  local to_image="localhost/chunked-img:${anchor_tag}"
-
-  # Clean /run and /tmp to prevent "Too many links" errors during OSTree chunking
-  echo "Cleaning temporary files from ${from_image} before rechunking..."
-  sudo buildah unshare bash -euo pipefail -c '
-    container=$(buildah from '"${from_image}"')
-    mnt=$(buildah mount "$container")
-    rm -rf "$mnt"/run/.* "$mnt"/run/* "$mnt"/tmp/.* "$mnt"/tmp/* || true
-    buildah umount "$container"
-    buildah commit --identity-label=false --rm "$container" '"${from_image}"'
-  '
+  CACHE_DIR="$HOME/.cache/bazzite-nix"
+  RECHUNK_DIR="$(mktemp -d "${RUNNER_TEMP:-$CACHE_DIR}/rechunk-XXXXXX")"
+  trap 'rm -rf "${RECHUNK_DIR}"' EXIT
 
   echo "Running rpm-ostree compose build-chunked-oci..."
-  sudo podman run --rm --privileged \
+  sudo podman run --rm \
+    --pull=never \
+    --privileged \
+    --sig-proxy \
+    --mount=type=image,src=localhost/raw-img,target=/rpm-ostree \
     "${SECURITY_OPTS[@]}" \
     --volume /var/lib/containers:/var/lib/containers \
-    "${from_image}" \
-    rpm-ostree compose build-chunked-oci \
-    --bootc --max-layers 127 --format-version 2 \
-    --from "${from_image}" \
-    --output containers-storage:"${to_image}"
+    --volume "${RECHUNK_DIR}:/run/out:Z" \
+    --entrypoint /usr/bin/rpm-ostree \
+    localhost/raw-img \
+    compose build-chunked-oci \
+    --bootc --format-version 2 \
+    --rootfs /rpm-ostree --output containers-storage:localhost/chunked-img
+  sudo podman rmi -f localhost/raw-img
 
   local t
   for t in "${tags[@]}"; do
-    [[ "$t" == "$anchor_tag" || -z "$t" ]] && continue
-    sudo podman tag "$to_image" "localhost/chunked-img:${t}" 2>/dev/null || true
+    [[ -z "$t" ]] && continue
+    sudo podman tag localhost/raw-img "localhost/chunked-img:${t}"
   done
 }
 
 # ── extract final image ref ─────────────────────────────────────────────────
-# Usage: extract_final_ref <tag>
+# Usage: extract_final_ref <tag> [image_name]
 # Prints to stdout:
 #   CI (GITHUB_OUTPUT set): lowercase key=value for >> "$GITHUB_OUTPUT"
 #   Local (no GITHUB_OUTPUT): uppercase KEY=value for eval
 
 extract_final_ref() {
   local tag="${1:-latest}"
-  local source_ref="containers-storage:localhost/chunked-img:${tag}"
+  local image_name="${2:-chunked-img}"
+  local source_ref="containers-storage:localhost/${image_name}:${tag}"
 
   local full_digest
   full_digest=$(sudo skopeo inspect --format '{{.Digest}}' "$source_ref") || {

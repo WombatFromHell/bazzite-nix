@@ -86,9 +86,9 @@ runs:
 
         if [[ "$count" -gt 0 ]]; then
           any_builds_needed="true"
+        else
+          generate_step_summary "$results" "false" "${{ inputs.registry }}" "${{ inputs.repo }}" "${GITHUB_STEP_SUMMARY:-}"
         fi
 
         echo "variants_to_build=${variants_to_build}" >> "$GITHUB_OUTPUT"
         echo "any_builds_needed=${any_builds_needed}" >> "$GITHUB_OUTPUT"
-
-        generate_step_summary "$results" "$any_builds_needed" "${{ inputs.registry }}" "${{ inputs.repo }}" "${GITHUB_STEP_SUMMARY:-}"

@@ -68,6 +68,14 @@ jobs:
           image_desc: ${{ env.IMAGE_DESC }}
           date: ${{ steps.date.outputs.date }}
 
+      - name: Preview pending builds
+        if: steps.check.outputs.any_builds_needed == 'true'
+        shell: bash
+        run: |
+          source scripts/just-helpers.bash
+          variants=$(echo '${{ steps.check.outputs.variants_to_build }}' | jq -r '[.[].variant] | join(",")')
+          preview_tags "$variants" "${{ env.VARIANTS_CONFIG }}" "${{ env.IMAGE_NAME }}" "${{ github.repository_owner }}"
+
   build_push:
     needs: check_and_aggregate
     if: needs.check_and_aggregate.outputs.any_builds_needed == 'true'

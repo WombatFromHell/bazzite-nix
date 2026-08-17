@@ -270,7 +270,6 @@ generate_tags() {
 
   # ponytail: default mirrors the unstable variant's versioned list; update both if unstable changes
   tags_array+=("${base_image_tag}-${canonical}" "${base_image_tag}-${major}" "${base_image_tag}")
-  [[ -n "$digest" ]] && tags_array+=("$digest")
   [[ "$latest" == "true" ]] && tags_array+=("latest")
 
   (

@@ -1,5 +1,5 @@
 name: Build Reusable
-description: Build, rechunk, and extract digest for a single image variant
+description: Build, optionally rechunk, and extract digest for a single image variant
 
 inputs:
   base_image:
@@ -33,6 +33,10 @@ inputs:
   repository_name:
     description: "GitHub repository name"
     required: true
+  rechunk:
+    description: "Rechunk the image with rpm-ostree (chunked-oci compose)"
+    required: false
+    default: "false"
 
 outputs:
   source_ref:
@@ -129,6 +133,7 @@ runs:
         echo "labels_file=${{ runner.temp }}/labels.txt" >> "$GITHUB_OUTPUT"
 
     - name: Rechunk image
+      if: ${{ inputs.rechunk == 'true' }}
       shell: bash
       run: |
         source "${{ github.action_path }}/helpers.sh"
@@ -138,15 +143,28 @@ runs:
       shell: bash
       run: |
         source "${{ github.action_path }}/helpers.sh"
+        image_name="${{ inputs.rechunk == 'true' && 'chunked-img' || 'raw-img' }}"
+        anchor_tag="${{ inputs.rechunk == 'true' && inputs.variant || '' }}"
+        if [[ -z "$anchor_tag" ]]; then
+          primary_tag="${{ inputs.tags }}"
+          anchor_tag="${primary_tag%%,*}"
+        fi
         relabel_image \
           "${{ steps.assemble_labels.outputs.labels_file }}" \
           "${{ steps.labels.outputs.kernel_version }}" \
-          "${{ inputs.variant }}" \
-          "${{ inputs.tags }}"
+          "$anchor_tag" \
+          "${{ inputs.tags }}" \
+          "$image_name"
 
     - name: Extract final image ref
       id: final_ref
       shell: bash
       run: |
         source "${{ github.action_path }}/helpers.sh"
-        extract_final_ref "${{ inputs.variant }}" >> "$GITHUB_OUTPUT"
+        image_name="${{ inputs.rechunk == 'true' && 'chunked-img' || 'raw-img' }}"
+        anchor_tag="${{ inputs.rechunk == 'true' && inputs.variant || '' }}"
+        if [[ -z "$anchor_tag" ]]; then
+          primary_tag="${{ inputs.tags }}"
+          anchor_tag="${primary_tag%%,*}"
+        fi
+        extract_final_ref "$anchor_tag" "$image_name" >> "$GITHUB_OUTPUT"

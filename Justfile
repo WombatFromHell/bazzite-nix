@@ -129,15 +129,16 @@ rechunk $variant_or_spec="{{ default_tag }}":
 
 # ── Full pipeline (mirrors the GitHub Actions workflow) ─────────────────────
 # Run the full build pipeline for a single variant:
-#   build → extract image info → assemble labels → rechunk → extract final ref
+#   build → extract image info → assemble labels → [rechunk] → relabel → extract final ref
+# Rechunk is disabled by default; pass rechunk=1 to enable.
 
-# Usage: just pipeline [variant-name | image:tag] [base_image_override] [force_rebuild]
+# Usage: just pipeline [variant-name | image:tag] [base_image_override] [force_rebuild] [rechunk]
 [group('Build Container Image')]
-pipeline $variant_or_spec="{{ default_tag }}" $base_image_override="" $force_rebuild="0":
+pipeline $variant_or_spec="{{ default_tag }}" $base_image_override="" $force_rebuild="0" $rechunk="0":
     #!/usr/bin/env bash
     set -euo pipefail
     source "{{ just_helpers }}"
-    run_pipeline "{{ variant_or_spec }}" "{{ variants_config }}" "{{ image_name }}" "{{ image_desc }}" "{{ repo_organization }}" "{{ oci_output_dir }}" "{{ base_image_override }}" "{{ force_rebuild }}"
+    run_pipeline "{{ variant_or_spec }}" "{{ variants_config }}" "{{ image_name }}" "{{ image_desc }}" "{{ repo_organization }}" "{{ oci_output_dir }}" "{{ base_image_override }}" "{{ force_rebuild }}" "{{ rechunk }}"
 
 # Run the full pipeline for all variants that need rebuilding
 # (Mirrors check_and_aggregate → build_push matrix in the workflow)
@@ -183,6 +184,15 @@ check-variants $force_build="0":
     set -euo pipefail
     source "{{ just_helpers }}"
     check_variants "{{ force_build }}" "{{ repo_organization }}" "{{ image_name }}" "{{ variants_config }}"
+
+# Preview which alias tags (and the step-summary markdown) a build would generate
+# Usage: just tags-preview [variant-name | image:tag]
+[group('Build Container Image')]
+tags-preview $variant_or_spec="{{ default_tag }}":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source "{{ just_helpers }}"
+    preview_tags "{{ variant_or_spec }}" "{{ variants_config }}" "{{ image_name }}" "{{ repo_organization }}"
 
 # ── VM commands ─────────────────────────────────────────────────────────────
 # Build a QCOW2 VM disk image

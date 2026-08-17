@@ -254,7 +254,8 @@ run_rechunk() {
 }
 
 # Run the full build pipeline for a single variant:
-#   build → extract image info → assemble labels → relabel → rechunk → extract final ref
+#   build → extract image info → assemble labels → relabel → [rechunk] → extract final ref
+# Rechunk is disabled by default; pass rechunk=1 to enable.
 run_pipeline() {
   local variant_or_spec="${1:?variant_or_spec required}"
   local variants_config="${2:-.github/variants.json}"
@@ -265,6 +266,7 @@ run_pipeline() {
   local _oci_output_dir="${6:-/var/lib/containers/oci}"
   local base_image_override="${7:-}"
   local force_rebuild="${8:-0}"
+  local rechunk="${9:-0}"
   local helpers_build="$JUST_HELPERS_BUILD"
   local TARGET_IMAGE TAG BASE_IMAGE BUILD_SCRIPT VARIANT_NAME CANONICAL_TAG TAGS
   local manifest_file labels_file KERNEL_VERSION MANIFEST_PACKAGES
@@ -277,6 +279,9 @@ run_pipeline() {
   [[ -n "$base_image_override" ]] && BASE_IMAGE="$base_image_override"
   manifest_file="/tmp/bazzite-nix-manifest.json"
   labels_file="/tmp/bazzite-nix-labels.txt"
+
+  # Preview which alias tags this build will generate (mirrors the workflow's Preview step)
+  preview_tags "$variant_or_spec" "$variants_config" "$image_name" "$repo_organization"
 
   # Phase 1: Build container image (skip if exists and not forcing)
   echo "=== Phase 1: Build ==="
@@ -294,21 +299,34 @@ run_pipeline() {
   echo "=== Phase 2: Extract image info ==="
   eval "$(extract_image_info "$manifest_file")"
 
-  # Phase 3: Assemble labels & Relabel & Rechunk (skip if containers-storage already exists)
+  # Phase 3: Assemble labels & Relabel & (optionally) Rechunk
   echo "=== Phase 3: Assemble labels & Relabel & Rechunk ==="
-  if [[ "$force_rebuild" != "1" ]] && sudo buildah images --format '{{.Name}}:{{.Tag}}' "localhost/chunked-img:${TAGS%%,*}" >/dev/null 2>&1; then
+  if [[ "$rechunk" != "1" ]]; then
+    echo "Rechunk disabled — relabeling raw-img directly"
+    image_name_ref="raw-img"
+    anchor_tag="${TAGS%%,*}"
+  else
+    image_name_ref="chunked-img"
+    anchor_tag="$TAG"
+  fi
+
+  # Skip relabel & rechunk only when a prior rechunked image already exists
+  # (raw-img always exists after Phase 1, so it must always be relabeled)
+  if [[ "$rechunk" == "1" && "$force_rebuild" != "1" ]] && sudo buildah images --format '{{.Name}}:{{.Tag}}' "localhost/chunked-img:${TAGS%%,*}" >/dev/null 2>&1; then
     echo "containers-storage image localhost/chunked-img:${TAGS%%,*} already exists, skipping relabel & rechunk"
   else
     assemble_labels \
       "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$image_desc" "$VARIANT_NAME" "$CANONICAL_TAG" \
       "$repo_organization" "$image_name" "$KERNEL_VERSION" \
       "$manifest_file" "$labels_file"
-    rechunk_image "$TAG" "$TAGS"
-    relabel_image "$labels_file" "$KERNEL_VERSION" "$TAG" "$TAGS"
+    if [[ "$rechunk" == "1" ]]; then
+      rechunk_image "$TAG" "$TAGS"
+    fi
+    relabel_image "$labels_file" "$KERNEL_VERSION" "$anchor_tag" "$TAGS" "$image_name_ref"
   fi
 
   echo "=== Phase 4: Extract final ref ==="
-  eval "$(extract_final_ref "$TAG")"
+  eval "$(extract_final_ref "$anchor_tag" "$image_name_ref")"
 
   echo ""
   echo "=== Pipeline complete ==="
@@ -636,6 +654,49 @@ run_vm() {
   fi
 
   wait "$QEMU_PID" || echo "  VM exited"
+}
+
+# Preview which alias tags (and the step-summary markdown) a build would generate
+# Usage: preview_tags <variants_csv> [variants_config] [image_name] [repo_organization]
+# In CI (GITHUB_STEP_SUMMARY set), appends the pending-builds markdown table to the step summary.
+preview_tags() {
+  local variants_csv="${1:?variants_csv required}"
+  local variants_config="${2:-.github/variants.json}"
+  local image_name="${3:-bazzite-nix}"
+  local repo_organization="${4:?repo_organization required}"
+  local specs=()
+  IFS=',' read -ra specs <<<"$variants_csv"
+
+  local registry
+  registry="ghcr.io/$(echo "$repo_organization" | tr '[:upper:]' '[:lower:]')"
+
+  local spec TAG VARIANT_NAME CANONICAL_TAG TAGS TARGET_IMAGE
+  local suffix rows=()
+  for spec in "${specs[@]}"; do
+    eval "$(resolve_variant "$spec" "$variants_config" "$image_name")"
+    suffix="${TARGET_IMAGE#localhost/"${image_name}"}"
+    rows+=("| \`${VARIANT_NAME}\` | \`${registry}/${image_name}${suffix}\` | \`${TAGS}\` |")
+    if [[ -z "${GITHUB_STEP_SUMMARY:-}" ]]; then
+      echo "== Tags that would be generated for '${VARIANT_NAME}' =="
+      echo "Canonical tag: ${CANONICAL_TAG}"
+      echo "Alias tags    : ${TAGS}"
+      echo ""
+    fi
+  done
+
+  if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+    {
+      echo "## 📦 Variants to Build"
+      echo ""
+      echo "| Variant | Target Image | Tags |"
+      echo "|---------|--------------|------|"
+      printf '%s\n' "${rows[@]}"
+    } >>"$GITHUB_STEP_SUMMARY"
+  else
+    echo "| Variant | Target Image | Tags |"
+    echo "|---------|--------------|------|"
+    printf '%s\n' "${rows[@]}"
+  fi
 }
 
 # ── Variant aggregation ─────────────────────────────────────────────────────
