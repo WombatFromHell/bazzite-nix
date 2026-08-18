@@ -148,18 +148,17 @@ jobs:
       registry: ${{ needs.check_and_aggregate.outputs.registry }}
       repo: ${{ needs.check_and_aggregate.outputs.repo }}
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
       - name: Collect successful builds
         id: collect
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          SUCCESSFUL_VARIANTS=$(gh run view "${{ github.run_id }}" --json jobs --jq \
-            '[.jobs[] | select(.name | startswith("Build & Push")) | select(.conclusion == "success") | {variant: (.name | sub("^Build & Push "; ""))}]')
-
-          COUNT=$(echo "$SUCCESSFUL_VARIANTS" | jq 'length')
-          echo "successful_variants=${SUCCESSFUL_VARIANTS}" >> "$GITHUB_OUTPUT"
-          echo "any_successful=$([ "$COUNT" -gt 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
-          echo "Found $COUNT successful builds"
+          source scripts/just-helpers.bash
+          JOBS=$(gh run view "${{ github.run_id }}" --repo "${{ github.repository }}" --json jobs)
+          collect_successful_builds "$JOBS"
 
   generate_release:
     needs: [check_and_aggregate, build_push, collect_build_results]

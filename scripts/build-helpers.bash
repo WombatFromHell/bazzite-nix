@@ -141,48 +141,43 @@ tag_variants() {
 }
 
 # ── relabel image ───────────────────────────────────────────────────────────
-# Usage: relabel_image <labels_file> <kernel_version> <comma_separated_tags> [image_name]
-# Clears inherited labels, then applies new labels and annotations via buildah.
-# Operates on the (optionally rechunked) image tagged with the first tag; the
-# remaining tags are applied as aliases after commit. image_name defaults to
-# chunked-img (rechunked path); pass raw-img to skip rechunking.
+# Usage: relabel_image <labels_file> <kernel_version> [image]
+# Clears inherited labels, then re-applies new labels and annotations via
+# buildah, in two separate from/config/commit passes. Operates on raw-img
+# (before rechunking); pass chunked-img to relabel an existing rechunked image.
 
 relabel_image() {
   local labels_file="$1"
   local kernel_version="$2"
-  local anchor_tag="${3:?anchor_tag required}"
-  local tags_csv="${4:-latest}"
-  local image_name="${5:-chunked-img}"
-  local tags=()
-  IFS=',' read -ra tags <<<"$tags_csv"
-  local image="${image_name}:${anchor_tag}"
+  local image="${3:-raw-img}"
 
+  echo "Relabeling ${image}: clearing inherited labels..." >&2
+  # Clear all inherited labels from base image
+  local container
+  container=$(sudo buildah from "$image")
+  sudo buildah config --label "-" "$container"
+  sudo buildah commit --identity-label=false --rm "$container" "$image" >/dev/null
+
+  # Read new labels from file
   local labels=()
   while IFS= read -r line; do
-    [ -n "$line" ] && labels+=("--label" "$line" "--annotation" "$line")
+    [ -n "$line" ] && labels+=("$line")
   done <"${labels_file}"
 
-  echo "Relabeling ${image}: creating working container..." >&2
-  local container
-  container=$(sudo buildah from "localhost/${image}")
+  # Add bootc/ostree labels
+  labels+=(
+    "ostree.bootc=true"
+    "ostree.linux=${kernel_version}"
+  )
 
   echo "Relabeling ${image}: applying ${#labels[@]} labels and annotations..." >&2
-  sudo buildah config --label "-" \
-    "${labels[@]}" \
-    --label "ostree.bootc=true" \
-    --label "ostree.linux=${kernel_version}" \
-    --annotation "ostree.bootc=true" \
-    --annotation "ostree.linux=${kernel_version}" \
-    "$container"
-
-  echo "Relabeling ${image}: committing updated image..." >&2
-  sudo buildah commit --identity-label=false --rm "$container" "localhost/${image}" >/dev/null
-
-  local t
-  for t in "${tags[@]}"; do
-    [[ -z "$t" || "$t" == "latest" ]] && continue
-    sudo podman tag localhost/chunked-img "localhost/chunked-img:${t}"
+  # Apply labels and annotations via buildah
+  container=$(sudo buildah from "$image")
+  for line in "${labels[@]}"; do
+    [ -z "$line" ] && continue
+    sudo buildah config --label "$line" --annotation "$line" "$container"
   done
+  sudo buildah commit --identity-label=false --rm "$container" "$image" >/dev/null
 }
 
 # ── rechunk image ───────────────────────────────────────────────────────────
@@ -192,8 +187,7 @@ relabel_image() {
 # run, then pulled back into rootful storage as chunked-img; all other tags are
 # applied as aliases after (the tag loop mirrors relabel_image's).
 rechunk_image() {
-  local anchor_tag="${1:?anchor_tag required}" # stable, cache-friendly tag — e.g. the branch
-  local tags_csv="${2:-latest}"
+  local tags_csv="${1:-latest}"
   local tags=()
   IFS=',' read -ra tags <<<"$tags_csv"
   local rechunk_dir chunked
@@ -213,9 +207,10 @@ rechunk_image() {
     --bootc --format-version 2 \
     --max-layers 100 \
     --rootfs /rpm-ostree --output oci-archive:/run/out/chunked.oci 1>&2; then
-    sudo podman rmi -f localhost/raw-img >&2
+
     chunked=$(sudo podman pull "oci-archive:${rechunk_dir}/chunked.oci")
     sudo podman tag "${chunked}" localhost/chunked-img
+
     local t
     for t in "${tags[@]}"; do
       [[ -z "$t" || "$t" == "latest" ]] && continue

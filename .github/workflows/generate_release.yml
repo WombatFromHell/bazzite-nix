@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       variants:
-        description: "Comma-delimited list of variants to generate releases for (blank = all enabled)"
+        description: "Comma-delimited list of variants to generate releases for (blank = all enabled; only missing version tags are released)"
         type: string
         required: false
         default: ""
@@ -28,15 +28,13 @@ jobs:
 
       - name: Resolve variants
         id: resolve
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          INPUT="${{ inputs.variants }}"
-          if [ -z "$INPUT" ]; then
-            ENABLED=$(jq -r '.variants[] | select(.disabled != true) | .name' .github/variants.json | paste -sd ',' -)
-          else
-            ENABLED=$(echo "$INPUT" | tr ',' '\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | grep -v '^$' | paste -sd ',' -)
-          fi
-          [ -n "$ENABLED" ] || { echo "::error::No valid variants to process"; exit 1; }
-          MATRIX_JSON=$(echo "$ENABLED" | tr ',' '\n' | jq -R . | jq -sc .)
+          source scripts/just-helpers.bash
+          VARIANTS=$(resolve_release_variants "${{ inputs.variants }}" ".github/variants.json")
+          [ -n "$VARIANTS" ] || { echo "::error::No valid variants to process"; exit 1; }
+          MATRIX_JSON=$(echo "$VARIANTS" | jq -R . | jq -sc .)
           {
             echo "matrix<<EOF"
             echo "$MATRIX_JSON"

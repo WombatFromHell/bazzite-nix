@@ -144,7 +144,7 @@ relabel $variant_or_spec="{{ default_tag }}":
 
 # ── Full pipeline (mirrors the GitHub Actions workflow) ─────────────────────
 # Run the full build pipeline for a single variant:
-#   build → extract image info → assemble labels → [rechunk] → relabel → extract final ref
+#   build → extract image info → assemble labels → relabel raw-img → [rechunk] → extract final ref
 # Rechunk is disabled by default; pass rechunk=1 to enable.
 
 # Usage: just pipeline [variant-name | image:tag] [base_image_override] [force_rebuild] [rechunk]
@@ -176,15 +176,39 @@ build-all $force_build="0":
     check_variants "{{ force_build }}" "{{ repo_organization }}" "{{ image_name }}" "{{ variants_config }}"
     build_all_variants "{{ oci_output_dir }}" "{{ repo_organization }}" "{{ image_name }}" "{{ image_desc }}"
 
-# Preview changelog data a local image would produce at release time.
-# Uses the same helpers as the release pipeline (changelog.py).
-# Usage: just release-preview [image_ref] [prev_ref]
-# image_ref defaults to localhost/chunked-img; pass localhost/raw-img for non-rechunked.
-# prev_ref, if given (e.g. ghcr.io/<owner>/bazzite-nix:latest), is inspected via
-# skopeo docker:// (no pull) and renders a prev → new diff like the release does.
+# Preview the changelog a locally built image would produce at release time.
+# Uses the same helpers as the release pipeline (changelog.py); inspects the
+# local containers-storage image, so no registry access is needed.
+# Usage: just release-preview [variant_csv] [prev_ref] [variants_config]
+#   variant_csv: comma-delimited variant names (blank = all enabled).
+#                Each variant uses localhost/chunked-img:<variant>, falling back
+#                to localhost/chunked-img:latest when that tag is missing or
+#                lacks the ostree.rechunk.info label.
+#   prev_ref: optional previous release ref (e.g. ghcr.io/<owner>/bazzite-nix:testing-44.20260812.1),
+# inspected via skopeo docker:// (no pull) to render a prev → new diff.
 [group('Build Container Image')]
-release-preview $image_ref="localhost/chunked-img" $prev_ref="":
-    python3 scripts/release-preview.py "{{ image_ref }}" {{ if prev_ref != "" { "--prev " + prev_ref } else { "" } }}
+release-preview $variants="" $prev="" $config="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    CONFIG="{{ if config != "" { config } else { variants_config } }}"
+    if [[ -n "{{ variants }}" ]]; then
+        echo "{{ variants }}" | tr ',' '\n'
+    else
+        jq -r '.variants[] | select(.disabled != true) | .name' "$CONFIG"
+    fi | while read -r v; do
+        img="localhost/chunked-img:${v}"
+        label=$(sudo skopeo inspect "containers-storage:${img}" 2>/dev/null | jq -r '.Labels["ostree.rechunk.info"] // empty' 2>/dev/null || true)
+        if [[ -z "$label" ]]; then
+            echo "Warning: ${img} missing or lacks ostree.rechunk.info; trying localhost/chunked-img:latest" >&2
+            img="localhost/chunked-img:latest"
+            label=$(sudo skopeo inspect "containers-storage:${img}" 2>/dev/null | jq -r '.Labels["ostree.rechunk.info"] // empty' 2>/dev/null || true)
+        fi
+        if [[ -z "$label" ]]; then
+            echo "Skipping ${v}: no local chunked image with ostree.rechunk.info label" >&2
+            continue
+        fi
+        python3 scripts/release-preview.py "$img" {{ if prev != "" { "--prev " + prev } else { "" } }}
+    done
 
 # ── CI recipes (called from build.yml; use pre-resolved matrix values) ──────
 
@@ -210,14 +234,16 @@ push $source_ref $tags $registry $repo $suffix $variant $date $parent_version:
     push_variant "{{ source_ref }}" "{{ tags }}" "{{ registry }}" "{{ repo }}" "{{ suffix }}" "{{ variant }}" "{{ date }}" "{{ parent_version }}"
 
 # Generate a GitHub release for a variant (mirrors old release-reusable action).
-# Env required: GH_TOKEN. Needs a git checkout with recent history.
+# Skips publishing when the version tag already has a release.
+# Auth: GH_TOKEN/GITHUB_TOKEN (CI) or ambient gh login. Needs a git checkout with recent history.
 # Usage: just release <variant> [handwritten] [variants_config] [allow_disabled]
 [group('Build Container Image')]
-release $variant $handwritten="" $variants_config="{{ variants_config }}" $allow_disabled="false":
+release $variant $handwritten="" $config="" $allow_disabled="false":
     #!/usr/bin/env bash
     set -euo pipefail
     source "{{ just_helpers }}"
-    release_variant "{{ variant }}" "{{ handwritten }}" "{{ variants_config }}" "{{ allow_disabled }}"
+    CONFIG="{{ if config != "" { config } else { variants_config } }}"
+    release_variant "{{ variant }}" "{{ handwritten }}" "$CONFIG" "{{ allow_disabled }}"
 
 # ── Variant helpers ─────────────────────────────────────────────────────────
 

@@ -215,8 +215,8 @@ run_rebuild() {
   build_image "$BASE_IMAGE" "$BUILD_SCRIPT" "$CANONICAL_TAG" "$VARIANT_NAME" "./Containerfile" "${TAGS%%,*}"
 }
 
-# Shared build-pipeline core: extract info → assemble labels → [rechunk] →
-# relabel → extract final ref. The single implementation used by the local
+# Shared build-pipeline core: extract info → assemble labels → relabel raw-img →
+# [rechunk] → extract final ref. The single implementation used by the local
 # pipeline (run_pipeline), standalone rechunk (run_rechunk), and CI
 # (build_variant_ci) so local runs exercise the same code as the workflow.
 #
@@ -260,17 +260,19 @@ build_variant_core() {
 
   # Skip relabel & rechunk only when a prior rechunked image already exists
   # (raw-img always exists after the build phase, so it's always relabeled).
-  if [[ "$rechunk" == "1" && "$force_rebuild" != "1" ]] && sudo buildah images --format '{{.Name}}:{{.Tag}}' "localhost/chunked-img:${primary_tag}" >/dev/null 2>&1; then
-    echo "containers-storage image localhost/chunked-img:${primary_tag} already exists, skipping relabel & rechunk" >&2
+  if [[ "$rechunk" == "1" && "$force_rebuild" != "1" ]] && sudo buildah images --format '{{.Name}}:{{.Tag}}' "localhost/chunked-img:${anchor_tag}" >/dev/null 2>&1; then
+    echo "containers-storage image localhost/chunked-img:${anchor_tag} already exists, skipping relabel & rechunk" >&2
   else
     assemble_labels \
       "$date" "$image_desc" "$variant" "$version_label" \
       "$repo_owner" "$repo_name" "$KERNEL_VERSION" \
       "$manifest_file" "$labels_file"
+    # Relabel raw-img before rechunking so the rechunked output inherits the
+    # labels/annotations (the old working order; relabeling after rechunk loses them).
+    relabel_image "$labels_file" "$KERNEL_VERSION" "raw-img"
     if [[ "$rechunk" == "1" ]]; then
-      rechunk_image "$variant" "$tags_csv"
+      rechunk_image "$anchor_tag"
     fi
-    relabel_image "$labels_file" "$KERNEL_VERSION" "$anchor_tag" "$tags_csv" "$image_name_ref"
   fi
 
   eval "$(extract_final_ref "$anchor_tag" "$image_name_ref")"
@@ -291,19 +293,31 @@ run_rechunk() {
   local repo_organization="${5:?repo_organization required}"
   local force_build="${6:-0}"
   local TAG VARIANT_NAME CANONICAL_TAG TAGS
+  local KERNEL_VERSION MANIFEST_PACKAGES SOURCE_REF FULL_BUILD_DIGEST BUILD_DIGEST
 
   # shellcheck disable=SC1090
   source "$JUST_HELPERS_BUILD"
 
   eval "$(resolve_variant "$variant_or_spec" "$variants_config" "$image_name" "$force_build")"
 
-  if ! sudo podman image exists localhost/raw-img; then
+  if ! sudo buildah images --format '{{.Name}}' raw-img >/dev/null 2>&1; then
     echo "ERROR: Base image 'localhost/raw-img' not found. Run build step first." >&2
     return 1
   fi
 
   # force=1 so this always rechunks (never takes the skip-if-chunked-exists path)
   eval "$(build_variant_core "$VARIANT_NAME" "$TAGS" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$image_desc" "$CANONICAL_TAG" "$repo_organization" "$image_name" "1" "1")"
+
+  echo ""
+  echo "=== Rechunk complete ==="
+  echo "  Variant      : $VARIANT_NAME"
+  echo "  Version      : $CANONICAL_TAG"
+  echo "  Tags         : $TAGS"
+  echo "  Kernel       : $KERNEL_VERSION"
+  echo "  Manifest pkgs: $MANIFEST_PACKAGES"
+  echo "  Source ref   : $SOURCE_REF"
+  echo "  Full digest  : $FULL_BUILD_DIGEST"
+  echo "  Short digest : $BUILD_DIGEST"
 }
 
 # Relabel an existing image without rebuilding or rechunking, for iterating on
@@ -360,7 +374,7 @@ run_relabel() {
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$image_desc" "$VARIANT_NAME" "$CANONICAL_TAG" \
     "$repo_organization" "$image_name" "$KERNEL_VERSION" \
     "$manifest_file" "$labels_file"
-  relabel_image "$labels_file" "$KERNEL_VERSION" "$anchor_tag" "$TAGS" "$image_name_ref"
+  relabel_image "$labels_file" "$KERNEL_VERSION" "$image_name_ref"
   eval "$(extract_final_ref "$anchor_tag" "$image_name_ref")"
 
   echo ""
@@ -412,7 +426,7 @@ run_pipeline() {
     build_image "$BASE_IMAGE" "$BUILD_SCRIPT" "$CANONICAL_TAG" "$VARIANT_NAME" "./Containerfile" "${TAGS%%,*}"
   fi
 
-  # Phases 2-4: extract → assemble labels → [rechunk] → relabel → final ref (shared core).
+  # Phases 2-4: extract → assemble labels → relabel raw-img → [rechunk] → final ref (shared core).
   # Rechunk routes through run_rechunk (always rechunks); relabel routes through
   # run_relabel (always relabels) so the pipeline shares the standalone entry
   # points; the skip-if-chunked-exists guard remains for CI.
@@ -535,8 +549,11 @@ push_variant() {
 }
 
 # Generate a GitHub release for a variant (mirrors old release-reusable action).
-# Usage: release_variant <variant> [handwritten] [variants_config] [allow_disabled] [registry] [repo]
-# Env: GH_TOKEN or GITHUB_TOKEN for gh. Requires a git checkout with recent history.
+# Usage: release_variant <variant> [handwritten] [variants_config] [allow_disabled] [registry] [repo] [dry_run]
+# Auth: ambient gh session (gh auth login) or GH_TOKEN/GITHUB_TOKEN.
+# Only publishes a release when the computed version tag isn't already released.
+# dry_run=1 previews (WOULD CREATE / SKIP) without publishing anything.
+# Requires a git checkout with recent history.
 # Writes to $GITHUB_OUTPUT (title, tag) when set.
 release_variant() {
   local variant="${1:?variant required}"
@@ -545,8 +562,7 @@ release_variant() {
   local allow_disabled="${4:-false}"
   local registry="${5:-}"
   local repo="${6:-}"
-
-  : "${GH_TOKEN:?GH_TOKEN required (export GITHUB_TOKEN as GH_TOKEN)}"
+  local dry_run="${7:-0}"
 
   local owner found disabled target gh_repo
   owner="${GITHUB_REPOSITORY_OWNER:-${repo_organization:-}}"
@@ -587,7 +603,25 @@ release_variant() {
   else
     gh_args+=(--prerelease)
   fi
-  gh release create "$TAG" "${gh_args[@]}"
+
+  # Only publish a release for a version tag that isn't already documented.
+  # changelog.py computes TAG as the newest version tag; gh release view tells
+  # us whether that version already has a release (same gate for all variants).
+  if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+    echo "::notice::Release for $TAG already exists — skipping" >&2
+    return 0
+  fi
+
+  if [[ "$dry_run" == "1" ]]; then
+    echo "WOULD CREATE release: $TAG"
+    echo "  Title   : $TITLE"
+    echo "  Latest  : $([[ "$target" == "stable" ]] && echo true || echo false)"
+    echo "  Notes   : ./changelog.md"
+    echo "  (dry run — nothing published)"
+    return 0
+  fi
+
+  gh release create "$TAG" --repo "$GITHUB_REPOSITORY" "${gh_args[@]}"
 
   if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
     echo "title=${TITLE}" >>"$GITHUB_OUTPUT"
@@ -1035,6 +1069,67 @@ aggregate_variants() {
   echo "any_builds_needed=${any_builds_needed} (${count} variant(s))"
 }
 
+# ── Build-result collection & release resolution ────────────────────────────
+
+# Extract successful "Build & Push" variants from a `gh run view --json jobs`
+# payload. Usage: collect_successful_builds <jobs_json>
+# Prints the compact JSON array of {variant} entries and writes
+# successful_variants / any_successful to $GITHUB_OUTPUT when set.
+collect_successful_builds() {
+  local jobs_json="${1:?jobs_json required}"
+  local successful count
+  successful=$(echo "$jobs_json" | jq -c '[.jobs[] | select(.name | startswith("Build & Push")) | select(.conclusion == "success") | {variant: (.name | sub("^Build & Push "; ""))}]')
+  count=$(echo "$successful" | jq 'length')
+  if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
+    echo "successful_variants=${successful}" >>"$GITHUB_OUTPUT"
+    echo "any_successful=$([ "$count" -gt 0 ] && echo true || echo false)" >>"$GITHUB_OUTPUT"
+  fi
+  echo "$successful"
+  echo "Found $count successful builds" >&2
+}
+
+# List variants with successful "Build & Push" jobs across the most recent runs
+# of the build workflow (deduplicated).
+# Usage: recent_successful_builds [limit] [repo] [workflow]
+# Auth: ambient gh session or GH_TOKEN. repo defaults to GITHUB_REPOSITORY,
+# else gh infers it from the git remote.
+recent_successful_builds() {
+  local limit="${1:-5}"
+  local repo="${2:-${GITHUB_REPOSITORY:-}}"
+  local workflow="${3:-build.yml}"
+  local repo_args=()
+  [[ -n "$repo" ]] && repo_args=(--repo "$repo")
+  local run_id
+  gh run list "${repo_args[@]}" --workflow "$workflow" --limit "$limit" \
+    --json databaseId --jq '.[].databaseId' |
+    while read -r run_id; do
+      gh run view "$run_id" "${repo_args[@]}" --json jobs --jq \
+        '[.jobs[] | select(.name | startswith("Build & Push")) | select(.conclusion == "success") | (.name | sub("^Build & Push "; ""))][]'
+    done | sort -u
+}
+
+# Resolve the variants to make releases for.
+# Usage: resolve_release_variants <variants_csv> <variants_config>
+# Blank csv → all enabled variants in the config. Explicit csv → intersected
+# with recent_successful_builds (variants without a recent successful build are
+# warned about and dropped). Prints one variant per line.
+resolve_release_variants() {
+  local variants_csv="${1:-}"
+  local variants_config="${2:-.github/variants.json}"
+  local requested recent missing
+  if [[ -z "$variants_csv" ]]; then
+    jq -r '.variants[] | select(.disabled != true) | .name' "$variants_config"
+    return 0
+  fi
+  requested=$(echo "$variants_csv" | tr ',' '\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | grep -v '^$' | sort -u)
+  recent=$(recent_successful_builds | sort -u)
+  missing=$(comm -23 <(printf '%s\n' "$requested") <(printf '%s\n' "$recent"))
+  if [[ -n "$missing" ]]; then
+    echo "::warning::Skipping variant(s) with no recent successful build: $(echo "$missing" | paste -sd ',' -)" >&2
+  fi
+  comm -12 <(printf '%s\n' "$requested") <(printf '%s\n' "$recent")
+}
+
 # Build all variants that need rebuilding (reads /tmp/variants_results.json)
 # Sources build-reusable helpers.sh for the full build pipeline
 build_all_variants() {
@@ -1099,8 +1194,8 @@ build_all_variants() {
         "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$image_desc" "$variant" "$canonical_tag" \
         "$repo_organization" "$image_name" "$KERNEL_VERSION" \
         "$manifest_file" "$labels_file"
-      rechunk_image "$variant" "$tags_csv"
-      relabel_image "$labels_file" "$KERNEL_VERSION" "$variant" "$tags_csv"
+      relabel_image "$labels_file" "$KERNEL_VERSION" "raw-img"
+      rechunk_image "$variant"
     fi
 
     eval "$(extract_final_ref "$variant")"

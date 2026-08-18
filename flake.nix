@@ -20,6 +20,7 @@
           bashInteractive
           bats
           crane
+          gh
           go
           grype
           oras

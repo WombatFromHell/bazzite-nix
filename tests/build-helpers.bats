@@ -31,7 +31,7 @@ EOF
 
 # ── relabel_image ───────────────────────────────────────────────────────────
 
-@test "relabel_image clears and applies labels in one buildah session" {
+@test "relabel_image clears labels then re-applies them in separate buildah sessions" {
     local labels_file log
     labels_file="$(mktemp)"
     log="$(mktemp)"
@@ -48,29 +48,34 @@ EOF
         printf 'buildah %s\n' "$*" >>"$LOG"
         case "$1" in
         from) echo "container-123" ;;
-        mount) echo "/tmp/relabel-mnt" ;;
+        commit) echo "sha256:deadbeef" ;;
         esac
     }
-export -f buildah
+    export -f buildah
     export LOG="$log"
 
-    relabel_image "$labels_file" "6.19.8-400.fc41.x86_64" "testing"
+    # buildah commit digests must not leak to stdout (build_variant_core evals
+    # this function's stdout, so a stray commit digest would be executed).
+    run relabel_image "$labels_file" "6.19.8-400.fc41.x86_64"
+    [ "$status" -eq 0 ]
+    ! echo "$output" | grep -q "sha256:deadbeef"
+    # progress echoes go to stderr
+    echo "$output" | grep -q "Relabeling raw-img: clearing inherited labels..."
+    echo "$output" | grep -q "Relabeling raw-img: applying 4 labels and annotations..."
 
-    # Exactly one from/config/commit sequence
-    [ "$(grep -c '^buildah from ' "$log")" -eq 1 ]
-    [ "$(grep -c '^buildah commit ' "$log")" -eq 1 ]
+    # Two from/config/commit sequences: wipe first, then apply
+    [ "$(grep -c '^buildah from ' "$log")" -eq 2 ]
+    [ "$(grep -c '^buildah commit ' "$log")" -eq 2 ]
 
-    # One config call that clears labels (-) then applies the file labels
-    # and the bootc/ostree labels/annotations.
-    local config_args
-    config_args=$(grep '^buildah config ' "$log")
-    [ "$(echo "$config_args" | wc -l)" -eq 1 ]
-    [ -n "$config_args" ]
-    echo "$config_args" | grep -q -- "--label - "
-    echo "$config_args" | grep -q 'org.opencontainers.image.version=44'
-    echo "$config_args" | grep -q 'ostree.rechunk.info={"packages":{"kernel":"6.19.8"}}'
-    echo "$config_args" | grep -q -- '--label ostree.bootc=true'
-    echo "$config_args" | grep -q -- '--annotation ostree.linux=6.19.8-400.fc41.x86_64'
+    # First pass wipes all inherited labels
+    grep -q -- 'buildah config --label - container-123' "$log"
+
+    # Second pass applies each file label plus bootc/ostree labels and
+    # annotations one buildah config call at a time.
+    grep -q -- '--label org.opencontainers.image.version=44 --annotation org.opencontainers.image.version=44' "$log"
+    grep -q -- '--label ostree.rechunk.info={"packages":{"kernel":"6.19.8"}} --annotation ostree.rechunk.info={"packages":{"kernel":"6.19.8"}}' "$log"
+    grep -q -- '--label ostree.bootc=true --annotation ostree.bootc=true' "$log"
+    grep -q -- '--label ostree.linux=6.19.8-400.fc41.x86_64 --annotation ostree.linux=6.19.8-400.fc41.x86_64' "$log"
 }
 
 # ── rechunk_image ───────────────────────────────────────────────────────────
@@ -90,15 +95,15 @@ export -f buildah
     export -f podman
     export LOG="$log"
 
-    rechunk_image "stable" "stable,stable-44.1"
+    rechunk_image "stable"
 
     # compose output is an oci-archive into the mounted host temp dir
     grep -q -- '--output oci-archive:/run/out/chunked.oci' "$log"
     grep -q -- '--volume ' "$log"
-    # pulled back and tagged as chunked-img, plus alias tags
+    # pulled back and tagged as chunked-img, plus the anchor tag
     grep -q 'podman pull oci-archive:' "$log"
     grep -q 'podman tag sha256:chunked-digest localhost/chunked-img' "$log"
-    grep -q 'podman tag localhost/chunked-img localhost/chunked-img:stable-44.1' "$log"
+    grep -q 'podman tag localhost/chunked-img localhost/chunked-img:stable' "$log"
 }
 
 # ── extract_final_ref ───────────────────────────────────────────────────────

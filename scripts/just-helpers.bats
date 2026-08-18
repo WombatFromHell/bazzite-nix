@@ -296,7 +296,7 @@ build_core_mocks() {
         echo "MANIFEST_PACKAGES=42"
     }
     assemble_labels() { :; }
-    relabel_image() { echo "REL:$5:$3" >>"$calls"; }
+    relabel_image() { echo "REL:$3" >>"$calls"; }
     rechunk_image() { echo "RECHUNK:$1" >>"$calls"; }
     extract_final_ref() {
         echo "SOURCE_REF=containers-storage:localhost/$2:$1"
@@ -315,19 +315,21 @@ build_core_common="stable stable-44.1,stable 2026-08-17T00:00:00Z desc 44.1 owne
     eval "$(build_variant_core $build_core_common 0 0)"
     [ "$KERNEL_VERSION" = "6.6.0" ]
     [ "$SOURCE_REF" = "containers-storage:localhost/raw-img:stable-44.1" ]
-    grep -q "REL:raw-img:stable-44.1" "$calls"
+    grep -q "REL:raw-img" "$calls"
     ! grep -q "RECHUNK:" "$calls"
 }
 
-@test "build_variant_core rechunks and relabels chunked-img when rechunk enabled (force)" {
+@test "build_variant_core relabels raw-img before rechunking when rechunk enabled (force)" {
     local calls
     calls="$(mktemp)"
     build_core_mocks "$calls"
     local SOURCE_REF
     eval "$(build_variant_core $build_core_common 1 1)"
     [ "$SOURCE_REF" = "containers-storage:localhost/chunked-img:stable" ]
-    grep -q "RECHUNK:stable" "$calls"
-    grep -q "REL:chunked-img:stable" "$calls"
+    local rel_line rechunk_line
+    rel_line=$(grep -n "REL:raw-img" "$calls" | cut -d: -f1)
+    rechunk_line=$(grep -n "RECHUNK:stable" "$calls" | cut -d: -f1)
+    [ "$rel_line" -lt "$rechunk_line" ]
 }
 
 @test "build_variant_core skips relabel & rechunk when chunked image already exists" {
@@ -341,4 +343,115 @@ build_core_common="stable stable-44.1,stable 2026-08-17T00:00:00Z desc 44.1 owne
     [[ "$output" == *"SOURCE_REF=containers-storage:localhost/chunked-img:stable"* ]]
     ! grep -q "RECHUNK:" "$calls"
     ! grep -q "REL:" "$calls"
+}
+
+# ── collect_successful_builds ───────────────────────────────────────────────
+
+@test "collect_successful_builds extracts successful Build & Push variants" {
+    local jobs out
+    jobs='{"jobs":[{"name":"Check variants","conclusion":"success"},{"name":"Build & Push stable","conclusion":"success"},{"name":"Build & Push testing","conclusion":"failure"},{"name":"Build & Push unstable","conclusion":"success"}]}'
+    out=$(collect_successful_builds "$jobs")
+    [[ "$out" == '[{"variant":"stable"},{"variant":"unstable"}]' ]]
+}
+
+@test "collect_successful_builds returns empty array when none succeeded" {
+    local jobs out
+    jobs='{"jobs":[{"name":"Build & Push stable","conclusion":"failure"}]}'
+    out=$(collect_successful_builds "$jobs")
+    [[ "$out" == '[]' ]]
+}
+
+@test "collect_successful_builds writes GITHUB_OUTPUT" {
+    local test_dir gh_out jobs
+    test_dir="$(mktemp -d)"
+    gh_out="$test_dir/gh_output"
+    touch "$gh_out"
+    jobs='{"jobs":[{"name":"Build & Push stable","conclusion":"success"}]}'
+    GITHUB_OUTPUT="$gh_out" collect_successful_builds "$jobs" >/dev/null
+    grep -q '^successful_variants=\[{"variant":"stable"}\]$' "$gh_out"
+    grep -q '^any_successful=true$' "$gh_out"
+}
+
+# ── resolve_release_variants ────────────────────────────────────────────────
+
+@test "resolve_release_variants returns all enabled variants when blank" {
+    local test_dir out
+    test_dir="$(setup_variant_json)"
+    out=$(resolve_release_variants "" "$test_dir/variants.json")
+    [[ "$out" == "testing" ]]
+}
+
+@test "resolve_release_variants intersects explicit input with recent successful builds" {
+    local test_dir out
+    test_dir="$(setup_variant_json)"
+    recent_successful_builds() { printf 'stable\ntesting\n'; }
+    export -f recent_successful_builds
+    out=$(resolve_release_variants "testing,stable,nope" "$test_dir/variants.json")
+    [[ "$out" == $'stable\ntesting' ]]
+}
+
+@test "resolve_release_variants warns and drops variants not recently built" {
+    local test_dir out err
+    test_dir="$(setup_variant_json)"
+    recent_successful_builds() { printf 'testing\n'; }
+    export -f recent_successful_builds
+    err="$test_dir/err"
+    out=$(resolve_release_variants "testing,stable" "$test_dir/variants.json" 2>"$err")
+    [[ "$out" == "testing" ]]
+    grep -q "no recent successful build" "$err"
+}
+
+# ── release_variant (missing-tag gate & dry run) ────────────────────────────
+
+# Mock changelog.py: emit a canned TITLE/TAG and touch the notes file.
+release_variant_mocks() {
+    local fake_bin="$1"
+    cat >"$fake_bin/python3" <<'EOF'
+#!/usr/bin/env bash
+cat > output.env <<'OUT'
+TITLE="Testing (F44)"
+TAG="testing-44.1"
+OUT
+touch changelog.md
+EOF
+    chmod +x "$fake_bin/python3"
+}
+
+@test "release_variant skips when version tag already has a release" {
+    local test_dir fake_bin
+    test_dir="$(mktemp -d)"
+    fake_bin="$test_dir/bin"
+    mkdir -p "$fake_bin"
+    release_variant_mocks "$fake_bin"
+    cat >"$fake_bin/gh" <<'EOF'
+#!/usr/bin/env bash
+[[ "$1" == "release" && "$2" == "view" ]] && exit 0
+exit 1
+EOF
+    chmod +x "$fake_bin/gh"
+
+    cd "$test_dir"
+    local out
+    out=$(PATH="$fake_bin:$PATH" GITHUB_REPOSITORY="owner/repo" release_variant "testing" "" "$BATS_TEST_DIRNAME/../.github/variants.json" 2>&1) || true
+    [[ "$out" == *"already exists"* ]]
+}
+
+@test "release_variant dry run prints WOULD CREATE for a missing release" {
+    local test_dir fake_bin
+    test_dir="$(mktemp -d)"
+    fake_bin="$test_dir/bin"
+    mkdir -p "$fake_bin"
+    release_variant_mocks "$fake_bin"
+    cat >"$fake_bin/gh" <<'EOF'
+#!/usr/bin/env bash
+[[ "$1" == "release" && "$2" == "view" ]] && exit 1
+exit 1
+EOF
+    chmod +x "$fake_bin/gh"
+
+    cd "$test_dir"
+    local out
+    out=$(PATH="$fake_bin:$PATH" GITHUB_REPOSITORY="owner/repo" release_variant "testing" "" "$BATS_TEST_DIRNAME/../.github/variants.json" "" "" "" "1" 2>&1) || true
+    [[ "$out" == *"WOULD CREATE release: testing-44.1"* ]]
+    [[ "$out" == *"dry run"* ]]
 }
