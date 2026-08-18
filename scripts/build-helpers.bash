@@ -4,6 +4,13 @@
 
 set -euo pipefail
 
+# ── sudo credential caching ─────────────────────────────────────────────────
+# Prompt once at pipeline start; refresh the timestamp non-interactively
+# before long ops so a stale sudo session never interrupts a build.
+sudo_cache() { sudo -v; }
+
+sudo_refresh() { sudo -n true 2>/dev/null || true; }
+
 # ── build image ─────────────────────────────────────────────────────────────
 # Usage: build_image <base_image> <build_script> <canonical_tag> <variant> <containerfile_path> <raw_tag>
 # Tags the result as both `raw-img` (default/latest) and `raw-img:<raw_tag>`.
@@ -18,6 +25,7 @@ build_image() {
   local containerfile_path="$5"
   local raw_tag="${6:-$canonical_tag}"
 
+  sudo_refresh
   sudo buildah build \
     --tag raw-img \
     --tag "raw-img:${raw_tag}" \
@@ -141,15 +149,18 @@ tag_variants() {
 }
 
 # ── relabel image ───────────────────────────────────────────────────────────
-# Usage: relabel_image <labels_file> <kernel_version> [image]
+# Usage: relabel_image <labels_file> <kernel_version> [image] [anchor_tag]
 # Clears inherited labels, then re-applies new labels and annotations via
 # buildah, in two separate from/config/commit passes. Operates on raw-img
 # (before rechunking); pass chunked-img to relabel an existing rechunked image.
+# When anchor_tag is given, re-points it (and :latest) at the relabeled image,
+# since buildah commit only updates the bare reference.
 
 relabel_image() {
   local labels_file="$1"
   local kernel_version="$2"
   local image="${3:-raw-img}"
+  local anchor_tag="${4:-}"
 
   echo "Relabeling ${image}: clearing inherited labels..." >&2
   # Clear all inherited labels from base image
@@ -178,6 +189,13 @@ relabel_image() {
     sudo buildah config --label "$line" --annotation "$line" "$container"
   done
   sudo buildah commit --identity-label=false --rm "$container" "$image" >/dev/null
+
+  # buildah commit updates only the bare reference; re-point the anchor/alias
+  # tags so downstream lookups (extract_final_ref, run_vm) see the relabeled image.
+  if [[ -n "$anchor_tag" ]]; then
+    sudo podman tag "localhost/${image}" "localhost/${image}:${anchor_tag}" 2>/dev/null || true
+    sudo podman tag "localhost/${image}" "localhost/${image}:latest" 2>/dev/null || true
+  fi
 }
 
 # ── rechunk image ───────────────────────────────────────────────────────────
@@ -197,6 +215,7 @@ rechunk_image() {
   trap "sudo rm -rf '${rechunk_dir}'" EXIT
 
   echo "Running 'rpm-ostree compose build-chunked-oci' -> ${rechunk_dir}..." >&2
+  sudo_refresh
   if sudo podman run --rm --pull=never --privileged \
     -i --init --sig-proxy \
     --mount=type=image,src=localhost/raw-img,target=/rpm-ostree \
@@ -209,6 +228,10 @@ rechunk_image() {
     --rootfs /rpm-ostree --output oci-archive:/run/out/chunked.oci 1>&2; then
 
     chunked=$(sudo podman pull "oci-archive:${rechunk_dir}/chunked.oci")
+    if [[ -z "$chunked" ]]; then
+      echo "::error::Failed to load rechunked oci-archive from ${rechunk_dir}/chunked.oci" >&2
+      exit 1
+    fi
     sudo podman tag "${chunked}" localhost/chunked-img
 
     local t

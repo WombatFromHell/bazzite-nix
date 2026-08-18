@@ -214,14 +214,14 @@ release-preview $variants="" $prev="" $config="":
 
 # Build a single pre-resolved variant (mirrors old build-reusable action).
 # Values come from check-variants output — no re-resolution.
-# Usage: just ci-pipeline <variant> <base_image> <build_script> <canonical_tag> <tags> <date> <image_desc> <parent_version> [rechunk]
+# Usage: just ci-pipeline <variant> <base_image> <build_script> <canonical_tag> <date> <image_desc> <parent_version> [rechunk]
 # rechunk=1 enables rpm-ostree chunking (build.yml passes 1; leave 0 for raw-img-only).
 [group('Build Container Image')]
-ci-pipeline $variant $base_image $build_script $canonical_tag $tags $date $image_desc $parent_version $rechunk="0":
+ci-pipeline $variant $base_image $build_script $canonical_tag $date $image_desc $parent_version $rechunk="0":
     #!/usr/bin/env bash
     set -euo pipefail
     source "{{ just_helpers }}"
-    build_variant_ci "{{ variant }}" "{{ base_image }}" "{{ build_script }}" "{{ canonical_tag }}" "{{ tags }}" "{{ date }}" "{{ image_desc }}" "{{ parent_version }}" "{{ repo_organization }}" "{{ image_name }}" "{{ rechunk }}"
+    build_variant_ci "{{ variant }}" "{{ base_image }}" "{{ build_script }}" "{{ canonical_tag }}" "{{ date }}" "{{ image_desc }}" "{{ parent_version }}" "{{ repo_organization }}" "{{ image_name }}" "{{ rechunk }}"
 
 # Push, sign, and verify a built image (mirrors old push-reusable action).
 # Env required: GITHUB_ACTOR, GITHUB_TOKEN, SIGNING_SECRET.

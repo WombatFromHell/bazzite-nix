@@ -7,6 +7,21 @@ setup() {
     source "$BATS_TEST_DIRNAME/../scripts/build-helpers.bash"
 }
 
+# ── sudo credential caching ─────────────────────────────────────────────────
+
+@test "sudo_cache validates and sudo_refresh refreshes non-interactively" {
+    local log
+    log="$(mktemp)"
+    sudo() { printf 'sudo %s\n' "$*" >>"$LOG"; return 0; }
+    export -f sudo
+    export LOG="$log"
+
+    sudo_cache
+    sudo_refresh
+    grep -q '^sudo -v$' "$log"
+    grep -q '^sudo -n true$' "$log"
+}
+
 # ── extract_image_info ──────────────────────────────────────────────────────
 
 @test "extract_image_info reads kernel and manifest in one podman run" {

@@ -10,7 +10,9 @@
         "latest": "boolean (optional, default: false)",
         "tags": {
           "branch": "string (optional, default: base_image_tag)",
-          "versioned": ["string (supports {canonical}, {branch} placeholders)"]
+          "versioned": [
+            "string (supports {canonical}, {branch}, {major}, {sha256} placeholders; {sha256} is resolved at push time from the built image's digest, not from tags.csv)"
+          ]
         },
         "tags_default": "If 'tags' is omitted, generates: [branch-canonical, branch-major, branch] (mirrors the unstable variant)",
         "disabled": "boolean (optional, default: false)",
@@ -35,20 +37,11 @@
     {
       "name": "stable",
       "base_image": "ghcr.io/ublue-os/bazzite:stable",
-      "tags": {
-        "versioned": [
-          "{canonical}",
-          "{branch}-{canonical}",
-          "{branch}-{major}",
-          "{branch}",
-          "{sha256}"
-        ]
-      },
       "cleanup": true
     },
     {
       "name": "testing",
-      "base_image": "ghcr.io/ublue-os/bazzite:testing-44.20260814",
+      "base_image": "ghcr.io/ublue-os/bazzite:testing",
       "latest": true,
       "cleanup": true
     },

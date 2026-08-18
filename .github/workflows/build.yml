@@ -111,7 +111,6 @@ jobs:
             "${{ matrix.variant_data.base_image }}" \
             "${{ matrix.variant_data.build_script || 'build.sh' }}" \
             "${{ matrix.variant_data.canonical_tag }}" \
-            "${{ matrix.variant_data.tags }}" \
             "${{ needs.check_and_aggregate.outputs.date }}" \
             "${{ needs.check_and_aggregate.outputs.image_desc }}" \
             "${{ matrix.variant_data.parent_version }}" \

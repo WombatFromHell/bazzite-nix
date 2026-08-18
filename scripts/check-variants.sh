@@ -142,7 +142,8 @@ for ((i = 0; i < variant_count; i++)); do
   # Compute canonical tag, passing the variant name as branch for accurate collision checks.
   read -r canonical collision_detected <<<"$(compute_canonical_tag "$parent_version" "$prefix" "$FORCE_BUILD" "$variant")"
 
-  # Generate tags (pass digest so {sha256} placeholders can resolve)
+  # Generate tags (no digest — {sha256} tags are resolved at push time from the
+  # built image's digest, not the upstream base image's)
   tags=$(generate_tags "$variant" "$canonical" "$latest" "$tags_json" "")
 
   # Find previous build reference for rechunk

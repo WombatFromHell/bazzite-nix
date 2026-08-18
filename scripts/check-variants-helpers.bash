@@ -146,7 +146,7 @@ resolve_variant() {
   local registry="${5:-}"
   local check_helpers="${CHECK_VARIANTS_HELPERS:-scripts/check-variants-helpers.bash}"
   local spec row base_image build_script suffix image_name_resolved tag canonical
-  local latest tags_json tags_csv digest collision_detected
+  local latest tags_json tags_csv collision_detected
 
   # shellcheck disable=SC1090
   source "$check_helpers"
@@ -168,13 +168,11 @@ resolve_variant() {
             | (.build_script // "build.sh")
         ' "$variants_config" | head -1)
     [[ -z "$build_script" ]] && build_script="build.sh"
-    # Extract real version + digest from upstream image label
+    # Extract real version from upstream image label
     canonical=$(skopeo inspect "docker://${spec}" 2>/dev/null |
       jq -r '.Labels["org.opencontainers.image.version"] // empty' ||
       true)
     [[ -z "$canonical" || "$canonical" == "null" ]] && canonical="$tag"
-    digest=$(skopeo inspect "docker://${spec}" 2>/dev/null |
-      jq -r '.Digest // empty' | sed 's/sha256://' || true)
     # No variants.json entry to source a tags template from — single-tag fallback
     tags_csv="$tag"
     echo "TARGET_IMAGE=\"localhost/$image_name\""
@@ -207,12 +205,11 @@ resolve_variant() {
   image_name_resolved="$image_name${suffix}"
   tag="${base_image##*:}"
 
-  # Extract real version + digest from upstream image label
+  # Extract real version from upstream image label
   local inspect_json
   inspect_json=$(skopeo inspect "docker://${base_image}" 2>/dev/null) || true
   canonical=$(echo "$inspect_json" | jq -r '.Labels["org.opencontainers.image.version"] // empty' 2>/dev/null || true)
   [[ -z "$canonical" || "$canonical" == "null" ]] && canonical="$tag"
-  digest=$(echo "$inspect_json" | jq -r '.Digest // empty' 2>/dev/null | sed 's/sha256://' || true)
 
   # Strip branch prefix from canonical and handle version collisions the same way
   # CI does (compute_canonical_tag): on force_build, if <branch>-<canonical> already
@@ -242,7 +239,9 @@ resolve_variant() {
   # like "testing" is the base image's dated suffix (e.g. "testing-44.20260814"),
   # not a plain branch name. This mirrors check-variants.sh, which passes the
   # variant .name into compute_canonical_tag/generate_tags.
-  tags_csv=$(generate_tags "$spec" "$canonical" "$latest" "$tags_json" "$digest")
+  # No digest is passed: {sha256} tags are resolved at push time from the built
+  # image's digest (mirrors check-variants.sh).
+  tags_csv=$(generate_tags "$spec" "$canonical" "$latest" "$tags_json" "")
 
   echo "TARGET_IMAGE=\"localhost/$image_name_resolved\""
   echo "TAG=\"${spec}\""

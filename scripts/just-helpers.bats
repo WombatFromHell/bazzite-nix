@@ -160,6 +160,35 @@ EOF
     [[ "$output" == *'COLLISION_DETECTED="true"'* ]]
 }
 
+@test "resolve_variant drops {sha256} tags (digest is resolved at push time, not from upstream)" {
+    local test_dir
+    test_dir="$(mktemp -d)"
+    cat > "$test_dir/variants.json" <<'EOF'
+{
+  "variants": [
+    {
+      "name": "stable",
+      "base_image": "ghcr.io/ublue-os/bazzite:stable",
+      "tags": {
+        "versioned": ["{canonical}", "{branch}", "{sha256}"]
+      }
+    }
+  ]
+}
+EOF
+
+    # Mock skopeo: upstream has a digest — resolve_variant must NOT use it for tags
+    skopeo() {
+        echo '{"Labels":{"org.opencontainers.image.version":"1.0.0"},"Digest":"sha256:fbd9a04deadbeef"}'
+    }
+    export -f skopeo
+
+    local output
+    output=$(resolve_variant "stable" "$test_dir/variants.json" "bazzite-nix")
+    [[ "$output" == *'TAGS="1.0.0,stable"'* ]]
+    ! [[ "$output" == *"fbd9a04deadbeef"* ]]
+}
+
 @test "resolve_variant handles image:tag spec" {
     local test_dir
     test_dir="$(setup_variant_json)"
@@ -305,7 +334,7 @@ build_core_mocks() {
     }
 }
 
-build_core_common="stable stable-44.1,stable 2026-08-17T00:00:00Z desc 44.1 owner repo"
+build_core_common="stable 2026-08-17T00:00:00Z desc 44.1 owner repo"
 
 @test "build_variant_core relabels raw-img directly when rechunk disabled" {
     local calls
@@ -314,12 +343,12 @@ build_core_common="stable stable-44.1,stable 2026-08-17T00:00:00Z desc 44.1 owne
     local SOURCE_REF KERNEL_VERSION
     eval "$(build_variant_core $build_core_common 0 0)"
     [ "$KERNEL_VERSION" = "6.6.0" ]
-    [ "$SOURCE_REF" = "containers-storage:localhost/raw-img:stable-44.1" ]
+    [ "$SOURCE_REF" = "containers-storage:localhost/raw-img:stable" ]
     grep -q "REL:raw-img" "$calls"
     ! grep -q "RECHUNK:" "$calls"
 }
 
-@test "build_variant_core relabels raw-img before rechunking when rechunk enabled (force)" {
+@test "build_variant_core rechunks then relabels the rechunked image when rechunk enabled (force)" {
     local calls
     calls="$(mktemp)"
     build_core_mocks "$calls"
@@ -327,9 +356,9 @@ build_core_common="stable stable-44.1,stable 2026-08-17T00:00:00Z desc 44.1 owne
     eval "$(build_variant_core $build_core_common 1 1)"
     [ "$SOURCE_REF" = "containers-storage:localhost/chunked-img:stable" ]
     local rel_line rechunk_line
-    rel_line=$(grep -n "REL:raw-img" "$calls" | cut -d: -f1)
+    rel_line=$(grep -n "REL:chunked-img" "$calls" | cut -d: -f1)
     rechunk_line=$(grep -n "RECHUNK:stable" "$calls" | cut -d: -f1)
-    [ "$rel_line" -lt "$rechunk_line" ]
+    [ "$rechunk_line" -lt "$rel_line" ]
 }
 
 @test "build_variant_core skips relabel & rechunk when chunked image already exists" {

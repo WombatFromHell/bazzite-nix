@@ -194,9 +194,10 @@ run_build() {
   local TARGET_IMAGE TAG BASE_IMAGE BUILD_SCRIPT VARIANT_NAME CANONICAL_TAG TAGS
   # shellcheck disable=SC1090
   source "$helpers_build"
+  sudo_cache
   eval "$(resolve_variant "$variant_or_spec" "$variants_config" "$image_name")"
   [[ -n "$base_image_override" ]] && BASE_IMAGE="$base_image_override"
-  build_image "$BASE_IMAGE" "$BUILD_SCRIPT" "$CANONICAL_TAG" "$VARIANT_NAME" "./Containerfile" "${TAGS%%,*}"
+  build_image "$BASE_IMAGE" "$BUILD_SCRIPT" "$CANONICAL_TAG" "$VARIANT_NAME" "./Containerfile" "$VARIANT_NAME"
 }
 
 # Force-rebuild a container image, evicting any cached local image first
@@ -209,22 +210,23 @@ run_rebuild() {
   local TARGET_IMAGE TAG BASE_IMAGE BUILD_SCRIPT VARIANT_NAME CANONICAL_TAG TAGS
   # shellcheck disable=SC1090
   source "$helpers_build"
+  sudo_cache
   eval "$(resolve_variant "$variant_or_spec" "$variants_config" "$image_name" "1")"
   [[ -n "$base_image_override" ]] && BASE_IMAGE="$base_image_override"
   sudo buildah rmi localhost/raw-img 2>/dev/null || true
-  build_image "$BASE_IMAGE" "$BUILD_SCRIPT" "$CANONICAL_TAG" "$VARIANT_NAME" "./Containerfile" "${TAGS%%,*}"
+  build_image "$BASE_IMAGE" "$BUILD_SCRIPT" "$CANONICAL_TAG" "$VARIANT_NAME" "./Containerfile" "$VARIANT_NAME"
 }
 
-# Shared build-pipeline core: extract info → assemble labels → relabel raw-img →
-# [rechunk] → extract final ref. The single implementation used by the local
-# pipeline (run_pipeline), standalone rechunk (run_rechunk), and CI
-# (build_variant_ci) so local runs exercise the same code as the workflow.
+# Shared build-pipeline core: extract info → assemble labels → relabel →
+# [rechunk] → relabel chunked-img → extract final ref. The single implementation
+# used by the local pipeline (run_pipeline), standalone rechunk (run_rechunk), and
+# CI (build_variant_ci) so local runs exercise the same code as the workflow.
 #
 # Rechunk is opt-in (rechunk=0 default). Re-enabling it was a one-switch change:
 # SECURITY_OPTS (--security-opt label=disable) was the hardlink-blowup root cause
 # and is gone; CI now passes rechunk=1.
 #
-# Usage: build_variant_core <variant> <tags_csv> <date> <image_desc> <version_label> \
+# Usage: build_variant_core <variant> <date> <image_desc> <version_label> \
 #                           <repo_owner> <repo_name> [force_rebuild] [rechunk]
 # PRECONDITION: localhost/raw-img exists (built by the caller) and build-helpers.bash
 # is sourced ($JUST_HELPERS_BUILD). Requires GITHUB_OUTPUT unset so extract_* emit
@@ -233,15 +235,13 @@ run_rebuild() {
 # SOURCE_REF, FULL_BUILD_DIGEST, BUILD_DIGEST). Call with: eval "$(build_variant_core ...)"
 build_variant_core() {
   local variant="${1:?variant required}"
-  local tags_csv="${2:?tags_csv required}"
-  local date="${3:?date required}"
-  local image_desc="${4:?image_desc required}"
-  local version_label="${5:?version_label required}"
-  local repo_owner="${6:?repo_owner required}"
-  local repo_name="${7:?repo_name required}"
-  local force_rebuild="${8:-0}"
-  local rechunk="${9:-0}"
-  local primary_tag="${tags_csv%%,*}"
+  local date="${2:?date required}"
+  local image_desc="${3:?image_desc required}"
+  local version_label="${4:?version_label required}"
+  local repo_owner="${5:?repo_owner required}"
+  local repo_name="${6:?repo_name required}"
+  local force_rebuild="${7:-0}"
+  local rechunk="${8:-0}"
   local manifest_file="/tmp/bazzite-nix-manifest.json"
   local labels_file="/tmp/bazzite-nix-labels.txt"
   local KERNEL_VERSION MANIFEST_PACKAGES SOURCE_REF FULL_BUILD_DIGEST BUILD_DIGEST
@@ -250,11 +250,12 @@ build_variant_core() {
   unset GITHUB_OUTPUT
   eval "$(extract_image_info "$manifest_file")"
 
+  # Anchor on the variant name so different variant pipelines never clobber
+  # each other's working images (raw-img:<variant> / chunked-img:<variant>).
+  anchor_tag="$variant"
   if [[ "$rechunk" == "1" ]]; then
-    anchor_tag="$variant"
     image_name_ref="chunked-img"
   else
-    anchor_tag="$primary_tag"
     image_name_ref="raw-img"
   fi
 
@@ -267,11 +268,14 @@ build_variant_core() {
       "$date" "$image_desc" "$variant" "$version_label" \
       "$repo_owner" "$repo_name" "$KERNEL_VERSION" \
       "$manifest_file" "$labels_file"
-    # Relabel raw-img before rechunking so the rechunked output inherits the
-    # labels/annotations (the old working order; relabeling after rechunk loses them).
-    relabel_image "$labels_file" "$KERNEL_VERSION" "raw-img"
     if [[ "$rechunk" == "1" ]]; then
       rechunk_image "$anchor_tag"
+      # rpm-ostree build-chunked-oci does not carry the source image's labels
+      # into the chunked output, so the labels are applied to the rechunked
+      # image itself (relabel_image re-points the anchor tag after commit).
+      relabel_image "$labels_file" "$KERNEL_VERSION" "chunked-img" "$anchor_tag"
+    else
+      relabel_image "$labels_file" "$KERNEL_VERSION" "raw-img" "$anchor_tag"
     fi
   fi
 
@@ -285,6 +289,9 @@ build_variant_core() {
 }
 
 # Relabel and rechunk raw-img to containers-storage with bootc chunking
+# Prints eval-able uppercase assignments (KERNEL_VERSION, MANIFEST_PACKAGES,
+# SOURCE_REF, FULL_BUILD_DIGEST, BUILD_DIGEST); the human summary goes to
+# stderr. Call with: eval "$(run_rechunk ...)"
 run_rechunk() {
   local variant_or_spec="${1:?variant_or_spec required}"
   local variants_config="${2:-.github/variants.json}"
@@ -297,6 +304,7 @@ run_rechunk() {
 
   # shellcheck disable=SC1090
   source "$JUST_HELPERS_BUILD"
+  sudo_cache
 
   eval "$(resolve_variant "$variant_or_spec" "$variants_config" "$image_name" "$force_build")"
 
@@ -306,18 +314,26 @@ run_rechunk() {
   fi
 
   # force=1 so this always rechunks (never takes the skip-if-chunked-exists path)
-  eval "$(build_variant_core "$VARIANT_NAME" "$TAGS" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$image_desc" "$CANONICAL_TAG" "$repo_organization" "$image_name" "1" "1")"
+  eval "$(build_variant_core "$VARIANT_NAME" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$image_desc" "$CANONICAL_TAG" "$repo_organization" "$image_name" "1" "1")"
 
+  # Human summary goes to stderr; stdout carries the eval-able assignments so
+  # run_pipeline can capture them (mirrors build_variant_core's contract).
   echo ""
-  echo "=== Rechunk complete ==="
-  echo "  Variant      : $VARIANT_NAME"
-  echo "  Version      : $CANONICAL_TAG"
-  echo "  Tags         : $TAGS"
-  echo "  Kernel       : $KERNEL_VERSION"
-  echo "  Manifest pkgs: $MANIFEST_PACKAGES"
-  echo "  Source ref   : $SOURCE_REF"
-  echo "  Full digest  : $FULL_BUILD_DIGEST"
-  echo "  Short digest : $BUILD_DIGEST"
+  echo "=== Rechunk complete ===" >&2
+  echo "  Variant      : $VARIANT_NAME" >&2
+  echo "  Version      : $CANONICAL_TAG" >&2
+  echo "  Tags         : $TAGS" >&2
+  echo "  Kernel       : $KERNEL_VERSION" >&2
+  echo "  Manifest pkgs: $MANIFEST_PACKAGES" >&2
+  echo "  Source ref   : $SOURCE_REF" >&2
+  echo "  Full digest  : $FULL_BUILD_DIGEST" >&2
+  echo "  Short digest : $BUILD_DIGEST" >&2
+
+  echo "KERNEL_VERSION=${KERNEL_VERSION}"
+  echo "MANIFEST_PACKAGES=${MANIFEST_PACKAGES}"
+  echo "SOURCE_REF=${SOURCE_REF}"
+  echo "FULL_BUILD_DIGEST=${FULL_BUILD_DIGEST}"
+  echo "BUILD_DIGEST=${BUILD_DIGEST}"
 }
 
 # Relabel an existing image without rebuilding or rechunking, for iterating on
@@ -339,29 +355,26 @@ run_relabel() {
   local repo_organization="${5:?repo_organization required}"
   local image_name_ref="${6:-}"
   local TAG VARIANT_NAME CANONICAL_TAG TAGS
-  local primary_tag anchor_tag manifest_file labels_file
+  local anchor_tag manifest_file labels_file
 
   # shellcheck disable=SC1090
   source "$JUST_HELPERS_BUILD"
+  sudo_cache
 
   eval "$(resolve_variant "$variant_or_spec" "$variants_config" "$image_name")"
 
-  primary_tag="${TAGS%%,*}"
-  if [[ -n "$image_name_ref" ]]; then
-    if [[ "$image_name_ref" == "chunked-img" ]]; then
-      anchor_tag="$VARIANT_NAME"
+  # Anchor on the variant name so different variant pipelines never clobber
+  # each other's working images (raw-img:<variant> / chunked-img:<variant>).
+  anchor_tag="$VARIANT_NAME"
+  if [[ -z "$image_name_ref" ]]; then
+    if sudo buildah images --format '{{.Name}}:{{.Tag}}' "localhost/chunked-img:${VARIANT_NAME}" >/dev/null 2>&1; then
+      image_name_ref="chunked-img"
+    elif sudo buildah images --format '{{.Name}}:{{.Tag}}' "localhost/raw-img:${VARIANT_NAME}" >/dev/null 2>&1; then
+      image_name_ref="raw-img"
     else
-      anchor_tag="$primary_tag"
+      echo "ERROR: neither localhost/chunked-img:${VARIANT_NAME} nor localhost/raw-img:${VARIANT_NAME} exists; run 'just pipeline' first" >&2
+      return 1
     fi
-  elif sudo buildah images --format '{{.Name}}:{{.Tag}}' "localhost/chunked-img:${VARIANT_NAME}" >/dev/null 2>&1; then
-    image_name_ref="chunked-img"
-    anchor_tag="$VARIANT_NAME"
-  elif sudo buildah images --format '{{.Name}}:{{.Tag}}' "localhost/raw-img:${primary_tag}" >/dev/null 2>&1; then
-    image_name_ref="raw-img"
-    anchor_tag="$primary_tag"
-  else
-    echo "ERROR: neither localhost/chunked-img:${VARIANT_NAME} nor localhost/raw-img:${primary_tag} exists; run 'just pipeline' first" >&2
-    return 1
   fi
 
   echo "Relabeling existing localhost/${image_name_ref}:${anchor_tag}" >&2
@@ -374,19 +387,27 @@ run_relabel() {
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$image_desc" "$VARIANT_NAME" "$CANONICAL_TAG" \
     "$repo_organization" "$image_name" "$KERNEL_VERSION" \
     "$manifest_file" "$labels_file"
-  relabel_image "$labels_file" "$KERNEL_VERSION" "$image_name_ref"
+  relabel_image "$labels_file" "$KERNEL_VERSION" "$image_name_ref" "$anchor_tag"
   eval "$(extract_final_ref "$anchor_tag" "$image_name_ref")"
 
+  # Human summary goes to stderr; stdout carries the eval-able assignments so
+  # run_pipeline can capture them (mirrors build_variant_core's contract).
   echo ""
-  echo "=== Relabel complete ==="
-  echo "  Variant      : $VARIANT_NAME"
-  echo "  Version      : $CANONICAL_TAG"
-  echo "  Tags         : $TAGS"
-  echo "  Kernel       : $KERNEL_VERSION"
-  echo "  Manifest pkgs: $MANIFEST_PACKAGES"
-  echo "  Source ref   : $SOURCE_REF"
-  echo "  Full digest  : $FULL_BUILD_DIGEST"
-  echo "  Short digest : $BUILD_DIGEST"
+  echo "=== Relabel complete ===" >&2
+  echo "  Variant      : $VARIANT_NAME" >&2
+  echo "  Version      : $CANONICAL_TAG" >&2
+  echo "  Tags         : $TAGS" >&2
+  echo "  Kernel       : $KERNEL_VERSION" >&2
+  echo "  Manifest pkgs: $MANIFEST_PACKAGES" >&2
+  echo "  Source ref   : $SOURCE_REF" >&2
+  echo "  Full digest  : $FULL_BUILD_DIGEST" >&2
+  echo "  Short digest : $BUILD_DIGEST" >&2
+
+  echo "KERNEL_VERSION=${KERNEL_VERSION}"
+  echo "MANIFEST_PACKAGES=${MANIFEST_PACKAGES}"
+  echo "SOURCE_REF=${SOURCE_REF}"
+  echo "FULL_BUILD_DIGEST=${FULL_BUILD_DIGEST}"
+  echo "BUILD_DIGEST=${BUILD_DIGEST}"
 }
 
 # Run the full build pipeline for a single variant:
@@ -407,6 +428,7 @@ run_pipeline() {
 
   # shellcheck disable=SC1090
   source "$helpers_build"
+  sudo_cache
 
   eval "$(resolve_variant "$variant_or_spec" "$variants_config" "$image_name" "$force_rebuild")"
   [[ -n "$base_image_override" ]] && BASE_IMAGE="$base_image_override"
@@ -419,11 +441,11 @@ run_pipeline() {
   if [[ "$force_rebuild" == "1" ]]; then
     echo "Force rebuild: removing existing container image..."
     sudo buildah rmi raw-img 2>/dev/null || true
-    build_image "$BASE_IMAGE" "$BUILD_SCRIPT" "$CANONICAL_TAG" "$VARIANT_NAME" "./Containerfile" "${TAGS%%,*}"
+    build_image "$BASE_IMAGE" "$BUILD_SCRIPT" "$CANONICAL_TAG" "$VARIANT_NAME" "./Containerfile" "$VARIANT_NAME"
   elif sudo buildah images --format '{{.Name}}' raw-img >/dev/null 2>&1; then
     echo "Container image raw-img already exists, skipping build"
   else
-    build_image "$BASE_IMAGE" "$BUILD_SCRIPT" "$CANONICAL_TAG" "$VARIANT_NAME" "./Containerfile" "${TAGS%%,*}"
+    build_image "$BASE_IMAGE" "$BUILD_SCRIPT" "$CANONICAL_TAG" "$VARIANT_NAME" "./Containerfile" "$VARIANT_NAME"
   fi
 
   # Phases 2-4: extract → assemble labels → relabel raw-img → [rechunk] → final ref (shared core).
@@ -431,11 +453,13 @@ run_pipeline() {
   # run_relabel (always relabels) so the pipeline shares the standalone entry
   # points; the skip-if-chunked-exists guard remains for CI.
   echo "=== Phase 2-4: Rechunk, assemble labels, relabel & extract final ref ==="
+  local core_output
   if [[ "$rechunk" == "1" ]]; then
-    run_rechunk "$variant_or_spec" "$variants_config" "$image_name" "$image_desc" "$repo_organization" "$force_rebuild"
+    core_output="$(run_rechunk "$variant_or_spec" "$variants_config" "$image_name" "$image_desc" "$repo_organization" "$force_rebuild")" || return $?
   else
-    run_relabel "$variant_or_spec" "$variants_config" "$image_name" "$image_desc" "$repo_organization" "raw-img"
+    core_output="$(run_relabel "$variant_or_spec" "$variants_config" "$image_name" "$image_desc" "$repo_organization" "raw-img")" || return $?
   fi
+  eval "$core_output"
 
   echo ""
   echo "=== Pipeline complete ==="
@@ -453,7 +477,7 @@ run_pipeline() {
 
 # Build a single variant from pre-resolved values (the CI matrix), mirroring the
 # old build-reusable action. No re-resolution — preserves matrix collision handling.
-# Usage: build_variant_ci <variant> <base_image> <build_script> <canonical_tag> <tags_csv> \
+# Usage: build_variant_ci <variant> <base_image> <build_script> <canonical_tag> \
 #                         <date> <image_desc> <parent_version> [repo_owner] [repo_name] [rechunk]
 # rechunk=1 would enable rpm-ostree chunking here too (currently reworked, out of scope).
 # Writes to $GITHUB_OUTPUT (source_ref, full_build_digest, build_digest, kernel_version,
@@ -463,26 +487,24 @@ build_variant_ci() {
   local base_image="${2:?base_image required}"
   local build_script="${3:-build.sh}"
   local canonical_tag="${4:?canonical_tag required}"
-  local tags_csv="${5:?tags_csv required}"
-  local date="${6:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
-  local image_desc="${7:-}"
-  local parent_version="${8:-}"
-  local repo_owner="${9:-}"
-  local repo_name="${10:-}"
-  local rechunk="${11:-0}"
+  local date="${5:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
+  local image_desc="${6:-}"
+  local parent_version="${7:-}"
+  local repo_owner="${8:-}"
+  local repo_name="${9:-}"
+  local rechunk="${10:-0}"
 
   local helpers_build="$JUST_HELPERS_BUILD"
-  local primary_tag="${tags_csv%%,*}"
   local KERNEL_VERSION MANIFEST_PACKAGES SOURCE_REF FULL_BUILD_DIGEST BUILD_DIGEST
   local gh_output="${GITHUB_OUTPUT:-}"
 
   # shellcheck disable=SC1090
   source "$helpers_build"
 
-  build_image "$base_image" "$build_script" "$canonical_tag" "$variant" "./Containerfile" "$primary_tag"
+  build_image "$base_image" "$build_script" "$canonical_tag" "$variant" "./Containerfile" "$variant"
 
   # build_variant_core unsets GITHUB_OUTPUT so extract_* emit uppercase vars we can eval
-  eval "$(build_variant_core "$variant" "$tags_csv" "$date" "$image_desc" "$parent_version" "$repo_owner" "$repo_name" "0" "$rechunk")"
+  eval "$(build_variant_core "$variant" "$date" "$image_desc" "$parent_version" "$repo_owner" "$repo_name" "0" "$rechunk")"
 
   if [[ -n "$gh_output" ]]; then
     {
@@ -831,11 +853,11 @@ build_vm_image() {
   if [[ "$force_rebuild" == "1" ]]; then
     echo "Force rebuilding container image..."
     sudo buildah rmi --force raw-img 2>/dev/null || true
-    build_image "$BASE_IMAGE" "$BUILD_SCRIPT" "$CANONICAL_TAG" "$VARIANT_NAME" "./Containerfile" "${TAGS%%,*}"
+    build_image "$BASE_IMAGE" "$BUILD_SCRIPT" "$CANONICAL_TAG" "$VARIANT_NAME" "./Containerfile" "$VARIANT_NAME"
   elif sudo buildah images --format '{{.Name}}' raw-img >/dev/null 2>&1; then
     echo "Container image raw-img already exists, skipping build"
   else
-    build_image "$BASE_IMAGE" "$BUILD_SCRIPT" "$CANONICAL_TAG" "$VARIANT_NAME" "./Containerfile" "${TAGS%%,*}"
+    build_image "$BASE_IMAGE" "$BUILD_SCRIPT" "$CANONICAL_TAG" "$VARIANT_NAME" "./Containerfile" "$VARIANT_NAME"
   fi
 
   # Tag for BIB — bootc-image-builder reads from podman storage
@@ -1143,6 +1165,7 @@ build_all_variants() {
   local manifest_file labels_file KERNEL_VERSION SOURCE_REF BUILD_DIGEST
   # shellcheck disable=SC1090
   source "$helpers_build"
+  sudo_cache
 
   results_file="/tmp/variants_results.json"
   if [[ ! -f "$results_file" ]]; then
@@ -1181,7 +1204,7 @@ build_all_variants() {
     if sudo buildah images --format '{{.Name}}' raw-img >/dev/null 2>&1; then
       echo "Container image raw-img already exists, skipping build"
     else
-      build_image "$base_image" "$build_script" "$canonical_tag" "$variant" "./Containerfile" "${tags_csv%%,*}"
+      build_image "$base_image" "$build_script" "$canonical_tag" "$variant" "./Containerfile" "$variant"
     fi
 
     eval "$(extract_image_info "$manifest_file")"
@@ -1194,8 +1217,8 @@ build_all_variants() {
         "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$image_desc" "$variant" "$canonical_tag" \
         "$repo_organization" "$image_name" "$KERNEL_VERSION" \
         "$manifest_file" "$labels_file"
-      relabel_image "$labels_file" "$KERNEL_VERSION" "raw-img"
       rechunk_image "$variant"
+      relabel_image "$labels_file" "$KERNEL_VERSION" "chunked-img" "$variant"
     fi
 
     eval "$(extract_final_ref "$variant")"
