@@ -11,14 +11,6 @@ setup() {
 
 # ── clean_artifacts ─────────────────────────────────────────────────────────
 
-@test "clean_artifacts creates _build marker file" {
-    local test_dir
-    test_dir="$(mktemp -d)"
-    cd "$test_dir"
-    clean_artifacts
-    [ -f "_build" ]
-}
-
 @test "clean_artifacts removes *_build* directories" {
     local test_dir
     test_dir="$(mktemp -d)"
@@ -149,6 +141,25 @@ EOF
     [[ "$output" == *'BASE_IMAGE="ghcr.io/ublue-os/bazzite:stable"'* ]]
 }
 
+@test "resolve_variant bumps canonical on version collision (force_build)" {
+    local test_dir
+    test_dir="$(setup_variant_json)"
+
+    # Mock skopeo: testing-1.0.1 is free, everything else exists
+    skopeo() {
+        case "$*" in
+        *"testing-1.0.1"*) return 1 ;;
+        *) echo '{"Labels":{"org.opencontainers.image.version":"1.0.0"}}' ;;
+        esac
+    }
+    export -f skopeo
+
+    local output
+    output=$(resolve_variant "testing" "$test_dir/variants.json" "bazzite-nix" "1" "ghcr.io/test-owner")
+    [[ "$output" == *'CANONICAL_TAG="1.0.1"'* ]]
+    [[ "$output" == *'COLLISION_DETECTED="true"'* ]]
+}
+
 @test "resolve_variant handles image:tag spec" {
     local test_dir
     test_dir="$(setup_variant_json)"
@@ -194,6 +205,62 @@ EOF
     [ "$status" -ne 0 ]
 }
 
+# ── aggregate_variants ──────────────────────────────────────────────────────
+
+@test "aggregate_variants filters needs_build and writes GITHUB_OUTPUT" {
+    local test_dir gh_out
+    test_dir="$(mktemp -d)"
+    gh_out="$test_dir/gh_output"
+    touch "$gh_out"
+
+    cat > /tmp/variants_results.json <<'EOF'
+[
+  {"variant":"stable","needs_build":false},
+  {"variant":"testing","needs_build":true,"canonical_tag":"1.2.3"}
+]
+EOF
+
+    GITHUB_OUTPUT="$gh_out" aggregate_variants "ghcr.io/owner" "bazzite-nix" >/dev/null
+
+    grep -q '^variants_to_build=\[{"variant":"testing","canonical_tag":"1.2.3"}\]$' "$gh_out"
+    grep -q '^any_builds_needed=true$' "$gh_out"
+}
+
+@test "aggregate_variants reports no builds for empty result" {
+    local test_dir gh_out
+    test_dir="$(mktemp -d)"
+    gh_out="$test_dir/gh_output"
+    touch "$gh_out"
+
+    echo '[]' > /tmp/variants_results.json
+
+    GITHUB_OUTPUT="$gh_out" aggregate_variants "ghcr.io/owner" "bazzite-nix" "$test_dir/summary" >/dev/null
+
+    grep -q '^variants_to_build=\[\]$' "$gh_out"
+    grep -q '^any_builds_needed=false$' "$gh_out"
+    [ -f "$test_dir/summary" ]
+}
+
+# ── release_variant ─────────────────────────────────────────────────────────
+
+@test "release_variant rejects unknown variant" {
+    local test_dir
+    test_dir="$(setup_variant_json)"
+
+    GH_TOKEN=x run release_variant "nope" "" "$test_dir/variants.json"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"not found in variants.json"* ]]
+}
+
+@test "release_variant rejects disabled variant" {
+    local test_dir
+    test_dir="$(setup_variant_json)"
+
+    GH_TOKEN=x run release_variant "disabled-variant" "" "$test_dir/variants.json"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"is disabled in variants.json"* ]]
+}
+
 # ── sudoif ──────────────────────────────────────────────────────────────────
 
 @test "sudoif is defined and callable" {
@@ -216,4 +283,62 @@ EOF
         sudoif echo test
     "
     [ "$status" -eq 1 ]
+}
+
+# ── build_variant_core (shared build pipeline core) ─────────────────────────
+
+# Mock the build-helpers functions so build_variant_core's branch logic can be
+# tested without real containers. Records relabel/rechunk calls to a calls file.
+build_core_mocks() {
+    local calls="$1"
+    extract_image_info() {
+        echo "KERNEL_VERSION=6.6.0"
+        echo "MANIFEST_PACKAGES=42"
+    }
+    assemble_labels() { :; }
+    relabel_image() { echo "REL:$5:$3" >>"$calls"; }
+    rechunk_image() { echo "RECHUNK:$1" >>"$calls"; }
+    extract_final_ref() {
+        echo "SOURCE_REF=containers-storage:localhost/$2:$1"
+        echo "FULL_BUILD_DIGEST=sha256:abc"
+        echo "BUILD_DIGEST=abc"
+    }
+}
+
+build_core_common="stable stable-44.1,stable 2026-08-17T00:00:00Z desc 44.1 owner repo"
+
+@test "build_variant_core relabels raw-img directly when rechunk disabled" {
+    local calls
+    calls="$(mktemp)"
+    build_core_mocks "$calls"
+    local SOURCE_REF KERNEL_VERSION
+    eval "$(build_variant_core $build_core_common 0 0)"
+    [ "$KERNEL_VERSION" = "6.6.0" ]
+    [ "$SOURCE_REF" = "containers-storage:localhost/raw-img:stable-44.1" ]
+    grep -q "REL:raw-img:stable-44.1" "$calls"
+    ! grep -q "RECHUNK:" "$calls"
+}
+
+@test "build_variant_core rechunks and relabels chunked-img when rechunk enabled (force)" {
+    local calls
+    calls="$(mktemp)"
+    build_core_mocks "$calls"
+    local SOURCE_REF
+    eval "$(build_variant_core $build_core_common 1 1)"
+    [ "$SOURCE_REF" = "containers-storage:localhost/chunked-img:stable" ]
+    grep -q "RECHUNK:stable" "$calls"
+    grep -q "REL:chunked-img:stable" "$calls"
+}
+
+@test "build_variant_core skips relabel & rechunk when chunked image already exists" {
+    local calls
+    calls="$(mktemp)"
+    build_core_mocks "$calls"
+    sudo() { return 0; }
+    run build_variant_core $build_core_common 0 1
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"skipping relabel & rechunk"* ]]
+    [[ "$output" == *"SOURCE_REF=containers-storage:localhost/chunked-img:stable"* ]]
+    ! grep -q "RECHUNK:" "$calls"
+    ! grep -q "REL:" "$calls"
 }

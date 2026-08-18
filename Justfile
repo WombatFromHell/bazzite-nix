@@ -91,7 +91,12 @@ format:
     format_scripts
     fix_just_files
 
-# ── Build commands (sources .github/actions/build-reusable/helpers.sh) ────────
+# Run the bats test suite (all test files)
+[group('Utility')]
+test:
+    bats scripts/just-helpers.bats tests/build-helpers.bats scripts/release-preview.bats
+
+# ── Build commands (sources scripts/build-helpers.bash) ─────────────────────
 # Build a container image (stages to localhost/raw-img)
 # Usage: just build [variant-name | image:tag] [base_image_override]
 # Examples:
@@ -127,6 +132,16 @@ rechunk $variant_or_spec="{{ default_tag }}":
     source "{{ just_helpers }}"
     run_rechunk "{{ variant_or_spec }}" "{{ variants_config }}" "{{ image_name }}" "{{ image_desc }}" "{{ repo_organization }}"
 
+# Relabel an existing image (chunked-img if present, else raw-img) without
+# rebuilding or rechunking. For iterating on the relabel flow.
+# Usage: just relabel [variant-name | image:tag]
+[group('Build Container Image')]
+relabel $variant_or_spec="{{ default_tag }}":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source "{{ just_helpers }}"
+    run_relabel "{{ variant_or_spec }}" "{{ variants_config }}" "{{ image_name }}" "{{ image_desc }}" "{{ repo_organization }}"
+
 # ── Full pipeline (mirrors the GitHub Actions workflow) ─────────────────────
 # Run the full build pipeline for a single variant:
 #   build → extract image info → assemble labels → [rechunk] → relabel → extract final ref
@@ -139,6 +154,12 @@ pipeline $variant_or_spec="{{ default_tag }}" $base_image_override="" $force_reb
     set -euo pipefail
     source "{{ just_helpers }}"
     run_pipeline "{{ variant_or_spec }}" "{{ variants_config }}" "{{ image_name }}" "{{ image_desc }}" "{{ repo_organization }}" "{{ oci_output_dir }}" "{{ base_image_override }}" "{{ force_rebuild }}" "{{ rechunk }}"
+
+# Pipeline with rechunking enabled (just pipeline <variant> "" "" 1)
+# Usage: just pipeline-rechunk [variant-name | image:tag] [base_image_override] [force_rebuild]
+[group('Build Container Image')]
+pipeline-rechunk $variant_or_spec="stable" $base_image_override="" $force_rebuild="0":
+    just pipeline "{{ variant_or_spec }}" "{{ base_image_override }}" "{{ force_rebuild }}" "1"
 
 # Run the full pipeline for all variants that need rebuilding
 # (Mirrors check_and_aggregate → build_push matrix in the workflow)
@@ -165,6 +186,39 @@ build-all $force_build="0":
 release-preview $image_ref="localhost/chunked-img" $prev_ref="":
     python3 scripts/release-preview.py "{{ image_ref }}" {{ if prev_ref != "" { "--prev " + prev_ref } else { "" } }}
 
+# ── CI recipes (called from build.yml; use pre-resolved matrix values) ──────
+
+# Build a single pre-resolved variant (mirrors old build-reusable action).
+# Values come from check-variants output — no re-resolution.
+# Usage: just ci-pipeline <variant> <base_image> <build_script> <canonical_tag> <tags> <date> <image_desc> <parent_version> [rechunk]
+# rechunk=1 enables rpm-ostree chunking (build.yml passes 1; leave 0 for raw-img-only).
+[group('Build Container Image')]
+ci-pipeline $variant $base_image $build_script $canonical_tag $tags $date $image_desc $parent_version $rechunk="0":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source "{{ just_helpers }}"
+    build_variant_ci "{{ variant }}" "{{ base_image }}" "{{ build_script }}" "{{ canonical_tag }}" "{{ tags }}" "{{ date }}" "{{ image_desc }}" "{{ parent_version }}" "{{ repo_organization }}" "{{ image_name }}" "{{ rechunk }}"
+
+# Push, sign, and verify a built image (mirrors old push-reusable action).
+# Env required: GITHUB_ACTOR, GITHUB_TOKEN, SIGNING_SECRET.
+# Usage: just push <source_ref> <tags> <registry> <repo> <suffix> <variant> <date> <parent_version>
+[group('Build Container Image')]
+push $source_ref $tags $registry $repo $suffix $variant $date $parent_version:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source "{{ just_helpers }}"
+    push_variant "{{ source_ref }}" "{{ tags }}" "{{ registry }}" "{{ repo }}" "{{ suffix }}" "{{ variant }}" "{{ date }}" "{{ parent_version }}"
+
+# Generate a GitHub release for a variant (mirrors old release-reusable action).
+# Env required: GH_TOKEN. Needs a git checkout with recent history.
+# Usage: just release <variant> [handwritten] [variants_config] [allow_disabled]
+[group('Build Container Image')]
+release $variant $handwritten="" $variants_config="{{ variants_config }}" $allow_disabled="false":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source "{{ just_helpers }}"
+    release_variant "{{ variant }}" "{{ handwritten }}" "{{ variants_config }}" "{{ allow_disabled }}"
+
 # ── Variant helpers ─────────────────────────────────────────────────────────
 
 # List available (non-disabled) variants from variants.json
@@ -177,13 +231,14 @@ list-variants:
 
 # Check which variants need rebuilding (mirrors check-variants action)
 
-# Usage: just check-variants [force_build]
+# Usage: just check-variants [force_build] [variants_override]
+# Example: just check-variants 1 stable,testing
 [group('Build Container Image')]
-check-variants $force_build="0":
+check-variants $force_build="0" $variants_override="":
     #!/usr/bin/env bash
     set -euo pipefail
     source "{{ just_helpers }}"
-    check_variants "{{ force_build }}" "{{ repo_organization }}" "{{ image_name }}" "{{ variants_config }}"
+    check_variants "{{ force_build }}" "{{ repo_organization }}" "{{ image_name }}" "{{ variants_config }}" "{{ variants_override }}"
 
 # Preview which alias tags (and the step-summary markdown) a build would generate
 # Usage: just tags-preview [variant-name | image:tag]

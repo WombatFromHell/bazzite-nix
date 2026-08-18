@@ -18,6 +18,7 @@
         packages = with pkgs; [
           actionlint
           bashInteractive
+          bats
           crane
           go
           grype

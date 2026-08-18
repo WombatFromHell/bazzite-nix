@@ -39,34 +39,37 @@ jobs:
     outputs:
       variants_to_build: ${{ steps.check.outputs.variants_to_build }}
       any_builds_needed: ${{ steps.check.outputs.any_builds_needed }}
-      date: ${{ steps.date.outputs.date }}
-      registry: ${{ steps.ghcr.outputs.registry }}
-      repo: ${{ steps.ghcr.outputs.repo }}
+      date: ${{ steps.refs.outputs.date }}
+      registry: ${{ steps.refs.outputs.registry }}
+      repo: ${{ steps.refs.outputs.repo }}
       image_desc: ${{ env.IMAGE_DESC }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
 
-      - name: Set lowercase GHCR refs
-        id: ghcr
-        uses: ./.github/actions/ghcr-lc
-
-      - name: Set build date
-        id: date
+      - name: Prepare refs
+        id: refs
         run: |
-          echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+          {
+            echo "registry=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}"
+            echo "repo=${GITHUB_REPOSITORY#*/}"
+            echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Check variants
         id: check
-        uses: ./.github/actions/check-variants
-        with:
-          force_build: ${{ github.event.inputs.force_build == 'true' }}
-          variants_config: ".github/variants.json"
-          variants_override: ${{ github.event.inputs.variants_override || '' }}
-          registry: ${{ steps.ghcr.outputs.registry }}
-          repo: ${{ steps.ghcr.outputs.repo }}
-          image_desc: ${{ env.IMAGE_DESC }}
-          date: ${{ steps.date.outputs.date }}
+        shell: bash
+        run: |
+          source scripts/just-helpers.bash
+          REGISTRY="${{ steps.refs.outputs.registry }}" \
+            REPO="${{ env.IMAGE_NAME }}" \
+            IMAGE_DESC="${{ env.IMAGE_DESC }}" \
+            DATE="${{ steps.refs.outputs.date }}" \
+            FORCE_BUILD="${{ github.event.inputs.force_build == 'true' }}" \
+            VARIANTS_CONFIG="${{ env.VARIANTS_CONFIG }}" \
+            VARIANTS_OVERRIDE="${{ github.event.inputs.variants_override || '' }}" \
+            bash scripts/check-variants.sh
+          aggregate_variants "${{ steps.refs.outputs.registry }}" "${{ env.IMAGE_NAME }}"
 
       - name: Preview pending builds
         if: steps.check.outputs.any_builds_needed == 'true'
@@ -90,44 +93,50 @@ jobs:
       contents: read
       packages: write
 
-    env:
-      BASE_IMG: >-
-        ${{ needs.check_and_aggregate.outputs.registry }}/${{ needs.check_and_aggregate.outputs.repo }}${{ matrix.variant_data.suffix }}
-
     steps:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Build image
-        uses: ./.github/actions/build-reusable
-        id: build
+      - name: Install just
+        uses: extractions/setup-just@v4
         with:
-          base_image: ${{ matrix.variant_data.base_image }}
-          build_script: ${{ matrix.variant_data.build_script || 'build.sh' }}
-          canonical_tag: ${{ matrix.variant_data.canonical_tag }}
-          variant: ${{ matrix.variant_data.variant }}
-          tags: ${{ matrix.variant_data.tags }}
-          parent_version: ${{ matrix.variant_data.parent_version }}
-          date: ${{ needs.check_and_aggregate.outputs.date }}
-          image_desc: ${{ needs.check_and_aggregate.outputs.image_desc }}
-          repository_owner: ${{ github.repository_owner }}
-          repository_name: ${{ github.event.repository.name }}
+          github-token: ${{ secrets.MY_GITHUB_TOKEN }}
+
+      - name: Build image
+        id: build
+        shell: bash
+        run: |
+          just ci-pipeline \
+            "${{ matrix.variant_data.variant }}" \
+            "${{ matrix.variant_data.base_image }}" \
+            "${{ matrix.variant_data.build_script || 'build.sh' }}" \
+            "${{ matrix.variant_data.canonical_tag }}" \
+            "${{ matrix.variant_data.tags }}" \
+            "${{ needs.check_and_aggregate.outputs.date }}" \
+            "${{ needs.check_and_aggregate.outputs.image_desc }}" \
+            "${{ matrix.variant_data.parent_version }}" \
+            "1"
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@ba7bc0a3fef59531c69a25acd34668d6d3fe6f22 # v4.1.0
 
       - name: Push, sign, and verify image
         id: push_image
-        uses: ./.github/actions/push-reusable
-        with:
-          source_ref: ${{ steps.build.outputs.source_ref }}
-          variant_name: ${{ matrix.variant_data.variant }}
-          tags: ${{ matrix.variant_data.tags }}
-          signing_secret: ${{ secrets.SIGNING_SECRET }}
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          github_actor: ${{ github.actor }}
-          registry: ${{ needs.check_and_aggregate.outputs.registry }}
-          repo: ${{ needs.check_and_aggregate.outputs.repo }}
-          suffix: ${{ matrix.variant_data.suffix }}
-          date: ${{ needs.check_and_aggregate.outputs.date }}
-          parent_version: ${{ matrix.variant_data.parent_version }}
+        shell: bash
+        env:
+          GITHUB_ACTOR: ${{ github.actor }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SIGNING_SECRET: ${{ secrets.SIGNING_SECRET }}
+        run: |
+          just push \
+            "${{ steps.build.outputs.source_ref }}" \
+            "${{ matrix.variant_data.tags }}" \
+            "${{ needs.check_and_aggregate.outputs.registry }}" \
+            "${{ needs.check_and_aggregate.outputs.repo }}" \
+            "${{ matrix.variant_data.suffix }}" \
+            "${{ matrix.variant_data.variant }}" \
+            "${{ needs.check_and_aggregate.outputs.date }}" \
+            "${{ matrix.variant_data.parent_version }}"
 
   collect_build_results:
     needs: [check_and_aggregate, build_push]
@@ -144,27 +153,12 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          SUCCESSFUL_VARIANTS="[]"
-
-          JOBS=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
-            -H "Accept: application/vnd.github.v3+json" \
-            "${{ github.api_url }}/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs?per_page=100")
-
-          SUCCESSFUL_VARIANTS=$(echo "$JOBS" | jq -c '
-            [ .jobs[]
-            | select(.name | startswith("Build & Push"))
-            | select(.conclusion == "success")
-            | {variant: (.name | sub("^Build & Push "; ""))}
-            ]')
+          SUCCESSFUL_VARIANTS=$(gh run view "${{ github.run_id }}" --json jobs --jq \
+            '[.jobs[] | select(.name | startswith("Build & Push")) | select(.conclusion == "success") | {variant: (.name | sub("^Build & Push "; ""))}]')
 
           COUNT=$(echo "$SUCCESSFUL_VARIANTS" | jq 'length')
-          ANY_SUCCESSFUL="false"
-          if [[ "$COUNT" -gt 0 ]]; then
-            ANY_SUCCESSFUL="true"
-          fi
-
           echo "successful_variants=${SUCCESSFUL_VARIANTS}" >> "$GITHUB_OUTPUT"
-          echo "any_successful=${ANY_SUCCESSFUL}" >> "$GITHUB_OUTPUT"
+          echo "any_successful=$([ "$COUNT" -gt 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
           echo "Found $COUNT successful builds"
 
   generate_release:
@@ -189,13 +183,16 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          fetch-depth: 500
+
+      - name: Install just
+        uses: extractions/setup-just@v4
+        with:
+          github-token: ${{ secrets.MY_GITHUB_TOKEN }}
 
       - name: Generate release
         id: release
-        uses: ./.github/actions/release-reusable
-        with:
-          variant: ${{ matrix.variant.variant }}
-          allow_disabled: true
-          registry: ${{ needs.check_and_aggregate.outputs.registry }}
-          repo: ${{ needs.check_and_aggregate.outputs.repo }}
-          github_token: ${{ secrets.GITHUB_TOKEN }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: just release "${{ matrix.variant.variant }}" "" "${{ env.VARIANTS_CONFIG }}" true

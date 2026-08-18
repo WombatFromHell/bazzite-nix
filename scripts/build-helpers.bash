@@ -4,15 +4,6 @@
 
 set -euo pipefail
 
-# SECURITY_OPTS array — set to --security-opt label=disable when running
-# outside CI. CI runners (Ubuntu) don't enforce SELinux, so the flag is
-# unnecessary there. Use as: sudo podman run --rm "${SECURITY_OPTS[@]}" ...
-if [[ -z "${GITHUB_OUTPUT:-}" ]]; then
-  SECURITY_OPTS=(--security-opt label=disable)
-else
-  SECURITY_OPTS=()
-fi
-
 # ── build image ─────────────────────────────────────────────────────────────
 # Usage: build_image <base_image> <build_script> <canonical_tag> <variant> <containerfile_path> <raw_tag>
 # Tags the result as both `raw-img` (default/latest) and `raw-img:<raw_tag>`.
@@ -34,12 +25,13 @@ build_image() {
     --build-arg BUILD_SCRIPT="${build_script}" \
     --build-arg CANONICAL_TAG="${canonical_tag}" \
     --build-arg VARIANT="${variant}" \
-    "${SECURITY_OPTS[@]}" \
     --file "${containerfile_path}" .
 }
 
 # ── extract kernel and manifest info ────────────────────────────────────────
-# Usage: extract_image_info [manifest_output_file]
+# Usage: extract_image_info [manifest_output_file] [image_ref]
+# image_ref defaults to localhost/raw-img; pass the chunked image when raw-img
+# no longer exists (relabeling a prior rechunked image).
 # If manifest_output_file is provided, writes manifest JSON to that file.
 # Prints to stdout:
 #   CI (GITHUB_OUTPUT set): lowercase key=value for >> "$GITHUB_OUTPUT"
@@ -47,12 +39,13 @@ build_image() {
 
 extract_image_info() {
   local manifest_output_file="${1:-}"
+  local image_ref="${2:-localhost/raw-img}"
 
   # Read kernel version and package manifest in a single container run.
   # manifest.json is single-line (jq -c) so the first line is the kernel,
   # the remainder is the manifest.
   local output kernel_version manifest
-  output=$(sudo podman run --rm "${SECURITY_OPTS[@]}" localhost/raw-img \
+  output=$(sudo podman run --rm "$image_ref" \
     sh -c 'cat /usr/share/ublue-os/kernel-version; echo; cat /usr/share/ublue-os/manifest.json') || {
     echo "::error::Failed to read image metadata from image"
     exit 1
@@ -169,11 +162,11 @@ relabel_image() {
     [ -n "$line" ] && labels+=("--label" "$line" "--annotation" "$line")
   done <"${labels_file}"
 
-  echo "Relabeling ${image}: creating working container..."
+  echo "Relabeling ${image}: creating working container..." >&2
   local container
   container=$(sudo buildah from "localhost/${image}")
 
-  echo "Relabeling ${image}: applying ${#labels[@]} labels and annotations..."
+  echo "Relabeling ${image}: applying ${#labels[@]} labels and annotations..." >&2
   sudo buildah config --label "-" \
     "${labels[@]}" \
     --label "ostree.bootc=true" \
@@ -182,53 +175,56 @@ relabel_image() {
     --annotation "ostree.linux=${kernel_version}" \
     "$container"
 
-  echo "Relabeling ${image}: committing updated image..."
-  sudo buildah commit --identity-label=false --rm "$container" "localhost/${image}"
+  echo "Relabeling ${image}: committing updated image..." >&2
+  sudo buildah commit --identity-label=false --rm "$container" "localhost/${image}" >/dev/null
 
   local t
   for t in "${tags[@]}"; do
-    [[ "$t" == "$anchor_tag" || -z "$t" ]] && continue
-    sudo podman tag "localhost/${image}" "localhost/${image_name}:${t}" 2>/dev/null || true
+    [[ -z "$t" || "$t" == "latest" ]] && continue
+    sudo podman tag localhost/chunked-img "localhost/chunked-img:${t}"
   done
-  echo "Relabeling ${image}: done"
 }
 
 # ── rechunk image ───────────────────────────────────────────────────────────
 # Usage: rechunk_image <comma_separated_tags>
-# Rechunks raw-img into containers-storage. Composes against the branch tag
-# (the stable, cache-friendly ref) so rpm-ostree can diff against the prior
-# build; all other tags are applied as aliases after.
+# Rechunks raw-img into containers-storage. The compose output is written as an
+# oci-archive to a host temp dir (mounted into the container) so it survives the
+# run, then pulled back into rootful storage as chunked-img; all other tags are
+# applied as aliases after (the tag loop mirrors relabel_image's).
 rechunk_image() {
   local anchor_tag="${1:?anchor_tag required}" # stable, cache-friendly tag — e.g. the branch
   local tags_csv="${2:-latest}"
   local tags=()
   IFS=',' read -ra tags <<<"$tags_csv"
+  local rechunk_dir chunked
 
-  CACHE_DIR="$HOME/.cache/bazzite-nix"
-  RECHUNK_DIR="$(mktemp -d "${RUNNER_TEMP:-$CACHE_DIR}/rechunk-XXXXXX")"
-  trap 'rm -rf "${RECHUNK_DIR}"' EXIT
+  rechunk_dir="$(mktemp -d "${TMPDIR:-/tmp}/rechunk-XXXXXX")"
+  # shellcheck disable=SC2064  # Intentional: capture local var value at definition time
+  trap "sudo rm -rf '${rechunk_dir}'" EXIT
 
-  echo "Running rpm-ostree compose build-chunked-oci..."
-  sudo podman run --rm \
-    --pull=never \
-    --privileged \
-    --sig-proxy \
+  echo "Running 'rpm-ostree compose build-chunked-oci' -> ${rechunk_dir}..." >&2
+  if sudo podman run --rm --pull=never --privileged \
+    -i --init --sig-proxy \
     --mount=type=image,src=localhost/raw-img,target=/rpm-ostree \
-    "${SECURITY_OPTS[@]}" \
-    --volume /var/lib/containers:/var/lib/containers \
-    --volume "${RECHUNK_DIR}:/run/out:Z" \
+    --volume "${rechunk_dir}:/run/out:Z" \
     --entrypoint /usr/bin/rpm-ostree \
     localhost/raw-img \
     compose build-chunked-oci \
     --bootc --format-version 2 \
-    --rootfs /rpm-ostree --output containers-storage:localhost/chunked-img
-  sudo podman rmi -f localhost/raw-img
-
-  local t
-  for t in "${tags[@]}"; do
-    [[ -z "$t" ]] && continue
-    sudo podman tag localhost/raw-img "localhost/chunked-img:${t}"
-  done
+    --max-layers 100 \
+    --rootfs /rpm-ostree --output oci-archive:/run/out/chunked.oci 1>&2; then
+    sudo podman rmi -f localhost/raw-img >&2
+    chunked=$(sudo podman pull "oci-archive:${rechunk_dir}/chunked.oci")
+    sudo podman tag "${chunked}" localhost/chunked-img
+    local t
+    for t in "${tags[@]}"; do
+      [[ -z "$t" || "$t" == "latest" ]] && continue
+      sudo podman tag localhost/chunked-img "localhost/chunked-img:${t}"
+    done
+  else
+    echo "Something went wrong during rechunking!" >&2
+    exit 1
+  fi
 }
 
 # ── extract final image ref ─────────────────────────────────────────────────

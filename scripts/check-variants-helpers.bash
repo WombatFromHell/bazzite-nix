@@ -135,19 +135,30 @@ compute_canonical_tag() {
 
 # ── Variant resolution ──────────────────────────────────────────────────────
 # Resolve a variant name from variants.json into shell variable assignments
-# Usage: eval "$(resolve_variant "testing" ".github/variants.json" "bazzite-nix")"
+# Usage: eval "$(resolve_variant "testing" ".github/variants.json" "bazzite-nix" "1" "ghcr.io/owner")"
+# force_build (4th arg, default "0"): enable version-collision handling like CI.
+# registry (5th arg, default derived from GITHUB_REPOSITORY_OWNER / repo_organization).
 resolve_variant() {
   local variant_or_spec="${1:?variant_or_spec required}"
   local variants_config="${2:-.github/variants.json}"
   local image_name="${3:-bazzite-nix}"
-  local check_helpers="${CHECK_VARIANTS_HELPERS:-.github/actions/check-variants/helpers.sh}"
+  local force_build="${4:-0}"
+  local registry="${5:-}"
+  local check_helpers="${CHECK_VARIANTS_HELPERS:-scripts/check-variants-helpers.bash}"
   local spec row base_image build_script suffix image_name_resolved tag canonical
-  local latest tags_json tags_csv digest
+  local latest tags_json tags_csv digest collision_detected
 
   # shellcheck disable=SC1090
   source "$check_helpers"
 
   spec="$variant_or_spec"
+
+  # Normalize force_build to CI's "true"/"false" dialect
+  if [[ "$force_build" == "1" || "$force_build" == "true" ]]; then
+    force_build="true"
+  else
+    force_build="false"
+  fi
 
   # If it looks like an explicit image:tag or image ref, pass it through unchanged
   if [[ "$spec" == *"/"* ]] || [[ "$spec" == *":"* ]]; then
@@ -203,9 +214,27 @@ resolve_variant() {
   [[ -z "$canonical" || "$canonical" == "null" ]] && canonical="$tag"
   digest=$(echo "$inspect_json" | jq -r '.Digest // empty' 2>/dev/null | sed 's/sha256://' || true)
 
-  # Strip branch prefix from canonical the same way compute_canonical_tag does,
-  # so a local run's CANONICAL_TAG matches what CI would compute (minus collision handling)
-  if [[ "$canonical" =~ ^[a-zA-Z]+-([0-9].*)$ ]]; then
+  # Strip branch prefix from canonical and handle version collisions the same way
+  # CI does (compute_canonical_tag): on force_build, if <branch>-<canonical> already
+  # exists in the registry, bump the patch number. Registry defaults to
+  # ghcr.io/<owner>; owner comes from GITHUB_REPOSITORY_OWNER or the Justfile's
+  # exported repo_organization.
+  collision_detected="false"
+  local registry_prefix="$registry"
+  if [[ -n "$registry_prefix" ]]; then
+    registry_prefix="${registry_prefix}/${image_name_resolved}"
+  elif [[ "$force_build" == "true" ]]; then
+    local owner="${GITHUB_REPOSITORY_OWNER:-${repo_organization:-}}"
+    if [[ -n "$owner" ]]; then
+      registry_prefix="ghcr.io/${owner,,}/${image_name_resolved}"
+    else
+      echo "::warning::force_build collision handling needs GITHUB_REPOSITORY_OWNER (or a registry arg); skipping collision check" >&2
+    fi
+  fi
+
+  if [[ -n "$registry_prefix" ]]; then
+    read -r canonical collision_detected <<<"$(compute_canonical_tag "$canonical" "$registry_prefix" "$force_build" "$spec")"
+  elif [[ "$canonical" =~ ^[a-zA-Z]+-([0-9].*)$ ]]; then
     canonical="${BASH_REMATCH[1]}"
   fi
 
@@ -221,6 +250,7 @@ resolve_variant() {
   echo "BUILD_SCRIPT=\"${build_script}\""
   echo "VARIANT_NAME=\"${spec}\""
   echo "CANONICAL_TAG=\"$canonical\""
+  echo "COLLISION_DETECTED=\"$collision_detected\""
   echo "TAGS=\"$tags_csv\""
 }
 

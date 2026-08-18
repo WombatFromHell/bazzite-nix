@@ -19,37 +19,24 @@ env:
   DRY_RUN: ${{ github.event_name == 'schedule' && 'false' || (inputs.dry_run == true && 'true' || 'false') }}
 
 jobs:
-  # ──────────────────────────────────────────────────────────────────────
-  # PHASE 0: Prepare — Build matrix of packages to process
-  # ──────────────────────────────────────────────────────────────────────
   prepare:
     runs-on: ubuntu-26.04
     outputs:
       packages: ${{ steps.variants.outputs.packages }}
       owner_type: ${{ steps.detect_owner.outputs.owner_type }}
-      registry_owner: ${{ steps.ghcr.outputs.repo }}
-
+      registry_owner: ${{ steps.variants.outputs.registry_owner }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Set lowercase GHCR refs
-        id: ghcr
-        uses: ./.github/actions/ghcr-lc
-
       - name: Detect owner type for API calls
         id: detect_owner
         run: |
-          set -euo pipefail
-          OWNER="${{ github.repository_owner }}"
-          # Default to 'orgs', fallback to 'users' if org API returns 404
-          if gh api "/orgs/${OWNER}" &>/dev/null; then
+          if gh api "/orgs/${{ github.repository_owner }}" &>/dev/null; then
             OWNER_TYPE="orgs"
           else
             OWNER_TYPE="users"
           fi
-          # SC2034 fix: Actually use the variable by echoing and setting output
-          echo "Detected owner type: ${OWNER_TYPE}"
           echo "owner_type=${OWNER_TYPE}" >> "$GITHUB_OUTPUT"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -57,46 +44,30 @@ jobs:
       - name: Build package matrix
         id: variants
         run: |
-          set -euo pipefail
-
           FILTER="${{ inputs.package_filter }}"
-          VARIANTS_FILE=".github/variants.json"
           BASE="bazzite-nix"
-
-          if [ ! -f "$VARIANTS_FILE" ]; then
-            echo "::error::variants.json not found at $VARIANTS_FILE"
-            exit 1
-          fi
-
           if [ -n "$FILTER" ]; then
-            # Override mode: include all variants, then filter by name
             jq -r --arg base "$BASE" \
               '[.variants[] | ($base + (.suffix // "")) | ascii_downcase] | unique[]' \
-              "$VARIANTS_FILE" > /tmp/all_packages.txt
-
-            # Exact match filtering (prevent partial matches)
-            grep -Fxf <(echo "$FILTER" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//') \
+              .github/variants.json > /tmp/all_packages.txt
+            grep -Fxf <(echo "$FILTER" | tr ',' '\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//') \
               /tmp/all_packages.txt > /tmp/packages.txt 2>/dev/null || touch /tmp/packages.txt
-
-            if [ ! -s /tmp/packages.txt ]; then
-              echo "::warning::package-filter '${FILTER}' matched no packages — check names in variants.json"
-            fi
+            [ -s /tmp/packages.txt ] || echo "::warning::package-filter '${FILTER}' matched no packages"
           else
-            # Normal mode: respect disabled flag and require cleanup: true
             jq -r --arg base "$BASE" \
               '[.variants[] | select(.disabled != true) | select(.cleanup != false) | ($base + (.suffix // "")) | ascii_downcase] | unique[]' \
-              "$VARIANTS_FILE" > /tmp/packages.txt
+              .github/variants.json > /tmp/packages.txt
           fi
 
           echo "Packages to process:"
           cat /tmp/packages.txt
 
-          packages=$(jq -Rnc '[inputs]' < /tmp/packages.txt)
-          echo "packages=${packages}" >> "$GITHUB_OUTPUT"
+          REPO_LC="${GITHUB_REPOSITORY#*/}"
+          {
+            echo "packages=$(jq -Rnc '[inputs]' < /tmp/packages.txt)"
+            echo "registry_owner=${REPO_LC,,}"
+          } >> "$GITHUB_OUTPUT"
 
-  # ──────────────────────────────────────────────────────────────────────
-  # PHASE 2: Cleanup Images — Use battle-tested action for image retention
-  # ──────────────────────────────────────────────────────────────────────
   cleanup-images:
     needs: [prepare]
     runs-on: ubuntu-26.04

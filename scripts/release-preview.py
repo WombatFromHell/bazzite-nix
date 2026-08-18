@@ -17,10 +17,6 @@ import sys
 
 RELEASE_DIR = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
-    "..",
-    ".github",
-    "actions",
-    "release-reusable",
 )
 sys.path.insert(0, RELEASE_DIR)
 
