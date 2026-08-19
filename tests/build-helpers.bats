@@ -22,6 +22,30 @@ setup() {
     grep -q '^sudo -n true$' "$log"
 }
 
+# ── build_image_or_skip ─────────────────────────────────────────────────────
+
+@test "build_image_or_skip skips when raw-img exists, builds when missing" {
+    local log
+    log="$(mktemp)"
+    sudo() { "$@"; }
+    export -f sudo
+    buildah() {
+        printf 'buildah %s\n' "$*" >>"$LOG"
+        [[ "${EXISTS:-1}" == "1" ]] && return 0 || return 1
+    }
+    export -f buildah
+    build_image() { printf 'build_image %s\n' "$*" >>"$LOG"; }
+    export -f build_image
+    export LOG="$log"
+
+    EXISTS=1 build_image_or_skip "base" "build.sh" "1.0.0" "testing"
+    ! grep -q '^build_image ' "$log"
+
+    : >"$log"
+    EXISTS=0 build_image_or_skip "base" "build.sh" "1.0.0" "testing"
+    grep -q '^build_image ' "$log"
+}
+
 # ── extract_image_info ──────────────────────────────────────────────────────
 
 @test "extract_image_info reads kernel and manifest in one podman run" {

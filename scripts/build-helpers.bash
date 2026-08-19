@@ -36,6 +36,26 @@ build_image() {
     --file "${containerfile_path}" .
 }
 
+# ── build raw-img unless it already exists (or force rebuilds) ──────────────
+# Usage: build_image_or_skip <base_image> <build_script> <canonical_tag> <variant> [force_rebuild]
+build_image_or_skip() {
+  local base_image="$1"
+  local build_script="$2"
+  local canonical_tag="$3"
+  local variant="$4"
+  local force_rebuild="${5:-0}"
+
+  if [[ "$force_rebuild" == "1" ]]; then
+    echo "Force rebuild: removing existing container image..."
+    sudo buildah rmi --force raw-img 2>/dev/null || true
+    build_image "$base_image" "$build_script" "$canonical_tag" "$variant" "./Containerfile" "$variant"
+  elif sudo buildah images --format '{{.Name}}' raw-img >/dev/null 2>&1; then
+    echo "Container image raw-img already exists, skipping build"
+  else
+    build_image "$base_image" "$build_script" "$canonical_tag" "$variant" "./Containerfile" "$variant"
+  fi
+}
+
 # ── extract kernel and manifest info ────────────────────────────────────────
 # Usage: extract_image_info [manifest_output_file] [image_ref]
 # image_ref defaults to localhost/raw-img; pass the chunked image when raw-img
