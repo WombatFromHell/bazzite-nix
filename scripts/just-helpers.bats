@@ -322,7 +322,7 @@ build_core_mocks() {
   }
   assemble_labels() { :; }
   relabel_image() { echo "REL:$3" >>"$calls"; }
-  rechunk_image() { echo "RECHUNK:$1" >>"$calls"; }
+  rechunk_image() { echo "RECHUNK:$1:$2" >>"$calls"; }
   extract_final_ref() {
     echo "SOURCE_REF=containers-storage:localhost/$2:$1"
     echo "FULL_BUILD_DIGEST=sha256:abc"
@@ -344,17 +344,15 @@ build_core_common="stable 2026-08-17T00:00:00Z desc 44.1 owner repo"
   ! grep -q "RECHUNK:" "$calls"
 }
 
-@test "build_variant_core rechunks then relabels the rechunked image when rechunk enabled (force)" {
+@test "build_variant_core rechunks with labels via chunkah when rechunk enabled (force)" {
   local calls
   calls="$(mktemp)"
   build_core_mocks "$calls"
   local SOURCE_REF
   eval "$(build_variant_core $build_core_common 1 1)"
   [ "$SOURCE_REF" = "containers-storage:localhost/chunked-img:stable" ]
-  local rel_line rechunk_line
-  rel_line=$(grep -n "REL:chunked-img" "$calls" | cut -d: -f1)
-  rechunk_line=$(grep -n "RECHUNK:stable" "$calls" | cut -d: -f1)
-  [ "$rechunk_line" -lt "$rel_line" ]
+  grep -q "RECHUNK:stable:/tmp/bazzite-nix-labels.txt" "$calls"
+  ! grep -q "REL:" "$calls"
 }
 
 @test "build_variant_core skips relabel & rechunk when chunked image already exists" {

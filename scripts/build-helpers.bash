@@ -219,37 +219,77 @@ relabel_image() {
 }
 
 # ── rechunk image ───────────────────────────────────────────────────────────
-# Usage: rechunk_image <comma_separated_tags>
-# Rechunks raw-img into containers-storage. The compose output is written as an
-# oci-archive to a host temp dir (mounted into the container) so it survives the
-# run, then pulled back into rootful storage as chunked-img; all other tags are
-# applied as aliases after (the tag loop mirrors relabel_image's).
+# Usage: rechunk_image <comma_separated_tags> [labels_file]
+# Rechunks raw-img into containers-storage via coreos/chunkah (the upstream
+# ublue rechunk tool), mirroring the bazzite build step: labels are applied at
+# chunk time (--label) so the separate post-rechunk relabel is unnecessary, and
+# the config comes from `podman image inspect` so Env/Cmd/containers.bootc carry
+# over. The chunked output is an OCI layout written to a host temp dir (mounted
+# into the container), pulled back as chunked-img, and all other tags are applied
+# as aliases after (the tag loop mirrors relabel_image's).
 rechunk_image() {
   local tags_csv="${1:-latest}"
+  local labels_file="${2:-}"
   local tags=()
   IFS=',' read -ra tags <<<"$tags_csv"
-  local rechunk_dir chunked
+  local rechunk_dir chunkah_config chunkah_image chunkah_ref chunked
+  local label_args=()
+  local stale
 
   rechunk_dir="$(mktemp -d "${TMPDIR:-/tmp}/rechunk-XXXXXX")"
-  # shellcheck disable=SC2064  # Intentional: capture local var value at definition time
-  trap "sudo rm -rf '${rechunk_dir}'" EXIT
+  chunkah_config="$(mktemp "${TMPDIR:-/tmp}/chunkah-config-XXXXXX.json")"
+  # shellcheck disable=SC2064  # Intentional: capture local var values at definition time
+  trap "sudo rm -rf '${rechunk_dir}' '${chunkah_config}'" EXIT
 
-  echo "Running 'rpm-ostree compose build-chunked-oci' -> ${rechunk_dir}..." >&2
+  chunkah_image="quay.io/coreos/chunkah:latest"
+  echo "Pulling ${chunkah_image}..." >&2
   sudo_refresh
-  if sudo podman run --rm --pull=never --privileged \
-    -i --init --sig-proxy \
-    --mount=type=image,src=localhost/raw-img,target=/rpm-ostree \
-    --volume "${rechunk_dir}:/run/out:Z" \
-    --entrypoint /usr/bin/rpm-ostree \
-    localhost/raw-img \
-    compose build-chunked-oci \
-    --bootc --format-version 2 \
-    --max-layers 100 \
-    --rootfs /rpm-ostree --output oci-archive:/run/out/chunked.oci 1>&2; then
+  sudo podman pull "${chunkah_image}" >/dev/null
+  chunkah_ref="$(sudo podman image inspect --format '{{index .RepoDigests 0}}' "${chunkah_image}")"
+  # ponytail: cosign skipped when absent so machines without it can still rechunk
+  if command -v cosign >/dev/null 2>&1; then
+    echo "Verifying ${chunkah_ref} signature..." >&2
+    cosign verify \
+      --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+      --certificate-identity-regexp '^https://github\.com/coreos/chunkah/' \
+      "${chunkah_ref}" >/dev/null
+  fi
 
-    chunked=$(sudo podman pull "oci-archive:${rechunk_dir}/chunked.oci")
+  # Carries Env, Cmd and containers.bootc over to the chunked image
+  # shellcheck disable=SC2024  # Intentional: write as user; root container reads it ro
+  sudo podman image inspect localhost/raw-img >"${chunkah_config}"
+
+  if [[ -n "$labels_file" && -f "$labels_file" ]]; then
+    while IFS= read -r line; do
+      [ -n "$line" ] && label_args+=(--label "$line")
+    done <"$labels_file"
+  fi
+  # Drop stale OSTree/build metadata labels inherited from the base image
+  for stale in ostree.commit ostree.final-diffid rpmostree.inputhash \
+    quay.expires-after io.buildah.version; do
+    label_args+=(--label "${stale}-")
+  done
+
+  echo "Running 'chunkah build' -> ${rechunk_dir}/chunked..." >&2
+  if sudo podman run --rm --pull=never --privileged \
+    --mount=type=image,src=localhost/raw-img,target=/chunkah \
+    --volume "${chunkah_config}:/chunkah-config.json:ro,Z" \
+    --volume "${rechunk_dir}:/run/out:Z" \
+    "${chunkah_ref}" \
+    build \
+    --verbose \
+    --compressed \
+    --max-layers 128 \
+    --prune /sysroot/ \
+    --prune /run/ \
+    --prune /tmp/ \
+    "${label_args[@]}" \
+    --config /chunkah-config.json \
+    --output oci:/run/out/chunked 1>&2; then
+
+    chunked=$(sudo podman pull "oci:${rechunk_dir}/chunked")
     if [[ -z "$chunked" ]]; then
-      echo "::error::Failed to load rechunked oci-archive from ${rechunk_dir}/chunked.oci" >&2
+      echo "::error::Failed to load rechunked OCI layout from ${rechunk_dir}/chunked" >&2
       exit 1
     fi
     sudo podman tag "${chunked}" localhost/chunked-img

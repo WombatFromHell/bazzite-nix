@@ -55,13 +55,12 @@ echo_build_assignments() {
 }
 
 # Shared build-pipeline core: extract info → assemble labels → relabel →
-# [rechunk] → relabel chunked-img → extract final ref. The single implementation
-# used by the local pipeline (run_pipeline), standalone rechunk (run_rechunk), and
-# CI (build_variant_ci) so local runs exercise the same code as the workflow.
+# [rechunk] → extract final ref. The single implementation used by the local
+# pipeline (run_pipeline), standalone rechunk (run_rechunk), and CI
+# (build_variant_ci) so local runs exercise the same code as the workflow.
 #
-# Rechunk is opt-in (rechunk=0 default). Re-enabling it was a one-switch change:
-# SECURITY_OPTS (--security-opt label=disable) was the hardlink-blowup root cause
-# and is gone; CI now passes rechunk=1.
+# Rechunk is opt-in (rechunk=0 default) and runs chunkah (which applies labels
+# itself), so no relabel pass happens on the rechunk path.
 #
 # Usage: build_variant_core <variant> <date> <image_desc> <version_label> \
 #                           <repo_owner> <repo_name> [force_rebuild] [rechunk]
@@ -81,7 +80,7 @@ build_variant_core() {
   local rechunk="${8:-0}"
   local manifest_file="/tmp/bazzite-nix-manifest.json"
   local labels_file="/tmp/bazzite-nix-labels.txt"
-  local KERNEL_VERSION MANIFEST_PACKAGES SOURCE_REF FULL_BUILD_DIGEST BUILD_DIGEST
+  local KERNEL_VERSION="" MANIFEST_PACKAGES="" SOURCE_REF="" FULL_BUILD_DIGEST="" BUILD_DIGEST=""
   local anchor_tag image_name_ref
   local _step_n=0
   _step() {
@@ -113,13 +112,10 @@ build_variant_core() {
       "$repo_owner" "$repo_name" "$KERNEL_VERSION" \
       "$manifest_file" "$labels_file"
     if [[ "$rechunk" == "1" ]]; then
-      _step "Rechunk image (rpm-ostree compose build-chunked-oci)"
-      rechunk_image "$anchor_tag"
-      # rpm-ostree build-chunked-oci does not carry the source image's labels
-      # into the chunked output, so the labels are applied to the rechunked
-      # image itself (relabel_image re-points the anchor tag after commit).
-      _step "Relabel image (chunked-img)"
-      relabel_image "$labels_file" "$KERNEL_VERSION" "chunked-img" "$anchor_tag"
+      _step "Rechunk image (chunkah)"
+      # chunkah applies the labels at chunk time (--label), so no separate
+      # relabel pass is needed after rechunking.
+      rechunk_image "$anchor_tag" "$labels_file"
     else
       _step "Relabel image (raw-img)"
       relabel_image "$labels_file" "$KERNEL_VERSION" "raw-img" "$anchor_tag"
@@ -144,8 +140,8 @@ run_rechunk() {
   local repo_organization="${5:?repo_organization required}"
   local force_build="${6:-0}"
   local quiet="${7:-0}"
-  local TAG VARIANT_NAME CANONICAL_TAG TAGS
-  local KERNEL_VERSION MANIFEST_PACKAGES SOURCE_REF FULL_BUILD_DIGEST BUILD_DIGEST
+  local TAG="" VARIANT_NAME="" CANONICAL_TAG="" TAGS=""
+  local KERNEL_VERSION="" MANIFEST_PACKAGES="" SOURCE_REF="" FULL_BUILD_DIGEST="" BUILD_DIGEST=""
 
   sudo_cache
 
@@ -184,7 +180,8 @@ run_relabel() {
   local repo_organization="${5:?repo_organization required}"
   local image_name_ref="${6:-}"
   local quiet="${7:-0}"
-  local TAG VARIANT_NAME CANONICAL_TAG TAGS
+  local TAG="" VARIANT_NAME="" CANONICAL_TAG="" TAGS=""
+  local KERNEL_VERSION="" MANIFEST_PACKAGES="" SOURCE_REF="" FULL_BUILD_DIGEST="" BUILD_DIGEST=""
   local anchor_tag manifest_file labels_file
 
   sudo_cache
@@ -225,7 +222,7 @@ run_relabel() {
 }
 
 # Run the full build pipeline for a single variant:
-#   build → extract image info → assemble labels → relabel → [rechunk] → extract final ref
+#   build → extract image info → assemble labels → [relabel] → [rechunk] → extract final ref
 # Rechunk is disabled by default; pass rechunk=1 to enable.
 run_pipeline() {
   local variant_or_spec="${1:?variant_or_spec required}"
@@ -233,12 +230,12 @@ run_pipeline() {
   local image_name="${3:-bazzite-nix}"
   local image_desc="${4:-Customized Bazzite image with Nix mount support and other sugar}"
   local repo_organization="${5:?repo_organization required}"
-  local base_image_override="${7:-}"
-  local force_rebuild="${8:-0}"
-  local rechunk="${9:-0}"
+  local base_image_override="${6:-}"
+  local force_rebuild="${7:-0}"
+  local rechunk="${8:-0}"
   # shellcheck disable=SC2034
-  local TARGET_IMAGE TAG BASE_IMAGE BUILD_SCRIPT VARIANT_NAME CANONICAL_TAG TAGS
-  local KERNEL_VERSION MANIFEST_PACKAGES SOURCE_REF FULL_BUILD_DIGEST BUILD_DIGEST
+  local TARGET_IMAGE="" TAG="" BASE_IMAGE="" BUILD_SCRIPT="" VARIANT_NAME="" CANONICAL_TAG="" TAGS=""
+  local KERNEL_VERSION="" MANIFEST_PACKAGES="" SOURCE_REF="" FULL_BUILD_DIGEST="" BUILD_DIGEST=""
 
   sudo_cache
 
@@ -252,10 +249,10 @@ run_pipeline() {
   echo "=== Step 1: Build container image ==="
   build_image_or_skip "$BASE_IMAGE" "$BUILD_SCRIPT" "$CANONICAL_TAG" "$VARIANT_NAME" "$force_rebuild"
 
-  # Phases 2-4: extract → assemble labels → relabel raw-img → [rechunk] → final ref (shared core).
-  # Rechunk routes through run_rechunk (always rechunks); relabel routes through
-  # run_relabel (always relabels) so the pipeline shares the standalone entry
-  # points; the skip-if-chunked-exists guard remains for CI.
+  # Phases 2-4: extract → assemble labels → [relabel] → [rechunk] → final ref (shared core).
+  # Rechunk routes through run_rechunk (always rechunks, labels applied by chunkah);
+  # relabel routes through run_relabel (always relabels) so the pipeline shares the
+  # standalone entry points; the skip-if-chunked-exists guard remains for CI.
   # build_variant_core emits [n/N] step logs for each phase.
   local core_output
   if [[ "$rechunk" == "1" ]]; then
@@ -274,7 +271,7 @@ run_pipeline() {
 # old build-reusable action. No re-resolution — preserves matrix collision handling.
 # Usage: build_variant_ci <variant> <base_image> <build_script> <canonical_tag> \
 #                         <date> <image_desc> <parent_version> [repo_owner] [repo_name] [rechunk]
-# rechunk=1 would enable rpm-ostree chunking here too (currently reworked, out of scope).
+# rechunk=1 enables chunkah chunking (build.yml passes 1).
 # Writes to $GITHUB_OUTPUT (source_ref, full_build_digest, build_digest, kernel_version,
 # manifest_packages) when set.
 build_variant_ci() {
@@ -289,7 +286,7 @@ build_variant_ci() {
   local repo_name="${9:-}"
   local rechunk="${10:-0}"
 
-  local KERNEL_VERSION MANIFEST_PACKAGES SOURCE_REF FULL_BUILD_DIGEST BUILD_DIGEST
+  local KERNEL_VERSION="" MANIFEST_PACKAGES="" SOURCE_REF="" FULL_BUILD_DIGEST="" BUILD_DIGEST=""
   local gh_output="${GITHUB_OUTPUT:-}"
 
   echo "=== Step 1: Build container image ==="
@@ -496,8 +493,7 @@ build_all_variants() {
         "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$image_desc" "$variant" "$canonical_tag" \
         "$repo_organization" "$image_name" "$KERNEL_VERSION" \
         "$manifest_file" "$labels_file"
-      rechunk_image "$variant"
-      relabel_image "$labels_file" "$KERNEL_VERSION" "chunked-img" "$variant"
+      rechunk_image "$variant" "$labels_file"
     fi
 
     eval "$(extract_final_ref "$variant")"

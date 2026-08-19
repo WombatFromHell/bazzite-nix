@@ -119,7 +119,7 @@ EOF
 
 # ── rechunk_image ───────────────────────────────────────────────────────────
 
-@test "rechunk_image writes oci-archive to host temp dir and pulls it back" {
+@test "rechunk_image chunks raw-img with chunkah into an OCI layout and pulls it back" {
     local log
     log="$(mktemp)"
 
@@ -128,19 +128,40 @@ EOF
     podman() {
         printf 'podman %s\n' "$*" >>"$LOG"
         case "$1" in
-        pull) echo "sha256:chunked-digest" ;;
+        pull)
+            case "$2" in
+            quay.io/coreos/chunkah:latest) echo "sha256:chunkah-image" ;;
+            oci:*) echo "sha256:chunked-digest" ;;
+            esac
+            ;;
+        image)
+            echo "quay.io/coreos/chunkah@sha256:chunkah-ref"
+            ;;
         esac
     }
     export -f podman
+    cosign() {
+        printf 'cosign %s\n' "$*" >>"$LOG"
+        return 0
+    }
+    export -f cosign
     export LOG="$log"
 
     rechunk_image "stable"
 
-    # compose output is an oci-archive into the mounted host temp dir
-    grep -q -- '--output oci-archive:/run/out/chunked.oci' "$log"
-    grep -q -- '--volume ' "$log"
+    # chunkah is pulled and its signature verified
+    grep -q 'podman pull quay.io/coreos/chunkah:latest' "$log"
+    grep -q 'cosign verify' "$log"
+    # raw-img config is inspected to carry Env/Cmd/bootc metadata over
+    grep -q 'podman image inspect localhost/raw-img' "$log"
+    # chunked output is an OCI layout into the mounted host temp dir
+    grep -q -- '--output oci:/run/out/chunked' "$log"
+    grep -q -- '--mount=type=image,src=localhost/raw-img,target=/chunkah' "$log"
+    grep -q -- '--prune /sysroot/' "$log"
+    # stale OSTree/build labels are dropped
+    grep -q -- '--label ostree.commit-' "$log"
     # pulled back and tagged as chunked-img, plus the anchor tag
-    grep -q 'podman pull oci-archive:' "$log"
+    grep -q 'podman pull oci:' "$log"
     grep -q 'podman tag sha256:chunked-digest localhost/chunked-img' "$log"
     grep -q 'podman tag localhost/chunked-img localhost/chunked-img:stable' "$log"
 }

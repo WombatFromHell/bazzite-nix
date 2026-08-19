@@ -144,7 +144,7 @@ relabel $variant_or_spec="{{ default_tag }}":
 
 # ── Full pipeline (mirrors the GitHub Actions workflow) ─────────────────────
 # Run the full build pipeline for a single variant:
-#   build → extract image info → assemble labels → relabel raw-img → [rechunk] → extract final ref
+#   build → extract image info → assemble labels → [relabel] → [rechunk] → extract final ref
 # Rechunk is disabled by default; pass rechunk=1 to enable.
 
 # Usage: just pipeline [variant-name | image:tag] [base_image_override] [force_rebuild] [rechunk]
@@ -198,7 +198,7 @@ release-preview $variants="" $prev="" $config="":
 # Build a single pre-resolved variant (mirrors old build-reusable action).
 # Values come from check-variants output — no re-resolution.
 # Usage: just ci-pipeline <variant> <base_image> <build_script> <canonical_tag> <date> <image_desc> <parent_version> [rechunk]
-# rechunk=1 enables rpm-ostree chunking (build.yml passes 1; leave 0 for raw-img-only).
+# rechunk=1 enables chunkah chunking (build.yml passes 1; leave 0 for raw-img-only).
 [group('Build Container Image')]
 ci-pipeline $variant $base_image $build_script $canonical_tag $date $image_desc $parent_version $rechunk="0":
     #!/usr/bin/env bash
