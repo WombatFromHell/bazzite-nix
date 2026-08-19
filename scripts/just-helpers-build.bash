@@ -9,25 +9,12 @@ run_build() {
   local variants_config="${2:-.github/variants.json}"
   local image_name="${3:-bazzite-nix}"
   local base_image_override="${4:-}"
+  local force_rebuild="${5:-0}"
   local TARGET_IMAGE TAG BASE_IMAGE BUILD_SCRIPT VARIANT_NAME CANONICAL_TAG TAGS
   sudo_cache
-  eval "$(resolve_variant "$variant_or_spec" "$variants_config" "$image_name")"
+  eval "$(resolve_variant "$variant_or_spec" "$variants_config" "$image_name" "$force_rebuild")"
   [[ -n "$base_image_override" ]] && BASE_IMAGE="$base_image_override"
-  build_image "$BASE_IMAGE" "$BUILD_SCRIPT" "$CANONICAL_TAG" "$VARIANT_NAME" "./Containerfile" "$VARIANT_NAME"
-}
-
-# Force-rebuild a container image, evicting any cached local image first
-run_rebuild() {
-  local variant_or_spec="${1:?variant_or_spec required}"
-  local variants_config="${2:-.github/variants.json}"
-  local image_name="${3:-bazzite-nix}"
-  local base_image_override="${4:-}"
-  # shellcheck disable=SC2034
-  local TARGET_IMAGE TAG BASE_IMAGE BUILD_SCRIPT VARIANT_NAME CANONICAL_TAG TAGS
-  sudo_cache
-  eval "$(resolve_variant "$variant_or_spec" "$variants_config" "$image_name" "1")"
-  [[ -n "$base_image_override" ]] && BASE_IMAGE="$base_image_override"
-  build_image_or_skip "$BASE_IMAGE" "$BUILD_SCRIPT" "$CANONICAL_TAG" "$VARIANT_NAME" "1"
+  build_image_or_skip "$BASE_IMAGE" "$BUILD_SCRIPT" "$CANONICAL_TAG" "$VARIANT_NAME" "$force_rebuild"
 }
 
 # Human-readable build summary (reads the eval-assignment vars set by the caller)
@@ -444,7 +431,7 @@ build_all_variants() {
   local image_name="${2:-bazzite-nix}"
   local image_desc="${3:-Customized Bazzite image with Nix mount support and other sugar}"
   local results_file variants count i variant base_image build_script canonical_tag tags_csv
-  local manifest_file labels_file KERNEL_VERSION SOURCE_REF BUILD_DIGEST
+  local KERNEL_VERSION MANIFEST_PACKAGES SOURCE_REF FULL_BUILD_DIGEST BUILD_DIGEST
   sudo_cache
 
   results_file="/tmp/variants_results.json"
@@ -477,26 +464,12 @@ build_all_variants() {
     echo "  Tags          : $tags_csv"
     echo "========================================"
 
-    manifest_file="/tmp/bazzite-nix-manifest.json"
-    labels_file="/tmp/bazzite-nix-labels.txt"
-
     # Build container image (skip if exists)
     build_image_or_skip "$base_image" "$build_script" "$canonical_tag" "$variant"
 
-    eval "$(extract_image_info "$manifest_file")"
-
-    # Relabel & rechunk only if containers-storage doesn't already exist
-    if sudo buildah images --format '{{.Name}}:{{.Tag}}' localhost/chunked-img >/dev/null 2>&1; then
-      echo "containers-storage image localhost/chunked-img already exists, skipping relabel & rechunk for variant: $variant"
-    else
-      assemble_labels \
-        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$image_desc" "$variant" "$canonical_tag" \
-        "$repo_organization" "$image_name" "$KERNEL_VERSION" \
-        "$manifest_file" "$labels_file"
-      rechunk_image "$variant" "$labels_file"
-    fi
-
-    eval "$(extract_final_ref "$variant")"
+    # Shared core: extract → labels → rechunk → final ref (anchored skip-check
+    # chunked-img:<variant> matches CI semantics).
+    eval "$(build_variant_core "$variant" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$image_desc" "$canonical_tag" "$repo_organization" "$image_name" "0" "1")"
     echo "Variant $variant complete: $SOURCE_REF ($BUILD_DIGEST)"
   done
 }

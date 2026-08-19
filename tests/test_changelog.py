@@ -311,7 +311,7 @@ class TestGetPackages:
     def test_extracts_from_ostree_rechunk_info_label(self):
         packages = {"kernel": "6.19.8-200.ogc", "mesa": "26.0.3-1"}
         manifests = {"bazzite": make_manifest_with_packages(packages)}
-        result, _ = get_packages(manifests)
+        result = get_packages(manifests)
         assert result["bazzite"] == packages
 
     def test_falls_back_to_dev_hhd_rechunk_info_label(self):
@@ -321,7 +321,7 @@ class TestGetPackages:
                 "Labels": {"dev.hhd.rechunk.info": json.dumps({"packages": packages})}
             }
         }
-        result, _ = get_packages(manifests)
+        result = get_packages(manifests)
         assert result["bazzite"] == packages
 
     def test_ostree_label_takes_precedence_over_dev_label(self):
@@ -335,17 +335,17 @@ class TestGetPackages:
                 }
             }
         }
-        result, _ = get_packages(manifests)
+        result = get_packages(manifests)
         assert result["bazzite"]["kernel"] == "6.19.8-ostree"
 
     def test_returns_empty_dict_when_no_labels(self):
         manifests = {"bazzite": {"Labels": {}}}
-        result, _ = get_packages(manifests)
+        result = get_packages(manifests)
         assert result["bazzite"] == {}
 
     def test_returns_empty_dict_when_labels_missing(self):
         manifests = {"bazzite": {}}
-        result, _ = get_packages(manifests)
+        result = get_packages(manifests)
         assert result["bazzite"] == {}
 
     def test_raises_exception_for_invalid_json(self):
@@ -359,7 +359,7 @@ class TestGetPackages:
                 "Labels": {"ostree.rechunk.info": json.dumps({"other": "data"})}
             }
         }
-        result, _ = get_packages(manifests)
+        result = get_packages(manifests)
         assert result["bazzite"] == {}
 
     def test_handles_multiple_images_independently(self):
@@ -367,7 +367,7 @@ class TestGetPackages:
             "bazzite": make_manifest_with_packages({"pkg-a": "1.0"}),
             "bazzite-deck": make_manifest_with_packages({"pkg-b": "2.0"}),
         }
-        result, _ = get_packages(manifests)
+        result = get_packages(manifests)
         assert len(result) == 2
         assert result["bazzite"] == {"pkg-a": "1.0"}
         assert result["bazzite-deck"] == {"pkg-b": "2.0"}
@@ -376,7 +376,7 @@ class TestGetPackages:
         manifests = {
             "bazzite": {"Labels": {"ostree.rechunk.info": json.dumps({"packages": {}})}}
         }
-        result, _ = get_packages(manifests)
+        result = get_packages(manifests)
         assert result["bazzite"] == {}
 
 
@@ -1337,17 +1337,10 @@ class TestVersionHandlingIntegration:
         assert versions["kernel"] == "6.19.8"
         assert versions["mesa"] == "26.0.3"
 
-    def test_get_packages_tuple_return_type(self):
-        """Verify get_packages returns a tuple of (current, prev) packages."""
+    def test_returns_packages_dict(self):
+        """Verify get_packages returns {image_name: {pkg: version}}."""
         manifests = {"bazzite": make_manifest_with_packages({"kernel": "6.19.8"})}
 
         result = get_packages(manifests)
 
-        # Should be a tuple
-        assert isinstance(result, tuple)
-        assert len(result) == 2
-
-        # Both elements should be a tuple (current packages only; no previous source)
-        current, prev = result
-        assert current["bazzite"]["kernel"] == "6.19.8"
-        assert prev == {}
+        assert result["bazzite"]["kernel"] == "6.19.8"

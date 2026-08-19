@@ -152,22 +152,6 @@ assemble_labels() {
   printf '%s\n' "${labels[@]}" >"${output_file}"
 }
 
-# ── tag variants ────────────────────────────────────────────────────────────
-# Usage: tag_variants <image_name> <canonical_tag>
-# Given a canonical tag "<branch>-<major>.<YYMMDD>.<minor>" (e.g. testing-44.20260814.1),
-# tags the image so downstream lookups can resolve by, in preference order:
-#   full canonical tag -> branch+major -> branch
-# Never touches ":latest" — that stays an explicit, caller-chosen tag.
-tag_variants() {
-  local image="$1" tag="$2"
-  local base="localhost/${image}"
-  if [[ "$tag" =~ ^([A-Za-z0-9]+)-([0-9]+)\.[0-9]{8}\.[0-9]+$ ]]; then
-    local branch="${BASH_REMATCH[1]}" major="${BASH_REMATCH[2]}"
-    sudo podman tag "${base}:${tag}" "${base}:${branch}-${major}" 2>/dev/null || true
-    sudo podman tag "${base}:${tag}" "${base}:${branch}" 2>/dev/null || true
-  fi
-}
-
 # ── relabel image ───────────────────────────────────────────────────────────
 # Usage: relabel_image <labels_file> <kernel_version> [image] [anchor_tag]
 # Clears inherited labels, then re-applies new labels and annotations via

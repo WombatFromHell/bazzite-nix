@@ -1,13 +1,8 @@
 export repo_organization := env("GITHUB_REPOSITORY_OWNER", "wombatfromhell")
 export image_name := env("IMAGE_NAME", "bazzite-nix")
 export image_desc := env("IMAGE_DESC", "Customized Bazzite image with Nix mount support and other sugar")
-export image_tag := env("IMAGE_TAG", "latest")
-export image_build_script := env("IMAGE_BUILD_SCRIPT", "build.sh")
-export centos_version := env("CENTOS_VERSION", "stream10")
-export fedora_version := env("FEDORA_VERSION", "43")
 export default_tag := env("DEFAULT_TAG", "testing")
 export bib_image := env("BIB_IMAGE", "quay.io/centos-bootc/bootc-image-builder:latest")
-export base_image := env("BASE_IMAGE", "ghcr.io/ublue-os/bazzite:stable")
 export cache_dir := env("CACHE_DIR", `echo "$HOME/.cache/bazzite-nix"`)
 export variants_config := env("VARIANTS_CONFIG", ".github/variants.json")
 export oci_output_dir := env("OCI_OUTPUT_DIR", "/var/lib/containers/oci")
@@ -105,21 +100,18 @@ test:
 
 # just build bazzite-nix:mytag ghcr.io/ublue-os/bazzite:testing
 [group('Build Container Image')]
-build $variant_or_spec="{{ default_tag }}" $base_image_override="":
+build $variant_or_spec="{{ default_tag }}" $base_image_override="" $force_rebuild="0":
     #!/usr/bin/env bash
     set -euo pipefail
     source "{{ just_helpers }}"
-    run_build "{{ variant_or_spec }}" "{{ variants_config }}" "{{ image_name }}" "{{ base_image_override }}"
+    run_build "{{ variant_or_spec }}" "{{ variants_config }}" "{{ image_name }}" "{{ base_image_override }}" "{{ force_rebuild }}"
 
 # Force-rebuild a container image, evicting any cached local image first
 
 # Usage: just rebuild [variant-name | image:tag] [base_image_override]
 [group('Build Container Image')]
 rebuild $variant_or_spec="{{ default_tag }}" $base_image_override="":
-    #!/usr/bin/env bash
-    set -euo pipefail
-    source "{{ just_helpers }}"
-    run_rebuild "{{ variant_or_spec }}" "{{ variants_config }}" "{{ image_name }}" "{{ base_image_override }}"
+    just --unstable build "{{ variant_or_spec }}" "{{ base_image_override }}" "1"
 
 # Rechunk localhost/raw-img to OCI layout with bootc chunking
 # Usage: just rechunk [variant-name | image:tag]
@@ -187,11 +179,11 @@ build-all $force_build="0":
 #   prev_ref: optional previous release ref (e.g. ghcr.io/<owner>/bazzite-nix:testing-44.20260812.1),
 # inspected via skopeo docker:// (no pull) to render a prev → new diff.
 [group('Build Container Image')]
-release-preview $variants="" $prev="" $config="":
+release-preview $variants="" $prev="" $config="{{ variants_config }}":
     #!/usr/bin/env bash
     set -euo pipefail
     source "{{ just_helpers }}"
-    release_preview "{{ variants }}" "{{ prev }}" "{{ if config != "" { config } else { variants_config } }}"
+    release_preview "{{ variants }}" "{{ prev }}" "{{ config }}"
 
 # ── CI recipes (called from build.yml; use pre-resolved matrix values) ──────
 
@@ -221,12 +213,11 @@ push $source_ref $tags $registry $repo $suffix $variant $date $parent_version:
 # Auth: GH_TOKEN/GITHUB_TOKEN (CI) or ambient gh login. Needs a git checkout with recent history.
 # Usage: just release <variant> [handwritten] [variants_config] [allow_disabled]
 [group('Build Container Image')]
-release $variant $handwritten="" $config="" $allow_disabled="false":
+release $variant $handwritten="" $config="{{ variants_config }}" $allow_disabled="false":
     #!/usr/bin/env bash
     set -euo pipefail
     source "{{ just_helpers }}"
-    CONFIG="{{ if config != "" { config } else { variants_config } }}"
-    release_variant "{{ variant }}" "{{ handwritten }}" "$CONFIG" "{{ allow_disabled }}"
+    release_variant "{{ variant }}" "{{ handwritten }}" "{{ config }}" "{{ allow_disabled }}"
 
 # ── Variant helpers ─────────────────────────────────────────────────────────
 

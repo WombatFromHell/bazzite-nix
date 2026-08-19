@@ -24,26 +24,11 @@ def _registry_prefix():
 
 
 REGISTRY = _registry_prefix()
-DEFAULT_VARIANTS_PATH = Path(__file__).parent.parent.parent / "variants.json"
 
 RETRIES = 3
 RETRY_WAIT = 5
 FEDORA_PATTERN = re.compile(r"(?<=[-0-9a-z])\.fc\d{2}(?![0-9])")
 STABLE_START_PATTERN = re.compile(r"\d+\.\d{8}(?:\.\d+)?$")
-
-
-def _compute_images_from_variants() -> list[str]:
-    """Compute the IMAGES list from variants.json dynamically."""
-    try:
-        with open(DEFAULT_VARIANTS_PATH) as f:
-            data = json.load(f)
-        return [f"bazzite-nix{v.get('suffix', '')}" for v in data.get("variants", [])]
-    except Exception:
-        return []
-
-
-# Full set of image variants derived from variants.json
-IMAGES = _compute_images_from_variants()
 
 
 def other_start_pattern(target: str) -> re.Pattern:
@@ -116,19 +101,11 @@ BLACKLIST_VERSIONS = [
     "nvidia-kmod-common-lts",
 ]
 
-PKG_ALIAS = {}
-
 
 def load_variants(variants_config: str | None = None) -> list[dict[str, Any]]:
     """Load variant configuration from variants.json file."""
     if not variants_config:
-        # Try default path first
-        if DEFAULT_VARIANTS_PATH.exists():
-            with open(DEFAULT_VARIANTS_PATH) as f:
-                data = json.load(f)
-            variants = data.get("variants", [])
-            return [v for v in variants if not v.get("disabled", False)]
-        # Fallback to default images if no config found
+        # Default images if no config provided
         return [
             {"name": "bazzite-nix", "suffix": ""},
             {"name": "bazzite-nix-nvidia-open", "suffix": "-nvidia-open"},
@@ -230,18 +207,17 @@ def get_tags(target: str, manifests: dict[str, Any]):
 
 def get_packages(
     manifests: dict[str, Any],
-) -> tuple[dict[str, dict[str, str]], dict[str, dict[str, str]]]:
+) -> dict[str, dict[str, str]]:
     """Get packages from ostree.rechunk.info manifest labels.
 
-    Returns (current_packages, prev_packages) where each is {image_name: {pkg: version}}.
+    Returns {image_name: {pkg: version}}.
     """
     current_packages: dict[str, dict[str, str]] = {}
-    prev_packages: dict[str, dict[str, str]] = {}
 
     for img, manifest in manifests.items():
         current_packages[img] = _get_packages_from_manifest(manifest, img)
 
-    return current_packages, prev_packages
+    return current_packages
 
 
 def _get_packages_from_manifest(
@@ -307,8 +283,8 @@ def get_package_groups(
     common = set()
     others = {k: set() for k in OTHER_NAMES.keys()}
 
-    npkg, _ = get_packages(manifests)
-    ppkg, _ = get_packages(prev)
+    npkg = get_packages(manifests)
+    ppkg = get_packages(prev)
 
     keys = set(npkg.keys()) | set(ppkg.keys())
     pkg = defaultdict(set)
@@ -365,7 +341,7 @@ def get_package_groups(
 
 def get_versions(manifests: dict[str, Any]):
     versions = {}
-    pkgs, _ = get_packages(manifests)
+    pkgs = get_packages(manifests)
     for img, img_pkgs in pkgs.items():
         for pkg, v in img_pkgs.items():
             if is_nvidia(img, lts=True) and "nvidia" in pkg:
@@ -516,27 +492,23 @@ def generate_changelog(
 
     # Conditionally add Nvidia row based on package presence
     nvidia_pkg = "nvidia-kmod-common"
-    nvidia_versions = get_versions(manifests)
-    nvidia_prev_versions = get_versions(prev_manifests)
-    has_nvidia = nvidia_pkg in nvidia_versions or nvidia_pkg in nvidia_prev_versions
+    has_nvidia = nvidia_pkg in versions or nvidia_pkg in prev_versions
 
     if has_nvidia:
         nvidia_row = "\n| **Nvidia** | {pkgrel:nvidia-kmod-common} |"
-        if nvidia_pkg not in nvidia_prev_versions or nvidia_prev_versions[
+        if nvidia_pkg not in prev_versions or prev_versions[nvidia_pkg] == versions.get(
             nvidia_pkg
-        ] == nvidia_versions.get(nvidia_pkg):
+        ):
             changelog = changelog.replace(
                 "{pkgrel:nvidia-kmod-common}",
-                PATTERN_PKGREL.format(
-                    version=nvidia_versions.get(nvidia_pkg, "Unknown")
-                ),
+                PATTERN_PKGREL.format(version=versions.get(nvidia_pkg, "Unknown")),
             )
         else:
             changelog = changelog.replace(
                 "{pkgrel:nvidia-kmod-common}",
                 PATTERN_PKGREL_CHANGED.format(
-                    prev=nvidia_prev_versions[nvidia_pkg],
-                    new=nvidia_versions[nvidia_pkg],
+                    prev=prev_versions[nvidia_pkg],
+                    new=versions[nvidia_pkg],
                 ),
             )
     else:
@@ -547,12 +519,12 @@ def generate_changelog(
     for pkg, v in versions.items():
         if pkg not in prev_versions or prev_versions[pkg] == v:
             changelog = changelog.replace(
-                "{pkgrel:" + (PKG_ALIAS.get(pkg, None) or pkg) + "}",
+                "{pkgrel:" + pkg + "}",
                 PATTERN_PKGREL.format(version=v),
             )
         else:
             changelog = changelog.replace(
-                "{pkgrel:" + (PKG_ALIAS.get(pkg, None) or pkg) + "}",
+                "{pkgrel:" + pkg + "}",
                 PATTERN_PKGREL_CHANGED.format(prev=prev_versions[pkg], new=v),
             )
 

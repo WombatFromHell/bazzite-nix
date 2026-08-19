@@ -31,6 +31,8 @@ _build_bib() {
 
   local disk_name disk_file BUILDTMP
 
+  local CACHE_DIR="${CACHE_DIR:-$HOME/.cache/bazzite-nix}"
+
   disk_name="$(disk_file_name "$type")"
   disk_file="${out_dir}/${disk_name}"
   BUILDTMP="${out_dir}/.bib-tmp"
@@ -49,18 +51,21 @@ _build_bib() {
 
   sudo rm -rf "$BUILDTMP"
   mkdir -p "$BUILDTMP"
+  mkdir -p "${CACHE_DIR}/bib-store"
 
   # shellcheck disable=SC2086
   if
-    sudo podman run --rm -it --privileged \
-      --pull=newer \
+    sudo podman run --rm --privileged \
+      -i --init --sig-proxy \
+      --pull=missing \
       --net=host \
       --security-opt label=type:unconfined_t \
       -v "$(pwd)/${config}:/config.toml:ro" \
       -v "$BUILDTMP:/output" \
+      -v "${CACHE_DIR}/bib-store:/store" \
       -v /var/lib/containers/storage:/var/lib/containers/storage \
       "$bib_image" \
-      --type $type --use-librepo=True --rootfs=btrfs \
+      --type $type --use-librepo=True --rootfs=ext4 \
       "$source_image"
   then
     sudo touch "${BUILDTMP}/.bib-build-complete"
@@ -143,8 +148,12 @@ build_bib() {
     fi
     ;;
   oci)
-    local target_image="localhost/rechunked"
-    sudo skopeo copy "$source" containers-storage:"${target_image}:${tag}"
+    local target_image="localhost/chunked-img"
+    if ! sudo buildah images --format '{{.Name}}:{{.Tag}}' "${target_image}:${tag}" >/dev/null 2>&1; then
+      sudo skopeo copy "$source" containers-storage:"${target_image}:${tag}"
+    else
+      echo "Image ${target_image}:${tag} already in rootful storage, skipping copy"
+    fi
     source_image="${target_image}:${tag}"
     ;;
   *)
