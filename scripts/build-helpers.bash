@@ -4,13 +4,6 @@
 
 set -euo pipefail
 
-# ── sudo credential caching ─────────────────────────────────────────────────
-# Prompt once at pipeline start; refresh the timestamp non-interactively
-# before long ops so a stale sudo session never interrupts a build.
-sudo_cache() { sudo -v; }
-
-sudo_refresh() { sudo -n true 2>/dev/null || true; }
-
 # ── build image ─────────────────────────────────────────────────────────────
 # Usage: build_image <base_image> <build_script> <canonical_tag> <variant> <containerfile_path> <raw_tag>
 # Tags the result as both `raw-img` (default/latest) and `raw-img:<raw_tag>`.
@@ -25,8 +18,7 @@ build_image() {
   local containerfile_path="$5"
   local raw_tag="${6:-$canonical_tag}"
 
-  sudo_refresh
-  sudo buildah build \
+  buildah build \
     --tag raw-img \
     --tag "raw-img:${raw_tag}" \
     --build-arg BASE_IMAGE="${base_image}" \
@@ -47,9 +39,9 @@ build_image_or_skip() {
 
   if [[ "$force_rebuild" == "1" ]]; then
     echo "Force rebuild: removing existing container image..."
-    sudo buildah rmi --force raw-img 2>/dev/null || true
+    buildah rmi --force raw-img 2>/dev/null || true
     build_image "$base_image" "$build_script" "$canonical_tag" "$variant" "./Containerfile" "$variant"
-  elif sudo buildah images --format '{{.Name}}' raw-img >/dev/null 2>&1; then
+  elif buildah images --format '{{.Name}}' raw-img >/dev/null 2>&1; then
     echo "Container image raw-img already exists, skipping build"
   else
     build_image "$base_image" "$build_script" "$canonical_tag" "$variant" "./Containerfile" "$variant"
@@ -73,7 +65,7 @@ extract_image_info() {
   # manifest.json is single-line (jq -c) so the first line is the kernel,
   # the remainder is the manifest.
   local output kernel_version manifest
-  output=$(sudo podman run --rm "$image_ref" \
+  output=$(podman run --rm "$image_ref" \
     sh -c 'cat /usr/share/ublue-os/kernel-version; echo; cat /usr/share/ublue-os/manifest.json') || {
     echo "::error::Failed to read image metadata from image"
     exit 1
@@ -169,9 +161,9 @@ relabel_image() {
   echo "Relabeling ${image}: clearing inherited labels..." >&2
   # Clear all inherited labels from base image
   local container
-  container=$(sudo buildah from "$image")
-  sudo buildah config --label "-" "$container"
-  sudo buildah commit --identity-label=false --rm "$container" "$image" >/dev/null
+  container=$(buildah from "$image")
+  buildah config --label "-" "$container"
+  buildah commit --identity-label=false --rm "$container" "$image" >/dev/null
 
   # Read new labels from file
   local labels=()
@@ -187,18 +179,18 @@ relabel_image() {
 
   echo "Relabeling ${image}: applying ${#labels[@]} labels and annotations..." >&2
   # Apply labels and annotations via buildah
-  container=$(sudo buildah from "$image")
+  container=$(buildah from "$image")
   for line in "${labels[@]}"; do
     [ -z "$line" ] && continue
-    sudo buildah config --label "$line" --annotation "$line" "$container"
+    buildah config --label "$line" --annotation "$line" "$container"
   done
-  sudo buildah commit --identity-label=false --rm "$container" "$image" >/dev/null
+  buildah commit --identity-label=false --rm "$container" "$image" >/dev/null
 
   # buildah commit updates only the bare reference; re-point the anchor/alias
   # tags so downstream lookups (extract_final_ref, run_vm) see the relabeled image.
   if [[ -n "$anchor_tag" ]]; then
-    sudo podman tag "localhost/${image}" "localhost/${image}:${anchor_tag}" 2>/dev/null || true
-    sudo podman tag "localhost/${image}" "localhost/${image}:latest" 2>/dev/null || true
+    podman tag "localhost/${image}" "localhost/${image}:${anchor_tag}" 2>/dev/null || true
+    podman tag "localhost/${image}" "localhost/${image}:latest" 2>/dev/null || true
   fi
 }
 
@@ -223,13 +215,12 @@ rechunk_image() {
   rechunk_dir="$(mktemp -d "${TMPDIR:-/tmp}/rechunk-XXXXXX")"
   chunkah_config="$(mktemp "${TMPDIR:-/tmp}/chunkah-config-XXXXXX.json")"
   # shellcheck disable=SC2064  # Intentional: capture local var values at definition time
-  trap "sudo rm -rf '${rechunk_dir}' '${chunkah_config}'" EXIT
+  trap "rm -rf '${rechunk_dir}' '${chunkah_config}'" EXIT
 
   chunkah_image="quay.io/coreos/chunkah:latest"
   echo "Pulling ${chunkah_image}..." >&2
-  sudo_refresh
-  sudo podman pull "${chunkah_image}" >/dev/null
-  chunkah_ref="$(sudo podman image inspect --format '{{index .RepoDigests 0}}' "${chunkah_image}")"
+  podman pull "${chunkah_image}" >/dev/null
+  chunkah_ref="$(podman image inspect --format '{{index .RepoDigests 0}}' "${chunkah_image}")"
   # ponytail: cosign skipped when absent so machines without it can still rechunk
   if command -v cosign >/dev/null 2>&1; then
     echo "Verifying ${chunkah_ref} signature..." >&2
@@ -241,7 +232,7 @@ rechunk_image() {
 
   # Carries Env, Cmd and containers.bootc over to the chunked image
   # shellcheck disable=SC2024  # Intentional: write as user; root container reads it ro
-  sudo podman image inspect localhost/raw-img >"${chunkah_config}"
+  podman image inspect localhost/raw-img >"${chunkah_config}"
 
   if [[ -n "$labels_file" && -f "$labels_file" ]]; then
     while IFS= read -r line; do
@@ -255,7 +246,7 @@ rechunk_image() {
   done
 
   echo "Running 'chunkah build' -> ${rechunk_dir}/chunked..." >&2
-  if sudo podman run --rm --pull=never --privileged \
+  if podman run --rm --pull=never \
     --mount=type=image,src=localhost/raw-img,target=/chunkah \
     --volume "${chunkah_config}:/chunkah-config.json:ro,Z" \
     --volume "${rechunk_dir}:/run/out:Z" \
@@ -271,17 +262,17 @@ rechunk_image() {
     --config /chunkah-config.json \
     --output oci:/run/out/chunked 1>&2; then
 
-    chunked=$(sudo podman pull "oci:${rechunk_dir}/chunked")
+    chunked=$(podman pull "oci:${rechunk_dir}/chunked")
     if [[ -z "$chunked" ]]; then
       echo "::error::Failed to load rechunked OCI layout from ${rechunk_dir}/chunked" >&2
       exit 1
     fi
-    sudo podman tag "${chunked}" localhost/chunked-img
+    podman tag "${chunked}" localhost/chunked-img
 
     local t
     for t in "${tags[@]}"; do
       [[ -z "$t" || "$t" == "latest" ]] && continue
-      sudo podman tag localhost/chunked-img "localhost/chunked-img:${t}"
+      podman tag localhost/chunked-img "localhost/chunked-img:${t}"
     done
   else
     echo "Something went wrong during rechunking!" >&2
@@ -301,7 +292,7 @@ extract_final_ref() {
   local source_ref="containers-storage:localhost/${image_name}:${tag}"
 
   local full_digest
-  full_digest=$(sudo skopeo inspect --format '{{.Digest}}' "$source_ref") || {
+  full_digest=$(skopeo inspect --format '{{.Digest}}' "$source_ref") || {
     echo "::error::Expected containers-storage image ${source_ref} not found after rechunk"
     exit 1
   }

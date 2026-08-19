@@ -16,8 +16,8 @@ disk_file_name() {
 # Ensure the BIB and QEMU images are pulled into rootful storage
 ensure_vm_images() {
   local bib_image="$1"
-  sudo podman image exists "$bib_image" 2>/dev/null || sudo podman pull "$bib_image"
-  sudo podman image exists "docker.io/qemux/qemu:latest" 2>/dev/null || sudo podman pull "docker.io/qemux/qemu:latest"
+  podman image exists "$bib_image" 2>/dev/null || podman pull "$bib_image"
+  podman image exists "docker.io/qemux/qemu:latest" 2>/dev/null || podman pull "docker.io/qemux/qemu:latest"
 }
 
 # Internal: Core BIB build logic (called by build_bib)
@@ -41,21 +41,21 @@ _build_bib() {
     local tmp_disk="${BUILDTMP}/${disk_name}"
     if [[ -f "$tmp_disk" ]]; then
       echo "Found disk in .bib-tmp from previous run, moving to final location..."
-      sudo mv -f "$tmp_disk" "$disk_file"
-      sudo rmdir "$BUILDTMP" 2>/dev/null || true
-      sudo chown "$USER:$USER" "$disk_file"
+      mv -f "$tmp_disk" "$disk_file"
+      rmdir "$BUILDTMP" 2>/dev/null || true
+      chown "$USER:$USER" "$disk_file"
       echo "Disk image recovered: $disk_file"
       return 0
     fi
   fi
 
-  sudo rm -rf "$BUILDTMP"
+  rm -rf "$BUILDTMP"
   mkdir -p "$BUILDTMP"
   mkdir -p "${CACHE_DIR}/bib-store"
 
   # shellcheck disable=SC2086
   if
-    sudo podman run --rm --privileged \
+    podman run --rm --privileged \
       -i --init --sig-proxy \
       --pull=missing \
       --net=host \
@@ -68,7 +68,7 @@ _build_bib() {
       --type $type --use-librepo=True --rootfs=ext4 \
       "$source_image"
   then
-    sudo touch "${BUILDTMP}/.bib-build-complete"
+    touch "${BUILDTMP}/.bib-build-complete"
   else
     echo "Error: something went wrong with our BIB build!"
     return 1
@@ -77,14 +77,14 @@ _build_bib() {
   local item
   for item in "$BUILDTMP"/* "$BUILDTMP"/.*; do
     if [[ -d "$item" ]]; then
-      sudo mv -f "$item"/* "$out_dir"/
-      sudo rmdir "$item"
+      mv -f "$item"/* "$out_dir"/
+      rmdir "$item"
     else
-      sudo mv -f "$item" "$out_dir"/
+      mv -f "$item" "$out_dir"/
     fi
   done
-  sudo rm -rf "$BUILDTMP"
-  sudo chown -R "$USER:$USER" "$out_dir"
+  rm -rf "$BUILDTMP"
+  chown -R "$USER:$USER" "$out_dir"
 }
 
 # Build BIB VM image (unified function for podman and OCI sources)
@@ -124,19 +124,19 @@ build_bib() {
   case "$source_type" in
   podman)
     local effective_tag="$tag"
-    if ! sudo buildah images --format '{{.Name}}:{{.Tag}}' "${source}:${tag}" >/dev/null 2>&1; then
+    if ! buildah images --format '{{.Name}}:{{.Tag}}' "${source}:${tag}" >/dev/null 2>&1; then
       # Fallback to :latest (rechunk_image may not have tagged with $TAG)
-      if sudo buildah images --format '{{.Name}}:{{.Tag}}' "${source}:latest" >/dev/null 2>&1; then
+      if buildah images --format '{{.Name}}:{{.Tag}}' "${source}:latest" >/dev/null 2>&1; then
         echo "Image ${source}:${tag} not found, using ${source}:latest"
         effective_tag="latest"
       else
         echo "Image ${source}:${tag} not found in rootful storage."
         if podman image exists "${source}:${tag}" 2>/dev/null; then
           echo "Found in rootless storage, copying to rootful..."
-          podman save "${source}:${tag}" | sudo podman load
+          podman save "${source}:${tag}" | podman load
         else
           echo "Image not found in rootless storage either. Pulling..."
-          sudo podman pull "${source}:${tag}"
+          podman pull "${source}:${tag}"
         fi
       fi
     fi
@@ -149,8 +149,8 @@ build_bib() {
     ;;
   oci)
     local target_image="localhost/chunked-img"
-    if ! sudo buildah images --format '{{.Name}}:{{.Tag}}' "${target_image}:${tag}" >/dev/null 2>&1; then
-      sudo skopeo copy "$source" containers-storage:"${target_image}:${tag}"
+    if ! buildah images --format '{{.Name}}:{{.Tag}}' "${target_image}:${tag}" >/dev/null 2>&1; then
+      skopeo copy "$source" containers-storage:"${target_image}:${tag}"
     else
       echo "Image ${target_image}:${tag} already in rootful storage, skipping copy"
     fi
@@ -165,7 +165,7 @@ build_bib() {
   _build_bib "$source_image" "$type" "$config" "$out_dir" "$bib_image"
 
   if [[ "$source_type" == "oci" ]]; then
-    sudo buildah rmi --force "$source_image" 2>/dev/null || true
+    buildah rmi --force "$source_image" 2>/dev/null || true
   fi
 }
 
@@ -192,11 +192,11 @@ build_vm_image() {
   # Force rebuild: evict existing disk so BIB rebuilds from scratch
   if [[ "$force_rebuild" == "1" && -f "$_disk_file" ]]; then
     echo "Force rebuild: removing existing disk: ${_disk_file}"
-    sudo rm -f "$_disk_file"
+    rm -f "$_disk_file"
   fi
 
   # Check for a rechunked containers-storage image first (avoids full image copy)
-  if [[ "$force_rebuild" != "1" ]] && sudo buildah images --format '{{.Name}}:{{.Tag}}' "localhost/chunked-img:${TAG}" >/dev/null 2>&1; then
+  if [[ "$force_rebuild" != "1" ]] && buildah images --format '{{.Name}}:{{.Tag}}' "localhost/chunked-img:${TAG}" >/dev/null 2>&1; then
     echo "Using existing rechunked containers-storage image: localhost/chunked-img:${TAG}"
     build_bib "podman" "localhost/chunked-img" "${TAG}" "$type" "image.toml" "$output_dir" "$bib_image"
     return 0
@@ -206,7 +206,7 @@ build_vm_image() {
   build_image_or_skip "$BASE_IMAGE" "$BUILD_SCRIPT" "$CANONICAL_TAG" "$VARIANT_NAME" "$force_rebuild"
 
   # Tag for BIB — bootc-image-builder reads from podman storage
-  sudo buildah tag raw-img "${TARGET_IMAGE}:${TAG}" 2>/dev/null || true
+  buildah tag raw-img "${TARGET_IMAGE}:${TAG}" 2>/dev/null || true
   build_bib "podman" "$TARGET_IMAGE" "$TAG" "$type" "image.toml" "$output_dir" "$bib_image"
 }
 
@@ -236,20 +236,20 @@ run_vm() {
 
   if [[ "$clean" == "1" ]]; then
     echo "Removing cached disk image..."
-    [[ -f "$image_file" ]] && sudo rm -f "$image_file" && echo "Removed: $image_file" || echo "Nothing to clean"
+    [[ -f "$image_file" ]] && rm -f "$image_file" && echo "Removed: $image_file" || echo "Nothing to clean"
   fi
 
   if [[ ! -f "$image_file" ]]; then
     is_local=false
     [[ "$target_image" == localhost/* ]] && is_local=true
     # Prefer rechunked containers-storage image if available (avoids podman image copy)
-    if sudo buildah images --format '{{.Name}}:{{.Tag}}' "localhost/chunked-img:${tag}" >/dev/null 2>&1; then
+    if buildah images --format '{{.Name}}:{{.Tag}}' "localhost/chunked-img:${tag}" >/dev/null 2>&1; then
       echo "Using existing rechunked containers-storage image: localhost/chunked-img:${tag}"
       ensure_vm_images "$bib_image"
       echo "Building disk image..."
       build_bib "podman" "localhost/chunked-img" "$tag" "$type" "$config" "$OUTPUT_DIR" "$bib_image"
     elif [[ "$is_local" == "true" ]]; then
-      if ! sudo podman image exists "${target_image}:${tag}" 2>/dev/null; then
+      if ! podman image exists "${target_image}:${tag}" 2>/dev/null; then
         echo "Image ${target_image}:${tag} not found in rootful storage."
         echo "   Build it first with: just build-${type} ${target_image}:${tag}"
         return 1
@@ -259,7 +259,7 @@ run_vm() {
       build_bib "podman" "$target_image" "$tag" "$type" "$config" "$OUTPUT_DIR" "$bib_image"
     else
       echo "Pulling ${target_image}:${tag}..."
-      sudo podman pull "${target_image}:${tag}"
+      podman pull "${target_image}:${tag}"
       ensure_vm_images "$bib_image"
       echo "Building disk image..."
       build_bib "podman" "$target_image" "$tag" "$type" "$config" "$OUTPUT_DIR" "$bib_image"

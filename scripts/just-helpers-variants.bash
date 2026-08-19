@@ -259,11 +259,11 @@ release_preview() {
     jq -r '.variants[] | select(.disabled != true) | .name' "$variants_config"
   fi | while read -r v; do
     img="localhost/chunked-img:${v}"
-    label=$(sudo skopeo inspect "containers-storage:${img}" 2>/dev/null | jq -r '.Labels["ostree.rechunk.info"] // empty' 2>/dev/null || true)
+    label=$(skopeo inspect "containers-storage:${img}" 2>/dev/null | jq -r '.Labels["ostree.rechunk.info"] // empty' 2>/dev/null || true)
     if [[ -z "$label" ]]; then
       echo "Warning: ${img} missing or lacks ostree.rechunk.info; trying localhost/chunked-img:latest" >&2
       img="localhost/chunked-img:latest"
-      label=$(sudo skopeo inspect "containers-storage:${img}" 2>/dev/null | jq -r '.Labels["ostree.rechunk.info"] // empty' 2>/dev/null || true)
+      label=$(skopeo inspect "containers-storage:${img}" 2>/dev/null | jq -r '.Labels["ostree.rechunk.info"] // empty' 2>/dev/null || true)
     fi
     if [[ -z "$label" ]]; then
       echo "Skipping ${v}: no local chunked image with ostree.rechunk.info label" >&2

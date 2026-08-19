@@ -111,7 +111,7 @@ skopeo_copy_with_retry() {
 
   run_with_retry "skopeo copy ${src} → ${dst}" \
     --stream \
-    sudo skopeo copy \
+    skopeo copy \
     --authfile /tmp/skopeo-auth/auth.json \
     "${extra_flags[@]}" \
     "${src}" "${dst}"
@@ -140,7 +140,7 @@ push_image_with_tags() {
 
   echo "::group::Inspect primary digest" >&2
   local remote_digest
-  remote_digest=$(sudo skopeo inspect \
+  remote_digest=$(skopeo inspect \
     --authfile /tmp/skopeo-auth/auth.json \
     --format='{{.Digest}}' \
     "docker://${base_img}:${TAGS_ARR[0]}")
@@ -223,7 +223,7 @@ sign_and_verify_image() {
 
   echo "::group::Inspect layer sizes" >&2
   local total_mb
-  total_mb=$(sudo skopeo inspect --raw \
+  total_mb=$(skopeo inspect --raw \
     --authfile "${authfile}" \
     "docker://${digest_ref}" |
     jq '([.layers[].size] | add) / 1024 / 1024 | round')

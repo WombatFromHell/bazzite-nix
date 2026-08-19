@@ -41,7 +41,7 @@ def inspect(ref: str, docker: bool) -> dict:
     if docker:
         cmd = ["skopeo", "inspect", f"docker://{ref}"]
     else:
-        cmd = ["sudo", "skopeo", "inspect", f"containers-storage:{ref}"]
+        cmd = ["skopeo", "inspect", f"containers-storage:{ref}"]
     proc = subprocess.run(cmd, check=True, capture_output=True, text=True)
     return json.loads(proc.stdout)
 

@@ -17,7 +17,7 @@ clean_oci_layout() {
   local oci_output_dir="${1:?oci_output_dir required}"
   if [[ -d "$oci_output_dir" && -f "$oci_output_dir/index.json" ]]; then
     echo "  Removing OCI layout: $oci_output_dir"
-    sudo rm -rf "$oci_output_dir"
+    rm -rf "$oci_output_dir"
   fi
 }
 
@@ -28,8 +28,8 @@ clean_rechunk_images() {
     while read -r tag; do
       [[ -z "$tag" ]] && continue
       echo "  Removing rechunked image: $img:$tag"
-      sudo podman rmi --force "$img:$tag" 2>/dev/null || true
-    done < <(sudo podman images --no-trunc "$img" 2>/dev/null | tail -n +2 | awk '{print $2}')
+      podman rmi --force "$img:$tag" 2>/dev/null || true
+    done < <(podman images --no-trunc "$img" 2>/dev/null | tail -n +2 | awk '{print $2}')
   done
 }
 
@@ -40,24 +40,24 @@ clean_build_output_images() {
   while read -r tag; do
     [[ -z "$tag" ]] && continue
     echo "  Removing build output: localhost/bazzite-nix:$tag"
-    sudo buildah rmi --force "localhost/bazzite-nix:$tag" 2>/dev/null || true
-  done < <(sudo buildah images --no-trunc "localhost/bazzite-nix" 2>/dev/null | tail -n +2 | awk '{print $2}')
+    buildah rmi --force "localhost/bazzite-nix:$tag" 2>/dev/null || true
+  done < <(buildah images --no-trunc "localhost/bazzite-nix" 2>/dev/null | tail -n +2 | awk '{print $2}')
 
   # Remove localhost/raw-img (all tags)
   local raw_tag
   while read -r raw_tag; do
     [[ -z "$raw_tag" ]] && continue
     echo "  Removing build output: localhost/raw-img:$raw_tag"
-    sudo podman rmi --force "localhost/raw-img:$raw_tag" 2>/dev/null || true
-  done < <(sudo podman images --no-trunc localhost/raw-img 2>/dev/null | tail -n +2 | awk '{print $2}')
+    podman rmi --force "localhost/raw-img:$raw_tag" 2>/dev/null || true
+  done < <(podman images --no-trunc localhost/raw-img 2>/dev/null | tail -n +2 | awk '{print $2}')
 
   # Remove dangling (<none>:<none>) intermediate build layers
   local id
   while read -r id; do
     [[ -z "$id" ]] && continue
     echo "  Removing dangling buildah layer: $id"
-    sudo buildah rmi --force "$id" 2>/dev/null || true
-  done < <(sudo buildah images --filter "dangling=true" --no-trunc 2>/dev/null | tail -n +2 | awk '{print $3}')
+    buildah rmi --force "$id" 2>/dev/null || true
+  done < <(buildah images --filter "dangling=true" --no-trunc 2>/dev/null | tail -n +2 | awk '{print $3}')
 }
 
 # Clean podman images: removes all including pulled base images, dangling layers, build inputs/outputs
@@ -70,12 +70,12 @@ clean_podman_images() {
     while read -r tag; do
       [[ -z "$tag" ]] && continue
       echo "  Removing build input: $img:$tag"
-      sudo podman rmi --force "$img:$tag" 2>/dev/null || true
-    done < <(sudo podman images --no-trunc "$img" 2>/dev/null | tail -n +2 | awk '{print $2}')
+      podman rmi --force "$img:$tag" 2>/dev/null || true
+    done < <(podman images --no-trunc "$img" 2>/dev/null | tail -n +2 | awk '{print $2}')
   done
 
   # Remove BIB image if present
-  sudo podman rmi --force "$bib_image" 2>/dev/null || true
+  podman rmi --force "$bib_image" 2>/dev/null || true
 
   clean_build_output_images
 }
@@ -87,8 +87,8 @@ clean_buildah_images() {
   local dangling=()
   local id cimg in_use
 
-  mapfile -t container_images < <(sudo buildah ps -a --format '{{.ImageID}}' | awk '{print $1}')
-  mapfile -t dangling < <(sudo buildah images -a --no-trunc | awk '$1 == "<none>" && $2 == "<none>" {print $3}')
+  mapfile -t container_images < <(buildah ps -a --format '{{.ImageID}}' | awk '{print $1}')
+  mapfile -t dangling < <(buildah images -a --no-trunc | awk '$1 == "<none>" && $2 == "<none>" {print $3}')
 
   for id in "${dangling[@]}"; do
     [[ -z "$id" ]] && continue
@@ -102,7 +102,7 @@ clean_buildah_images() {
     done
     if [[ "$in_use" == "false" ]]; then
       echo "  Removing dangling buildah image: $id"
-      sudo buildah rmi --force "$id" 2>/dev/null || true
+      buildah rmi --force "$id" 2>/dev/null || true
     fi
   done
 }
@@ -111,13 +111,13 @@ clean_buildah_images() {
 # Skip named containers like distroboxes (e.g. 'libvirtbox')
 clean_buildah_containers() {
   local cid cname
-  sudo buildah ps --all | tail -n +2 | awk '{print $1}' | while read -r cid; do
+  buildah ps --all | tail -n +2 | awk '{print $1}' | while read -r cid; do
     [[ -z "$cid" ]] && continue
-    cname=$(sudo buildah inspect "$cid" --format '{{.Container}}' 2>/dev/null || true)
+    cname=$(buildah inspect "$cid" --format '{{.Container}}' 2>/dev/null || true)
     case "$cname" in
     working-container | *-working-container | scratch)
       echo "  Removing build container: $cname ($cid)"
-      sudo buildah rm "$cid" 2>/dev/null || true
+      buildah rm "$cid" 2>/dev/null || true
       ;;
     *)
       if [[ -n "$cname" && "$cname" != "$cid" ]]; then
@@ -133,7 +133,7 @@ clean_vm_cache() {
   local cache_dir="${1:?cache_dir required}"
   if [[ -d "$cache_dir" ]]; then
     echo "Removing VM cache from $cache_dir..."
-    sudo rm -rf "$cache_dir"/
+    rm -rf "${cache_dir:?}"/
     echo "VM cache cleaned"
   else
     echo "VM cache does not exist: $cache_dir"

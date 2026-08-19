@@ -11,7 +11,6 @@ run_build() {
   local base_image_override="${4:-}"
   local force_rebuild="${5:-0}"
   local TARGET_IMAGE TAG BASE_IMAGE BUILD_SCRIPT VARIANT_NAME CANONICAL_TAG TAGS
-  sudo_cache
   eval "$(resolve_variant "$variant_or_spec" "$variants_config" "$image_name" "$force_rebuild")"
   [[ -n "$base_image_override" ]] && BASE_IMAGE="$base_image_override"
   build_image_or_skip "$BASE_IMAGE" "$BUILD_SCRIPT" "$CANONICAL_TAG" "$VARIANT_NAME" "$force_rebuild"
@@ -90,7 +89,7 @@ build_variant_core() {
 
   # Skip relabel & rechunk only when a prior rechunked image already exists
   # (raw-img always exists after the build phase, so it's always relabeled).
-  if [[ "$rechunk" == "1" && "$force_rebuild" != "1" ]] && sudo buildah images --format '{{.Name}}:{{.Tag}}' "localhost/chunked-img:${anchor_tag}" >/dev/null 2>&1; then
+  if [[ "$rechunk" == "1" && "$force_rebuild" != "1" ]] && buildah images --format '{{.Name}}:{{.Tag}}' "localhost/chunked-img:${anchor_tag}" >/dev/null 2>&1; then
     _step "skipping relabel & rechunk: localhost/chunked-img:${anchor_tag} already exists"
   else
     _step "Assemble image labels"
@@ -130,11 +129,9 @@ run_rechunk() {
   local TAG="" VARIANT_NAME="" CANONICAL_TAG="" TAGS=""
   local KERNEL_VERSION="" MANIFEST_PACKAGES="" SOURCE_REF="" FULL_BUILD_DIGEST="" BUILD_DIGEST=""
 
-  sudo_cache
-
   eval "$(resolve_variant "$variant_or_spec" "$variants_config" "$image_name" "$force_build")"
 
-  if ! sudo buildah images --format '{{.Name}}' raw-img >/dev/null 2>&1; then
+  if ! buildah images --format '{{.Name}}' raw-img >/dev/null 2>&1; then
     echo "ERROR: Base image 'localhost/raw-img' not found. Run build step first." >&2
     return 1
   fi
@@ -171,17 +168,15 @@ run_relabel() {
   local KERNEL_VERSION="" MANIFEST_PACKAGES="" SOURCE_REF="" FULL_BUILD_DIGEST="" BUILD_DIGEST=""
   local anchor_tag manifest_file labels_file
 
-  sudo_cache
-
   eval "$(resolve_variant "$variant_or_spec" "$variants_config" "$image_name")"
 
   # Anchor on the variant name so different variant pipelines never clobber
   # each other's working images (raw-img:<variant> / chunked-img:<variant>).
   anchor_tag="$VARIANT_NAME"
   if [[ -z "$image_name_ref" ]]; then
-    if sudo buildah images --format '{{.Name}}:{{.Tag}}' "localhost/chunked-img:${VARIANT_NAME}" >/dev/null 2>&1; then
+    if buildah images --format '{{.Name}}:{{.Tag}}' "localhost/chunked-img:${VARIANT_NAME}" >/dev/null 2>&1; then
       image_name_ref="chunked-img"
-    elif sudo buildah images --format '{{.Name}}:{{.Tag}}' "localhost/raw-img:${VARIANT_NAME}" >/dev/null 2>&1; then
+    elif buildah images --format '{{.Name}}:{{.Tag}}' "localhost/raw-img:${VARIANT_NAME}" >/dev/null 2>&1; then
       image_name_ref="raw-img"
     else
       echo "ERROR: neither localhost/chunked-img:${VARIANT_NAME} nor localhost/raw-img:${VARIANT_NAME} exists; run 'just pipeline' first" >&2
@@ -223,8 +218,6 @@ run_pipeline() {
   # shellcheck disable=SC2034
   local TARGET_IMAGE="" TAG="" BASE_IMAGE="" BUILD_SCRIPT="" VARIANT_NAME="" CANONICAL_TAG="" TAGS=""
   local KERNEL_VERSION="" MANIFEST_PACKAGES="" SOURCE_REF="" FULL_BUILD_DIGEST="" BUILD_DIGEST=""
-
-  sudo_cache
 
   eval "$(resolve_variant "$variant_or_spec" "$variants_config" "$image_name" "$force_rebuild")"
   [[ -n "$base_image_override" ]] && BASE_IMAGE="$base_image_override"
@@ -432,7 +425,6 @@ build_all_variants() {
   local image_desc="${3:-Customized Bazzite image with Nix mount support and other sugar}"
   local results_file variants count i variant base_image build_script canonical_tag tags_csv
   local KERNEL_VERSION MANIFEST_PACKAGES SOURCE_REF FULL_BUILD_DIGEST BUILD_DIGEST
-  sudo_cache
 
   results_file="/tmp/variants_results.json"
   if [[ ! -f "$results_file" ]]; then
