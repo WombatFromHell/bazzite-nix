@@ -94,7 +94,7 @@ format:
 # Run the bats test suite (all test files)
 [group('Utility')]
 test:
-    bats scripts/just-helpers.bats tests/build-helpers.bats scripts/release-preview.bats
+    bats scripts/just-helpers.bats tests/build-helpers.bats scripts/check-variants.bats scripts/release-preview.bats
 
 # ── Build commands (sources scripts/build-helpers.bash) ─────────────────────
 # Build a container image (stages to localhost/raw-img)

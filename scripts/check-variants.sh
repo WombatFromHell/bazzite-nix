@@ -45,7 +45,7 @@ if [[ ! -f "$VARIANTS_CONFIG" ]]; then
 fi
 
 # Ensure registry is lowercase (GHCR requirement)
-REGISTRY=$(echo "$REGISTRY" | tr '[:upper:]' '[:lower:]')
+REGISTRY="${REGISTRY,,}"
 
 # Parse variants override list if provided
 override_variants=()
@@ -190,9 +190,7 @@ for ((i = 0; i < variant_count; i++)); do
     }')
 
   # Collect result
-  if [[ -n "$result" && "$result" != "null" && "$result" != "{}" ]]; then
-    results+=("$result")
-  fi
+  results+=("$result")
 
   echo "::endgroup::"
 done
