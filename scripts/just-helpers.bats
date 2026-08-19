@@ -290,30 +290,6 @@ EOF
   [[ "$output" == *"is disabled in variants.json"* ]]
 }
 
-# ── sudoif ──────────────────────────────────────────────────────────────────
-
-@test "sudoif is defined and callable" {
-  run bash -c "
-        source '$PWD/scripts/just-helpers.bash'
-        type sudoif | grep -q 'sudoif is a function'
-    "
-  [ "$status" -eq 0 ]
-}
-
-@test "sudoif exits when sudo is unavailable" {
-    local test_dir
-    test_dir="$(mktemp -d)"
-    mkdir -p "$test_dir/bin"
-
-    # Set PATH inside the subshell so bash itself is still resolvable
-    run bash -c "
-        PATH='$test_dir/bin'
-        source '$PWD/scripts/just-helpers.bash'
-        sudoif echo test
-    "
-    [ "$status" -eq 1 ]
-}
-
 # ── print_build_summary / echo_build_assignments ────────────────────────────
 
 @test "print_build_summary and echo_build_assignments emit the build refs" {

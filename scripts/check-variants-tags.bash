@@ -1,5 +1,5 @@
 # check-variants-tags.bash — tag computation and variant resolution for check-variants.
-# Sourced by check-variants-helpers.bash (no shebang/set — see umbrella).
+# Sourced by check-variants.sh and just-helpers.bash (no shebang/set — see those files).
 
 # ── extract image metadata ──────────────────────────────────────────────────
 # Usage: extract_image_metadata <inspect_json>

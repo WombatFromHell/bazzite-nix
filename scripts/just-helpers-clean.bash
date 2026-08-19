@@ -60,11 +60,6 @@ clean_build_output_images() {
   done < <(sudo buildah images --filter "dangling=true" --no-trunc 2>/dev/null | tail -n +2 | awk '{print $3}')
 }
 
-# Clean podman images (light): removes only locally generated images, keeps pulled base images
-clean_podman_images_light() {
-  clean_build_output_images
-}
-
 # Clean podman images: removes all including pulled base images, dangling layers, build inputs/outputs
 clean_podman_images() {
   local bib_image="${1:?bib_image required}"

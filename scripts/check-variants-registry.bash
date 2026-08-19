@@ -1,6 +1,6 @@
 # check-variants-registry.bash — skopeo/registry primitives and the build-needed
 # decision for check-variants.
-# Sourced by check-variants-helpers.bash (no shebang/set — see umbrella).
+# Sourced by check-variants.sh and just-helpers.bash (no shebang/set — see those files).
 
 # Retry configuration
 MAX_RETRIES=3

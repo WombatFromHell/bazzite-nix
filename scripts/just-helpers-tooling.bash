@@ -1,24 +1,5 @@
-# just-helpers-tooling.bash — dev tooling wrappers and privilege escalation for
-# just-helpers.
+# just-helpers-tooling.bash — dev tooling wrappers for just-helpers.
 # Sourced by just-helpers.bash (no shebang/set — see umbrella).
-
-# ── Privilege escalation ────────────────────────────────────────────────────
-
-# Run a command with sudo, handling different privilege escalation scenarios.
-# Falls back gracefully when sudo is unavailable.
-# Usage: sudoif cmd arg1 arg2
-sudoif() {
-  if [[ "${UID}" -eq 0 ]]; then
-    "$@"
-  elif [[ "$(command -v sudo)" && -n "${SSH_ASKPASS:-}" ]] &&
-    [[ -n "${DISPLAY:-}" || -n "${WAYLAND_DISPLAY:-}" ]]; then
-    /usr/bin/sudo --askpass "$@" || exit 1
-  elif [[ "$(command -v sudo)" ]]; then
-    /usr/bin/sudo "$@" || exit 1
-  else
-    exit 1
-  fi
-}
 
 # ── Justfile target wrappers ────────────────────────────────────────────────
 # Each function mirrors a Justfile target, making it callable directly for

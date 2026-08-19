@@ -46,7 +46,7 @@ clean:
     echo "=== Cleaning rootful build artifacts ==="
     clean_oci_layout "{{ oci_output_dir }}"
     clean_rechunk_images
-    clean_podman_images_light
+    clean_build_output_images
     clean_buildah_images
     clean_buildah_containers
 
@@ -153,7 +153,7 @@ pipeline $variant_or_spec="{{ default_tag }}" $base_image_override="" $force_reb
     #!/usr/bin/env bash
     set -euo pipefail
     source "{{ just_helpers }}"
-    run_pipeline "{{ variant_or_spec }}" "{{ variants_config }}" "{{ image_name }}" "{{ image_desc }}" "{{ repo_organization }}" "{{ oci_output_dir }}" "{{ base_image_override }}" "{{ force_rebuild }}" "{{ rechunk }}"
+    run_pipeline "{{ variant_or_spec }}" "{{ variants_config }}" "{{ image_name }}" "{{ image_desc }}" "{{ repo_organization }}" "{{ base_image_override }}" "{{ force_rebuild }}" "{{ rechunk }}"
 
 # Pipeline with rechunking enabled (just pipeline <variant> "" "" 1)
 # Usage: just pipeline-rechunk [variant-name | image:tag] [base_image_override] [force_rebuild]
@@ -174,7 +174,7 @@ build-all $force_build="0":
     set -euo pipefail
     source "{{ just_helpers }}"
     check_variants "{{ force_build }}" "{{ repo_organization }}" "{{ image_name }}" "{{ variants_config }}"
-    build_all_variants "{{ oci_output_dir }}" "{{ repo_organization }}" "{{ image_name }}" "{{ image_desc }}"
+    build_all_variants "{{ repo_organization }}" "{{ image_name }}" "{{ image_desc }}"
 
 # Preview the changelog a locally built image would produce at release time.
 # Uses the same helpers as the release pipeline (changelog.py); inspects the
@@ -190,25 +190,8 @@ build-all $force_build="0":
 release-preview $variants="" $prev="" $config="":
     #!/usr/bin/env bash
     set -euo pipefail
-    CONFIG="{{ if config != "" { config } else { variants_config } }}"
-    if [[ -n "{{ variants }}" ]]; then
-        echo "{{ variants }}" | tr ',' '\n'
-    else
-        jq -r '.variants[] | select(.disabled != true) | .name' "$CONFIG"
-    fi | while read -r v; do
-        img="localhost/chunked-img:${v}"
-        label=$(sudo skopeo inspect "containers-storage:${img}" 2>/dev/null | jq -r '.Labels["ostree.rechunk.info"] // empty' 2>/dev/null || true)
-        if [[ -z "$label" ]]; then
-            echo "Warning: ${img} missing or lacks ostree.rechunk.info; trying localhost/chunked-img:latest" >&2
-            img="localhost/chunked-img:latest"
-            label=$(sudo skopeo inspect "containers-storage:${img}" 2>/dev/null | jq -r '.Labels["ostree.rechunk.info"] // empty' 2>/dev/null || true)
-        fi
-        if [[ -z "$label" ]]; then
-            echo "Skipping ${v}: no local chunked image with ostree.rechunk.info label" >&2
-            continue
-        fi
-        python3 scripts/release-preview.py "$img" {{ if prev != "" { "--prev " + prev } else { "" } }}
-    done
+    source "{{ just_helpers }}"
+    release_preview "{{ variants }}" "{{ prev }}" "{{ if config != "" { config } else { variants_config } }}"
 
 # ── CI recipes (called from build.yml; use pre-resolved matrix values) ──────
 
@@ -284,7 +267,7 @@ build-qcow2 $variant_or_spec="{{ default_tag }}" $output_dir="" $force_rebuild="
     #!/usr/bin/env bash
     set -euo pipefail
     source "{{ just_helpers }}"
-    build_vm_image_qcow2 "{{ variant_or_spec }}" "{{ output_dir }}" "{{ force_rebuild }}" "{{ oci_output_dir }}" "{{ cache_dir }}" "{{ bib_image }}"
+    build_vm_image_qcow2 "{{ variant_or_spec }}" "{{ output_dir }}" "{{ force_rebuild }}" "{{ cache_dir }}" "{{ bib_image }}"
 
 # Build a RAW VM disk image
 
@@ -294,7 +277,7 @@ build-raw $variant_or_spec="{{ default_tag }}" $output_dir="" $force_rebuild="0"
     #!/usr/bin/env bash
     set -euo pipefail
     source "{{ just_helpers }}"
-    build_vm_image_raw "{{ variant_or_spec }}" "{{ output_dir }}" "{{ force_rebuild }}" "{{ oci_output_dir }}" "{{ cache_dir }}" "{{ bib_image }}"
+    build_vm_image_raw "{{ variant_or_spec }}" "{{ output_dir }}" "{{ force_rebuild }}" "{{ cache_dir }}" "{{ bib_image }}"
 
 # Build and force-rebuild a QCOW2 image (skips cached container image)
 [group('Build Virtual Machine Image')]
@@ -314,7 +297,7 @@ run-vm-qcow2 $variant_or_spec="{{ default_tag }}" $output_dir="" $force_pull="0"
     #!/usr/bin/env bash
     set -euo pipefail
     source "{{ just_helpers }}"
-    run_vm_qcow2 "{{ variant_or_spec }}" "{{ variants_config }}" "{{ image_name }}" "{{ output_dir }}" "{{ force_pull }}" "{{ clean }}" "{{ oci_output_dir }}" "{{ cache_dir }}" "{{ bib_image }}"
+    run_vm_qcow2 "{{ variant_or_spec }}" "{{ variants_config }}" "{{ image_name }}" "{{ output_dir }}" "{{ force_pull }}" "{{ clean }}" "{{ cache_dir }}" "{{ bib_image }}"
 
 # Run a RAW VM
 
@@ -324,4 +307,4 @@ run-vm-raw $variant_or_spec="{{ default_tag }}" $output_dir="" $force_pull="0" $
     #!/usr/bin/env bash
     set -euo pipefail
     source "{{ just_helpers }}"
-    run_vm_raw "{{ variant_or_spec }}" "{{ variants_config }}" "{{ image_name }}" "{{ output_dir }}" "{{ force_pull }}" "{{ clean }}" "{{ oci_output_dir }}" "{{ cache_dir }}" "{{ bib_image }}"
+    run_vm_raw "{{ variant_or_spec }}" "{{ variants_config }}" "{{ image_name }}" "{{ output_dir }}" "{{ force_pull }}" "{{ clean }}" "{{ cache_dir }}" "{{ bib_image }}"

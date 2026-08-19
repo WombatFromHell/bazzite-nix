@@ -25,7 +25,10 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "${SCRIPT_DIR}/check-variants-helpers.bash"
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/check-variants-registry.bash"
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/check-variants-tags.bash"
 
 # Validate required environment variables
 for var in REGISTRY REPO FORCE_BUILD; do

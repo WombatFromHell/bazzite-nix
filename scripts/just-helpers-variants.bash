@@ -240,3 +240,35 @@ resolve_release_variants() {
   fi
   comm -12 <(printf '%s\n' "$requested") <(printf '%s\n' "$recent")
 }
+
+# Render the changelog preview for locally built chunked images.
+# Usage: release_preview [variants_csv] [prev_ref] [variants_config]
+# Blank csv → all enabled variants in the config. Each variant uses
+# localhost/chunked-img:<variant>, falling back to localhost/chunked-img:latest
+# when that tag is missing or lacks the ostree.rechunk.info label.
+release_preview() {
+  local variants_csv="${1:-}"
+  local prev_ref="${2:-}"
+  local variants_config="${3:-.github/variants.json}"
+  local v img label prev_args=()
+  [[ -n "$prev_ref" ]] && prev_args=(--prev "$prev_ref")
+
+  if [[ -n "$variants_csv" ]]; then
+    echo "$variants_csv" | tr ',' '\n'
+  else
+    jq -r '.variants[] | select(.disabled != true) | .name' "$variants_config"
+  fi | while read -r v; do
+    img="localhost/chunked-img:${v}"
+    label=$(sudo skopeo inspect "containers-storage:${img}" 2>/dev/null | jq -r '.Labels["ostree.rechunk.info"] // empty' 2>/dev/null || true)
+    if [[ -z "$label" ]]; then
+      echo "Warning: ${img} missing or lacks ostree.rechunk.info; trying localhost/chunked-img:latest" >&2
+      img="localhost/chunked-img:latest"
+      label=$(sudo skopeo inspect "containers-storage:${img}" 2>/dev/null | jq -r '.Labels["ostree.rechunk.info"] // empty' 2>/dev/null || true)
+    fi
+    if [[ -z "$label" ]]; then
+      echo "Skipping ${v}: no local chunked image with ostree.rechunk.info label" >&2
+      continue
+    fi
+    python3 scripts/release-preview.py "$img" "${prev_args[@]}"
+  done
+}

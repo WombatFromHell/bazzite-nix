@@ -15,27 +15,30 @@
 #   just-helpers-build.bash    — build pipeline, CI parity, build-all
 #   just-helpers-vm.bash       — VM image build/run and their Justfile wrappers
 #   just-helpers-variants.bash — variant check/aggregate/preview, release resolution
-#   just-helpers-tooling.bash  — dev tooling: lint/format/just-files/sudoif
+#   just-helpers-tooling.bash  — dev tooling: lint/format/just-files
 #
-# Also sources the check-variants umbrella (CHECK_VARIANTS_HELPERS) for
-# resolve_variant / check / summary helpers used by build and preview paths.
+# Also sources the check-variants parts (check-variants-registry.bash,
+# check-variants-tags.bash) for resolve_variant / check / summary helpers used
+# by build and preview paths.
 
 set -euo pipefail
 
+_parts_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # Path to shared build helpers (used by build functions)
-# Can be overridden via environment: JUST_HELPERS_BUILD=/path/to/helpers.sh
-readonly JUST_HELPERS_BUILD="${JUST_HELPERS_BUILD:-scripts/build-helpers.bash}"
+readonly JUST_HELPERS_BUILD="scripts/build-helpers.bash"
 
 # Path to push/sign helpers (skopeo retry, cosign)
-readonly JUST_HELPERS_PUSH="${JUST_HELPERS_PUSH:-scripts/push-helpers.bash}"
+readonly JUST_HELPERS_PUSH="scripts/push-helpers.bash"
 
-# Path to variant-resolution helpers (resolve_variant lives here, not duplicated)
-# Can be overridden via environment: CHECK_VARIANTS_HELPERS=/path/to/helpers.sh
-readonly CHECK_VARIANTS_HELPERS="${CHECK_VARIANTS_HELPERS:-scripts/check-variants-helpers.bash}"
 # shellcheck disable=SC1090
-source "$CHECK_VARIANTS_HELPERS"
-
-_parts_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${_parts_dir}/check-variants-registry.bash"
+# shellcheck disable=SC1090
+source "${_parts_dir}/check-variants-tags.bash"
+# shellcheck disable=SC1090
+source "$JUST_HELPERS_BUILD"
+# shellcheck disable=SC1090
+source "$JUST_HELPERS_PUSH"
 
 # shellcheck disable=SC1090
 for _part in clean build vm variants tooling; do

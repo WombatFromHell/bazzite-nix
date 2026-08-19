@@ -161,23 +161,17 @@ build_bib() {
 }
 
 # Build VM image (shared helper for build-qcow2 and build-raw)
-# Sources build-reusable helpers.sh for build_image
 build_vm_image() {
   local image_spec="${1:?image_spec required}"
   local type="${2:?type required}"
   local output_dir="${3:-}"
   local force_rebuild="${4:-0}"
-  # oci_output_dir is deprecated — kept for backward compatibility but no longer drives behavior
-  local _oci_output_dir="${5:-/var/lib/containers/oci}"
-  local cache_dir="${6:-$HOME/.cache/bazzite-nix}"
-  local helpers_build="$JUST_HELPERS_BUILD"
-  local bib_image="${7:-quay.io/centos-bootc/bootc-image-builder:latest}"
+  local cache_dir="${5:-$HOME/.cache/bazzite-nix}"
+  local bib_image="${6:-quay.io/centos-bootc/bootc-image-builder:latest}"
   # shellcheck disable=SC2034
   local TARGET_IMAGE TAG BASE_IMAGE BUILD_SCRIPT VARIANT_NAME CANONICAL_TAG TAGS
   local _out_dir _disk_name _disk_file
 
-  # shellcheck disable=SC1090
-  source "$helpers_build"
   eval "$(resolve_variant "$image_spec" "${VARIANTS_CONFIG:-.github/variants.json}" "${IMAGE_NAME:-bazzite-nix}")"
 
   # Determine output dir and disk filename early
@@ -219,10 +213,8 @@ run_vm() {
   # shellcheck disable=SC2034
   local force_pull="${6:-0}"
   local clean="${7:-0}"
-  # oci_output_dir is deprecated — kept for backward compatibility but no longer drives behavior
-  local _oci_output_dir="${8:-/var/lib/containers/oci}"
-  local cache_dir="${9:-$HOME/.cache/bazzite-nix}"
-  local bib_image="${10:?bib_image required}"
+  local cache_dir="${8:-$HOME/.cache/bazzite-nix}"
+  local bib_image="${9:?bib_image required}"
 
   local OUTPUT_DIR disk_name image_file is_local QEMU_PID success i
 
@@ -309,12 +301,11 @@ build_vm_image_qcow2() {
   local variant_or_spec="${1:?variant_or_spec required}"
   local output_dir="${2:-}"
   local force_rebuild="${3:-0}"
-  local oci_output_dir="${4:-/var/lib/containers/oci}"
-  local cache_dir="${5:-$HOME/.cache/bazzite-nix}"
-  local bib_image="${6:-quay.io/centos-bootc/bootc-image-builder:latest}"
+  local cache_dir="${4:-$HOME/.cache/bazzite-nix}"
+  local bib_image="${5:-quay.io/centos-bootc/bootc-image-builder:latest}"
 
   build_vm_image "$variant_or_spec" "qcow2" "$output_dir" "$force_rebuild" \
-    "$oci_output_dir" "$cache_dir" "$bib_image"
+    "$cache_dir" "$bib_image"
 }
 
 # Build a RAW VM disk image for a variant
@@ -322,12 +313,11 @@ build_vm_image_raw() {
   local variant_or_spec="${1:?variant_or_spec required}"
   local output_dir="${2:-}"
   local force_rebuild="${3:-0}"
-  local oci_output_dir="${4:-/var/lib/containers/oci}"
-  local cache_dir="${5:-$HOME/.cache/bazzite-nix}"
-  local bib_image="${6:-quay.io/centos-bootc/bootc-image-builder:latest}"
+  local cache_dir="${4:-$HOME/.cache/bazzite-nix}"
+  local bib_image="${5:-quay.io/centos-bootc/bootc-image-builder:latest}"
 
   build_vm_image "$variant_or_spec" "raw" "$output_dir" "$force_rebuild" \
-    "$oci_output_dir" "$cache_dir" "$bib_image"
+    "$cache_dir" "$bib_image"
 }
 
 # Run a QCOW2 VM for a variant (resolves variant, then launches QEMU)
@@ -338,13 +328,12 @@ run_vm_qcow2() {
   local output_dir="${4:-}"
   local force_pull="${5:-0}"
   local clean="${6:-0}"
-  local oci_output_dir="${7:-/var/lib/containers/oci}"
-  local cache_dir="${8:-$HOME/.cache/bazzite-nix}"
-  local bib_image="${9:-quay.io/centos-bootc/bootc-image-builder:latest}"
+  local cache_dir="${7:-$HOME/.cache/bazzite-nix}"
+  local bib_image="${8:-quay.io/centos-bootc/bootc-image-builder:latest}"
   local TARGET_IMAGE TAG
   eval "$(resolve_variant "$variant_or_spec" "$variants_config" "$image_name")"
   run_vm "$TARGET_IMAGE" "${TAG}" "qcow2" "image.toml" "$output_dir" \
-    "$force_pull" "$clean" "$oci_output_dir" "$cache_dir" "$bib_image"
+    "$force_pull" "$clean" "$cache_dir" "$bib_image"
 }
 
 # Run a RAW VM for a variant (resolves variant, then launches QEMU)
@@ -355,11 +344,10 @@ run_vm_raw() {
   local output_dir="${4:-}"
   local force_pull="${5:-0}"
   local clean="${6:-0}"
-  local oci_output_dir="${7:-/var/lib/containers/oci}"
-  local cache_dir="${8:-$HOME/.cache/bazzite-nix}"
-  local bib_image="${9:-quay.io/centos-bootc/bootc-image-builder:latest}"
+  local cache_dir="${7:-$HOME/.cache/bazzite-nix}"
+  local bib_image="${8:-quay.io/centos-bootc/bootc-image-builder:latest}"
   local TARGET_IMAGE TAG
   eval "$(resolve_variant "$variant_or_spec" "$variants_config" "$image_name")"
   run_vm "$TARGET_IMAGE" "${TAG}" "raw" "image.toml" "$output_dir" \
-    "$force_pull" "$clean" "$oci_output_dir" "$cache_dir" "$bib_image"
+    "$force_pull" "$clean" "$cache_dir" "$bib_image"
 }

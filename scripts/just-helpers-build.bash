@@ -4,16 +4,12 @@
 # ── Build pipeline functions ────────────────────────────────────────────────
 
 # Build a container image (stages to localhost/raw-img)
-# Sources helpers_build for build_image function
 run_build() {
   local variant_or_spec="${1:?variant_or_spec required}"
   local variants_config="${2:-.github/variants.json}"
   local image_name="${3:-bazzite-nix}"
   local base_image_override="${4:-}"
-  local helpers_build="$JUST_HELPERS_BUILD"
   local TARGET_IMAGE TAG BASE_IMAGE BUILD_SCRIPT VARIANT_NAME CANONICAL_TAG TAGS
-  # shellcheck disable=SC1090
-  source "$helpers_build"
   sudo_cache
   eval "$(resolve_variant "$variant_or_spec" "$variants_config" "$image_name")"
   [[ -n "$base_image_override" ]] && BASE_IMAGE="$base_image_override"
@@ -26,11 +22,8 @@ run_rebuild() {
   local variants_config="${2:-.github/variants.json}"
   local image_name="${3:-bazzite-nix}"
   local base_image_override="${4:-}"
-  local helpers_build="$JUST_HELPERS_BUILD"
   # shellcheck disable=SC2034
   local TARGET_IMAGE TAG BASE_IMAGE BUILD_SCRIPT VARIANT_NAME CANONICAL_TAG TAGS
-  # shellcheck disable=SC1090
-  source "$helpers_build"
   sudo_cache
   eval "$(resolve_variant "$variant_or_spec" "$variants_config" "$image_name" "1")"
   [[ -n "$base_image_override" ]] && BASE_IMAGE="$base_image_override"
@@ -90,11 +83,10 @@ build_variant_core() {
   local labels_file="/tmp/bazzite-nix-labels.txt"
   local KERNEL_VERSION MANIFEST_PACKAGES SOURCE_REF FULL_BUILD_DIGEST BUILD_DIGEST
   local anchor_tag image_name_ref
-  local _step_n=0 _total=4
-  [[ "$rechunk" == "1" ]] && _total=5
+  local _step_n=0
   _step() {
     _step_n=$((_step_n + 1))
-    echo "[${_step_n}/${_total}] $1" >&2
+    echo "=== Step ${_step_n}: $1 ===" >&2
   }
 
   unset GITHUB_OUTPUT
@@ -155,8 +147,6 @@ run_rechunk() {
   local TAG VARIANT_NAME CANONICAL_TAG TAGS
   local KERNEL_VERSION MANIFEST_PACKAGES SOURCE_REF FULL_BUILD_DIGEST BUILD_DIGEST
 
-  # shellcheck disable=SC1090
-  source "$JUST_HELPERS_BUILD"
   sudo_cache
 
   eval "$(resolve_variant "$variant_or_spec" "$variants_config" "$image_name" "$force_build")"
@@ -197,8 +187,6 @@ run_relabel() {
   local TAG VARIANT_NAME CANONICAL_TAG TAGS
   local anchor_tag manifest_file labels_file
 
-  # shellcheck disable=SC1090
-  source "$JUST_HELPERS_BUILD"
   sudo_cache
 
   eval "$(resolve_variant "$variant_or_spec" "$variants_config" "$image_name")"
@@ -217,7 +205,7 @@ run_relabel() {
     fi
   fi
 
-  echo "Relabeling existing localhost/${image_name_ref}:${anchor_tag}" >&2
+  echo "=== Relabel existing localhost/${image_name_ref}:${anchor_tag} ===" >&2
 
   manifest_file="/tmp/bazzite-nix-manifest.json"
   labels_file="/tmp/bazzite-nix-labels.txt"
@@ -248,13 +236,10 @@ run_pipeline() {
   local base_image_override="${7:-}"
   local force_rebuild="${8:-0}"
   local rechunk="${9:-0}"
-  local helpers_build="$JUST_HELPERS_BUILD"
   # shellcheck disable=SC2034
   local TARGET_IMAGE TAG BASE_IMAGE BUILD_SCRIPT VARIANT_NAME CANONICAL_TAG TAGS
   local KERNEL_VERSION MANIFEST_PACKAGES SOURCE_REF FULL_BUILD_DIGEST BUILD_DIGEST
 
-  # shellcheck disable=SC1090
-  source "$helpers_build"
   sudo_cache
 
   eval "$(resolve_variant "$variant_or_spec" "$variants_config" "$image_name" "$force_rebuild")"
@@ -304,12 +289,8 @@ build_variant_ci() {
   local repo_name="${9:-}"
   local rechunk="${10:-0}"
 
-  local helpers_build="$JUST_HELPERS_BUILD"
   local KERNEL_VERSION MANIFEST_PACKAGES SOURCE_REF FULL_BUILD_DIGEST BUILD_DIGEST
   local gh_output="${GITHUB_OUTPUT:-}"
-
-  # shellcheck disable=SC1090
-  source "$helpers_build"
 
   echo "=== Step 1: Build container image ==="
   build_image "$base_image" "$build_script" "$canonical_tag" "$variant" "./Containerfile" "$variant"
@@ -353,11 +334,7 @@ push_variant() {
 
   local authfile="/tmp/skopeo-auth/auth.json"
   local base_img="${registry}/${repo}${suffix}"
-  local helpers_push="$JUST_HELPERS_PUSH"
   local push_output sign_output remote_digest_ref
-
-  # shellcheck disable=SC1090
-  source "$helpers_push"
 
   export MAX_ATTEMPTS="${MAX_ATTEMPTS:-3}"
   export RETRY_DELAY="${RETRY_DELAY:-15}"
@@ -465,18 +442,12 @@ release_variant() {
 }
 
 # Build all variants that need rebuilding (reads /tmp/variants_results.json)
-# Sources build-reusable helpers.sh for the full build pipeline
 build_all_variants() {
-  # oci_output_dir is deprecated — kept for backward compatibility but no longer drives behavior
-  local _oci_output_dir="${1:-/var/lib/containers/oci}"
-  local repo_organization="${2:?repo_organization required}"
-  local image_name="${3:-bazzite-nix}"
-  local image_desc="${4:-Customized Bazzite image with Nix mount support and other sugar}"
-  local helpers_build="$JUST_HELPERS_BUILD"
+  local repo_organization="${1:?repo_organization required}"
+  local image_name="${2:-bazzite-nix}"
+  local image_desc="${3:-Customized Bazzite image with Nix mount support and other sugar}"
   local results_file variants count i variant base_image build_script canonical_tag tags_csv
   local manifest_file labels_file KERNEL_VERSION SOURCE_REF BUILD_DIGEST
-  # shellcheck disable=SC1090
-  source "$helpers_build"
   sudo_cache
 
   results_file="/tmp/variants_results.json"
