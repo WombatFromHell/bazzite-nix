@@ -28,7 +28,7 @@ REGISTRY = _registry_prefix()
 RETRIES = 3
 RETRY_WAIT = 5
 FEDORA_PATTERN = re.compile(r"(?<=[-0-9a-z])\.fc\d{2}(?![0-9])")
-STABLE_START_PATTERN = re.compile(r"\d+\.\d{8}(?:\.\d+)?$")
+STABLE_START_PATTERN = re.compile(r"^stable-\d+\.\d{8}(?:\.\d+)?$")
 
 
 def other_start_pattern(target: str) -> re.Pattern:
@@ -190,7 +190,8 @@ def get_tags(target: str, manifests: dict[str, Any]):
             if other_start_pattern(target).match(tag):
                 tags.add(tag)
         else:
-            # For stable, match tags starting with the version pattern
+            # Stable tags are prefixed with the branch (stable-44.20260820);
+            # legacy bare 44.* tags are ignored.
             if STABLE_START_PATTERN.match(tag):
                 tags.add(tag)
 

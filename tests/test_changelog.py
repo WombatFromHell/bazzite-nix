@@ -496,28 +496,28 @@ class TestGetTags:
     def minimal_valid_manifests(self):
         """Create manifests with enough valid tags to pass the > 2 assertion.
 
-        Stable tags have NO prefix - they are just version numbers like 44.20260427.
+        Stable tags carry the branch prefix, e.g. stable-44.20260427.
         """
-        tags = ["1.20240101", "2.20240102", "3.20240103"]
+        tags = ["stable-1.20240101", "stable-2.20240102", "stable-3.20240103"]
         return {img: make_manifest_with_tags(tags) for img in IMAGES}
 
     def test_returns_previous_and_current_tags(self, minimal_valid_manifests):
         prev, curr = get_tags("stable", minimal_valid_manifests)
-        assert prev == "2.20240102"
-        assert curr == "3.20240103"
+        assert prev == "stable-2.20240102"
+        assert curr == "stable-3.20240103"
 
     def test_filters_tags_ending_with_dot_zero(self):
         tags = [
-            "1.20240101.0",
-            "2.20240102",
-            "3.20240103",
-            "4.20240104",
+            "stable-1.20240101.0",
+            "stable-2.20240102",
+            "stable-3.20240103",
+            "stable-4.20240104",
         ]
         manifests = {img: make_manifest_with_tags(tags) for img in IMAGES}
         prev, curr = get_tags("stable", manifests)
-        assert prev == "3.20240103"
-        assert curr == "4.20240104"
-        assert "1.20240101.0" not in [prev, curr]
+        assert prev == "stable-3.20240103"
+        assert curr == "stable-4.20240104"
+        assert "stable-1.20240101.0" not in [prev, curr]
 
     def test_non_stable_target_uses_other_pattern(self):
         tags = [
@@ -548,10 +548,10 @@ class TestGetTags:
         test_images = ["bazzite-nix", "bazzite-nix-b"]
 
         all_tags = [
-            "1.20240101",
-            "2.20240102",
-            "3.20240103",
-            "4.20240104",
+            "stable-1.20240101",
+            "stable-2.20240102",
+            "stable-3.20240103",
+            "stable-4.20240104",
         ]
         # First image has all tags, second is missing the last one
         manifests = {
@@ -559,53 +559,53 @@ class TestGetTags:
             test_images[1]: make_manifest_with_tags(all_tags[:3]),
         }
         prev, curr = get_tags("stable", manifests)
-        # After filtering: only 1, 2, 3 remain
-        # String sorted: 1.20240101, 2.20240102, 3.20240103
-        assert prev == "2.20240102"
-        assert curr == "3.20240103"
+        # After filtering: only stable-1, stable-2, stable-3 remain
+        # String sorted: stable-1.20240101, stable-2.20240102, stable-3.20240103
+        assert prev == "stable-2.20240102"
+        assert curr == "stable-3.20240103"
 
     def test_returns_sorted_tags_latest_last(self):
         tags = [
-            "10.20241231",
-            "1.20240101",
-            "5.20240601",
-            "2.20240201",
+            "stable-10.20241231",
+            "stable-1.20240101",
+            "stable-5.20240601",
+            "stable-2.20240201",
         ]
         manifests = {img: make_manifest_with_tags(tags) for img in IMAGES}
         prev, curr = get_tags("stable", manifests)
-        # String sorted: 1.20240101, 10.20241231, 2.20240201, 5.20240601
-        assert prev == "2.20240201"
-        assert curr == "5.20240601"
+        # String sorted: stable-1.20240101, stable-10.20241231, stable-2.20240201, stable-5.20240601
+        assert prev == "stable-2.20240201"
+        assert curr == "stable-5.20240601"
 
     def test_stable_does_not_match_prefixed_tags(self):
-        """Stable target should NOT match tags with branch prefixes like unstable-44.20260427."""
+        """Stable target should match its own stable-* tags, ignoring other branches and legacy bare tags."""
         tags = [
-            "unstable-42.20260404.1",
-            "unstable-43.20260405.2",
+            "testing-44.20260429",
             "unstable-44.20260427",
             "42.20260404.1",
             "43.20260405.2",
-            "44.20260427",
+            "stable-44.20260426",
+            "stable-44.20260427",
+            "stable-44.20260428",
         ]
         manifests = {img: make_manifest_with_tags(tags) for img in IMAGES}
         prev, curr = get_tags("stable", manifests)
-        # Should only match unprefixed stable tags
-        assert prev == "43.20260405.2"
-        assert curr == "44.20260427"
+        assert prev == "stable-44.20260427"
+        assert curr == "stable-44.20260428"
 
     def test_unstable_target_ignores_stable_tags(self):
-        """Unstable target should NOT match unprefixed stable tags — inverse of stable anchoring."""
+        """Unstable target should NOT match stable-prefixed tags — inverse of stable anchoring."""
         tags = [
-            "1.20240101",
-            "2.20240102",
-            "3.20240103",
+            "stable-1.20240101",
+            "stable-2.20240102",
+            "stable-3.20240103",
         ]
         manifests = {img: make_manifest_with_tags(tags) for img in IMAGES}
         with pytest.raises(AssertionError, match="No current and previous tags found"):
             get_tags("unstable", manifests)
 
-    def test_stable_target_with_only_prefixed_tags(self):
-        """Stable target with ONLY prefixed tags should fail — pattern rejects all."""
+    def test_stable_target_with_only_other_prefixed_tags(self):
+        """Stable target with ONLY other branches' tags should fail — pattern rejects all."""
         tags = [
             "unstable-42.20260404.1",
             "unstable-43.20260405.2",
@@ -617,7 +617,7 @@ class TestGetTags:
 
     def test_assertion_when_fewer_than_three_valid_tags(self):
         """Should raise AssertionError when fewer than 3 valid tags exist."""
-        tags = ["1.20240101", "2.20240102"]
+        tags = ["stable-1.20240101", "stable-2.20240102"]
         manifests = {img: make_manifest_with_tags(tags) for img in IMAGES}
         with pytest.raises(AssertionError, match="No current and previous tags found"):
             get_tags("stable", manifests)
@@ -1194,17 +1194,18 @@ class TestStableStartPattern:
     @pytest.mark.parametrize(
         "tag,should_match",
         [
-            ("1.20240101", True),
-            ("99.20241231", True),
-            ("1.20240101.1", True),
-            ("1.20240101.99", True),
-            ("1.20240101.0", True),  # Ends with .0
-            ("20240101", False),  # No leading number
-            ("1.2024010", False),  # Only 7 digits
-            ("1.202401011", False),  # 9 digits
-            ("stable-1.20240101", False),  # Has prefix
+            ("stable-1.20240101", True),
+            ("stable-99.20241231", True),
+            ("stable-1.20240101.1", True),
+            ("stable-1.20240101.99", True),
+            ("stable-1.20240101.0", True),  # Ends with .0
+            ("1.20240101", False),  # Legacy bare tag, no stable- prefix
+            ("stable-20240101", False),  # No leading number after prefix
+            ("stable-1.2024010", False),  # Only 7 digits
+            ("stable-1.202401011", False),  # 9 digits
             ("v1.20240101", False),  # Has v prefix
-            ("1.20240101.100", True),  # 3 digit suffix (matches .\d+)
+            ("testing-1.20240101", False),  # Other branch prefix
+            ("stable-1.20240101.100", True),  # 3 digit suffix (matches .\d+)
         ],
         ids=lambda t: t,
     )
