@@ -5,7 +5,8 @@ export default_tag := env("DEFAULT_TAG", "testing")
 export bib_image := env("BIB_IMAGE", "quay.io/centos-bootc/bootc-image-builder:latest")
 export cache_dir := env("CACHE_DIR", `echo "$HOME/.cache/bazzite-nix"`)
 export variants_config := env("VARIANTS_CONFIG", ".github/variants.json")
-export oci_output_dir := env("OCI_OUTPUT_DIR", "/var/lib/containers/oci")
+# Rootless-writable base dir holding per-variant OCI layouts (<dir>/<variant>/chunked)
+export oci_output_dir := env("OCI_OUTPUT_DIR", "{{ cache_dir }}/oci")
 
 # Path to extracted Just helper functions
 
@@ -31,34 +32,27 @@ fix:
     source "{{ just_helpers }}"
     fix_just_files
 
-# Clean repo build artifacts (keeps pulled base images)
+# Clean build outputs (raw-img, chunked-img, OCI layout)
 [group('Utility')]
 clean:
     #!/usr/bin/env bash
     set -euo pipefail
     source "{{ just_helpers }}"
-    clean_artifacts
-    echo "=== Cleaning rootful build artifacts ==="
     clean_oci_layout "{{ oci_output_dir }}"
-    clean_rechunk_images
-    clean_build_output_images
-    clean_buildah_images
-    clean_buildah_containers
+    remove_images_and_prune podman localhost/raw-img localhost/chunked-img
 
-# Aggressive clean (removes everything including pulled base images)
+# Aggressive clean (cache dir, build outputs and build inputs, rootless + rootful)
 [group('Utility')]
 cleaner:
     #!/usr/bin/env bash
     set -euo pipefail
     source "{{ just_helpers }}"
     clean_artifacts
-    echo "=== Cleaning rootful build artifacts ==="
-    clean_oci_layout "{{ oci_output_dir }}"
-    clean_rechunk_images
-    clean_podman_images "{{ bib_image }}"
-    clean_buildah_images
-    clean_buildah_containers
-    just --unstable clean-vm
+    rm -rf "{{ cache_dir }}"
+    remove_images_and_prune podman localhost/raw-img localhost/chunked-img \
+        ghcr.io/ublue-os/bazzite quay.io/centos-bootc/bootc-image-builder \
+        quay.io/coreos/chunkah quay.io/centos-bootc/centos-bootc docker.io/qemux/qemu
+    remove_images_and_prune sudo-podman localhost/chunked-img "{{ bib_image }}"
 
 # Clean cached VM disk images
 [group('Utility')]
@@ -122,7 +116,7 @@ rechunk $variant_or_spec="{{ default_tag }}":
     #!/usr/bin/env bash
     set -euo pipefail
     source "{{ just_helpers }}"
-    run_rechunk "{{ variant_or_spec }}" "{{ variants_config }}" "{{ image_name }}" "{{ image_desc }}" "{{ repo_organization }}"
+    eval "$(run_rechunk "{{ variant_or_spec }}" "{{ variants_config }}" "{{ image_name }}" "{{ image_desc }}" "{{ repo_organization }}")"
 
 # Relabel an existing image (chunked-img if present, else raw-img) without
 # rebuilding or rechunking. For iterating on the relabel flow.
@@ -132,7 +126,7 @@ relabel $variant_or_spec="{{ default_tag }}":
     #!/usr/bin/env bash
     set -euo pipefail
     source "{{ just_helpers }}"
-    run_relabel "{{ variant_or_spec }}" "{{ variants_config }}" "{{ image_name }}" "{{ image_desc }}" "{{ repo_organization }}"
+    eval "$(run_relabel "{{ variant_or_spec }}" "{{ variants_config }}" "{{ image_name }}" "{{ image_desc }}" "{{ repo_organization }}")"
 
 # ── Full pipeline (mirrors the GitHub Actions workflow) ─────────────────────
 # Run the full build pipeline for a single variant:
@@ -258,7 +252,7 @@ build-qcow2 $variant_or_spec="{{ default_tag }}" $output_dir="" $force_rebuild="
     #!/usr/bin/env bash
     set -euo pipefail
     source "{{ just_helpers }}"
-    build_vm_image_qcow2 "{{ variant_or_spec }}" "{{ output_dir }}" "{{ force_rebuild }}" "{{ cache_dir }}" "{{ bib_image }}"
+    build_vm_image "{{ variant_or_spec }}" "qcow2" "{{ output_dir }}" "{{ force_rebuild }}" "{{ cache_dir }}" "{{ bib_image }}"
 
 # Build a RAW VM disk image
 
@@ -268,7 +262,7 @@ build-raw $variant_or_spec="{{ default_tag }}" $output_dir="" $force_rebuild="0"
     #!/usr/bin/env bash
     set -euo pipefail
     source "{{ just_helpers }}"
-    build_vm_image_raw "{{ variant_or_spec }}" "{{ output_dir }}" "{{ force_rebuild }}" "{{ cache_dir }}" "{{ bib_image }}"
+    build_vm_image "{{ variant_or_spec }}" "raw" "{{ output_dir }}" "{{ force_rebuild }}" "{{ cache_dir }}" "{{ bib_image }}"
 
 # Build and force-rebuild a QCOW2 image (skips cached container image)
 [group('Build Virtual Machine Image')]
@@ -288,7 +282,7 @@ run-vm-qcow2 $variant_or_spec="{{ default_tag }}" $output_dir="" $force_pull="0"
     #!/usr/bin/env bash
     set -euo pipefail
     source "{{ just_helpers }}"
-    run_vm_qcow2 "{{ variant_or_spec }}" "{{ variants_config }}" "{{ image_name }}" "{{ output_dir }}" "{{ force_pull }}" "{{ clean }}" "{{ cache_dir }}" "{{ bib_image }}"
+    run_variant_vm "qcow2" "{{ variant_or_spec }}" "{{ variants_config }}" "{{ image_name }}" "{{ output_dir }}" "{{ force_pull }}" "{{ clean }}" "{{ cache_dir }}" "{{ bib_image }}"
 
 # Run a RAW VM
 
@@ -298,4 +292,4 @@ run-vm-raw $variant_or_spec="{{ default_tag }}" $output_dir="" $force_pull="0" $
     #!/usr/bin/env bash
     set -euo pipefail
     source "{{ just_helpers }}"
-    run_vm_raw "{{ variant_or_spec }}" "{{ variants_config }}" "{{ image_name }}" "{{ output_dir }}" "{{ force_pull }}" "{{ clean }}" "{{ cache_dir }}" "{{ bib_image }}"
+    run_variant_vm "raw" "{{ variant_or_spec }}" "{{ variants_config }}" "{{ image_name }}" "{{ output_dir }}" "{{ force_pull }}" "{{ clean }}" "{{ cache_dir }}" "{{ bib_image }}"

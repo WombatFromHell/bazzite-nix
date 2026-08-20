@@ -170,10 +170,7 @@ resolve_variant() {
         ' "$variants_config" | head -1)
     [[ -z "$build_script" ]] && build_script="build.sh"
     # Extract real version from upstream image label
-    canonical=$(skopeo inspect "docker://${spec}" 2>/dev/null |
-      jq -r '.Labels["org.opencontainers.image.version"] // empty' ||
-      true)
-    [[ -z "$canonical" || "$canonical" == "null" ]] && canonical="$tag"
+    canonical="$(get_parent_version "$spec")" || canonical="$tag"
     # No variants.json entry to source a tags template from — single-tag fallback
     tags_csv="$tag"
     echo "TARGET_IMAGE=\"localhost/$image_name\""
@@ -207,10 +204,7 @@ resolve_variant() {
   tag="${base_image##*:}"
 
   # Extract real version from upstream image label
-  local inspect_json
-  inspect_json=$(skopeo inspect "docker://${base_image}" 2>/dev/null) || true
-  canonical=$(echo "$inspect_json" | jq -r '.Labels["org.opencontainers.image.version"] // empty' 2>/dev/null || true)
-  [[ -z "$canonical" || "$canonical" == "null" ]] && canonical="$tag"
+  canonical="$(get_parent_version "$base_image")" || canonical="$tag"
 
   # Strip branch prefix from canonical and handle version collisions the same way
   # CI does (compute_canonical_tag): on force_build, if <branch>-<canonical> already

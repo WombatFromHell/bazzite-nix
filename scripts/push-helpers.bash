@@ -133,8 +133,12 @@ push_image_with_tags() {
   echo "::group::Push primary tag (${TAGS_ARR[0]})" >&2
   echo "Source ref : ${source_ref}" >&2
   echo "Target     : docker://${base_img}:${TAGS_ARR[0]}" >&2
-  skopeo_copy_with_retry \
-    "${source_ref}" \
+  # podman push reads rootless containers-storage directly; the prefix strip
+  # handles chunked-img/raw-img source refs alike.
+  run_with_retry "podman push docker://${base_img}:${TAGS_ARR[0]}" \
+    --stream \
+    podman push --authfile /tmp/skopeo-auth/auth.json \
+    "${source_ref#containers-storage:}" \
     "docker://${base_img}:${TAGS_ARR[0]}"
   echo "::endgroup::" >&2
 

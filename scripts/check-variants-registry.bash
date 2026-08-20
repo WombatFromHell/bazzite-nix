@@ -183,6 +183,28 @@ find_prev_ref() {
   return 1
 }
 
+# Decide build-needed from a fetched parent_version. Prints the REASON= line;
+# returns 0 (build needed) if it differs from upstream, 1 (skip) if identical.
+# Callers pass a non-empty local_version (the "no usable label" case is the
+# caller's to fall through on).
+version_check() {
+  local local_version="${1:?local_version required}"
+  local variant_name="${2:?variant_name required}"
+  local upstream="${3:?upstream required}"
+  local via="${4:-}"
+
+  local via_note=""
+  [[ -n "$via" ]] && via_note=" via ${via}"
+  if [[ "$local_version" == "$upstream" ]]; then
+    [[ -n "$via" ]] && echo "::notice::Variant ${variant_name}: Upstream unchanged (via ${via})" >&2
+    echo "REASON=\"Upstream unchanged (parent_version: ${upstream})\""
+    return 1
+  fi
+  echo "::notice::Variant ${variant_name}: Upstream changed${via_note} (${local_version} → ${upstream})" >&2
+  echo "REASON=\"Upstream changed (${local_version} → ${upstream})\""
+  return 0
+}
+
 # ── check build needed ──────────────────────────────────────────────────────
 # Usage: check_build_needed <prefix> <canonical> <variant_name> <base_image_tag> <upstream_parent_version> <force_build>
 # Checks if build is needed for this variant.
@@ -213,15 +235,10 @@ check_build_needed() {
 
   # Strategy 1: Compare parent_version on primary tag
   if image_exists "$primary_ref"; then
-    local local_parent_version
-    if local_parent_version=$(inspect_image_with_retry "$primary_ref" | jq -r '.Labels["org.opencontainers.image.version"] // empty' 2>/dev/null) && [[ -n "$local_parent_version" ]]; then
-      if [[ "$local_parent_version" == "$upstream_parent_version" ]]; then
-        echo "REASON=\"Upstream unchanged (parent_version: ${upstream_parent_version})\""
-        return 1
-      fi
-      echo "::notice::Variant ${variant_name}: Upstream changed (${local_parent_version} → ${upstream_parent_version})" >&2
-      echo "REASON=\"Upstream changed (${local_parent_version} → ${upstream_parent_version})\""
-      return 0
+    local local_parent_version=""
+    local_parent_version=$(inspect_image_with_retry "$primary_ref" | jq -r '.Labels["org.opencontainers.image.version"] // empty' 2>/dev/null) || true
+    if [[ -n "$local_parent_version" ]]; then
+      version_check "$local_parent_version" "$variant_name" "$upstream_parent_version" && return 0 || return 1
     fi
     echo "::debug::Primary tag exists but has no parent_version, falling back to versioned tags" >&2
   fi
@@ -232,14 +249,7 @@ check_build_needed() {
     echo "::debug::Using latest versioned tag: ${latest_versioned_tag}" >&2
     local local_parent_version
     if local_parent_version=$(get_parent_version "${prefix}:${latest_versioned_tag}"); then
-      if [[ "$local_parent_version" == "$upstream_parent_version" ]]; then
-        echo "::notice::Variant ${variant_name}: Upstream unchanged (via ${latest_versioned_tag})" >&2
-        echo "REASON=\"Upstream unchanged (parent_version: ${upstream_parent_version})\""
-        return 1
-      fi
-      echo "::notice::Variant ${variant_name}: Upstream changed via ${latest_versioned_tag} (${local_parent_version} → ${upstream_parent_version})" >&2
-      echo "REASON=\"Upstream changed (${local_parent_version} → ${upstream_parent_version})\""
-      return 0
+      version_check "$local_parent_version" "$variant_name" "$upstream_parent_version" "$latest_versioned_tag" && return 0 || return 1
     fi
     echo "::debug::Latest versioned tag ${latest_versioned_tag} has no parent_version" >&2
   fi

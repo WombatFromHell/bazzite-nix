@@ -233,7 +233,8 @@ resolve_release_variants() {
     return 0
   fi
   requested=$(echo "$variants_csv" | tr ',' '\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | grep -v '^$' | sort -u)
-  recent=$(recent_successful_builds | sort -u)
+  # ponytail: explicit args = the function's own defaults; silences shellcheck SC2120/SC2119
+  recent=$(recent_successful_builds 5 "${GITHUB_REPOSITORY:-}" build.yml | sort -u)
   missing=$(comm -23 <(printf '%s\n' "$requested") <(printf '%s\n' "$recent"))
   if [[ -n "$missing" ]]; then
     echo "::warning::Skipping variant(s) with no recent successful build: $(echo "$missing" | paste -sd ',' -)" >&2

@@ -13,10 +13,12 @@ disk_file_name() {
   esac
 }
 
-# Ensure the BIB and QEMU images are pulled into rootful storage
+# Ensure the BIB image is in rootful storage (BIB requires it) and the QEMU
+# image is in rootless storage
 ensure_vm_images() {
   local bib_image="$1"
-  podman image exists "$bib_image" 2>/dev/null || podman pull "$bib_image"
+  sudo_cache
+  sudo podman image exists "$bib_image" 2>/dev/null || sudo podman pull "$bib_image"
   podman image exists "docker.io/qemux/qemu:latest" 2>/dev/null || podman pull "docker.io/qemux/qemu:latest"
 }
 
@@ -41,21 +43,21 @@ _build_bib() {
     local tmp_disk="${BUILDTMP}/${disk_name}"
     if [[ -f "$tmp_disk" ]]; then
       echo "Found disk in .bib-tmp from previous run, moving to final location..."
-      mv -f "$tmp_disk" "$disk_file"
-      rmdir "$BUILDTMP" 2>/dev/null || true
-      chown "$USER:$USER" "$disk_file"
+      sudo mv -f "$tmp_disk" "$disk_file"
+      sudo rmdir "$BUILDTMP" 2>/dev/null || true
+      sudo chown "$USER:$USER" "$disk_file"
       echo "Disk image recovered: $disk_file"
       return 0
     fi
   fi
 
-  rm -rf "$BUILDTMP"
+  sudo rm -rf "$BUILDTMP"
   mkdir -p "$BUILDTMP"
   mkdir -p "${CACHE_DIR}/bib-store"
 
   # shellcheck disable=SC2086
   if
-    podman run --rm --privileged \
+    sudo podman run --rm --privileged \
       -i --init --sig-proxy \
       --pull=missing \
       --net=host \
@@ -68,7 +70,7 @@ _build_bib() {
       --type $type --use-librepo=True --rootfs=ext4 \
       "$source_image"
   then
-    touch "${BUILDTMP}/.bib-build-complete"
+    sudo touch "${BUILDTMP}/.bib-build-complete"
   else
     echo "Error: something went wrong with our BIB build!"
     return 1
@@ -77,33 +79,34 @@ _build_bib() {
   local item
   for item in "$BUILDTMP"/* "$BUILDTMP"/.*; do
     if [[ -d "$item" ]]; then
-      mv -f "$item"/* "$out_dir"/
-      rmdir "$item"
+      sudo mv -f "$item"/* "$out_dir"/
+      sudo rmdir "$item"
     else
-      mv -f "$item" "$out_dir"/
+      sudo mv -f "$item" "$out_dir"/
     fi
   done
-  rm -rf "$BUILDTMP"
-  chown -R "$USER:$USER" "$out_dir"
+  sudo rm -rf "$BUILDTMP"
+  sudo chown -R "$USER:$USER" "$out_dir"
 }
 
-# Build BIB VM image (unified function for podman and OCI sources)
-# Usage: build_bib <source_type> <source> <tag> <type> <config> <output_dir> <bib_image>
-#   source_type: "podman" or "oci"
-#   source:      image name (podman) or OCI layout ref (oci)
-#   tag:         image tag
+# Build a BIB VM image from an OCI layout directory. The layout is imported
+# into rootful storage (BIB requires it) as localhost/chunked-img:<tag>, used
+# to build the disk, then the import is removed again.
+# Usage: build_bib <source> <tag> <type> <config> <output_dir> <bib_image>
+#   source:      OCI layout dir (per-variant chunked dir, or an ad-hoc
+#                `podman save --format oci` export)
+#   tag:         image tag (addresses the rootful import)
 #   type:        qcow2, raw, etc.
 #   config:      config.toml path
 #   output_dir:  output directory (defaults to CACHE_DIR)
 #   bib_image:   BIB container image
 build_bib() {
-  local source_type="${1:?source_type required (podman or oci)}"
-  local source="${2:?source required}"
-  local tag="${3:?tag required}"
-  local type="${4:?type required}"
-  local config="${5:?config required}"
-  local output_dir="${6:-}"
-  local bib_image="${7:?bib_image required}"
+  local source="${1:?source (OCI layout dir) required}"
+  local tag="${2:?tag required}"
+  local type="${3:?type required}"
+  local config="${4:?config required}"
+  local output_dir="${5:-}"
+  local bib_image="${6:?bib_image required}"
 
   local out_dir source_image
 
@@ -121,52 +124,55 @@ build_bib() {
     return 0
   fi
 
-  case "$source_type" in
-  podman)
-    local effective_tag="$tag"
-    if ! buildah images --format '{{.Name}}:{{.Tag}}' "${source}:${tag}" >/dev/null 2>&1; then
-      # Fallback to :latest (rechunk_image may not have tagged with $TAG)
-      if buildah images --format '{{.Name}}:{{.Tag}}' "${source}:latest" >/dev/null 2>&1; then
-        echo "Image ${source}:${tag} not found, using ${source}:latest"
-        effective_tag="latest"
-      else
-        echo "Image ${source}:${tag} not found in rootful storage."
-        if podman image exists "${source}:${tag}" 2>/dev/null; then
-          echo "Found in rootless storage, copying to rootful..."
-          podman save "${source}:${tag}" | podman load
-        else
-          echo "Image not found in rootless storage either. Pulling..."
-          podman pull "${source}:${tag}"
-        fi
-      fi
-    fi
+  sudo_cache
 
-    if [[ "$source" == localhost/* ]]; then
-      source_image="${source}:${effective_tag}"
-    else
-      source_image="localhost/${source}:${effective_tag}"
-    fi
-    ;;
-  oci)
-    local target_image="localhost/chunked-img"
-    if ! buildah images --format '{{.Name}}:{{.Tag}}' "${target_image}:${tag}" >/dev/null 2>&1; then
-      skopeo copy "$source" containers-storage:"${target_image}:${tag}"
-    else
-      echo "Image ${target_image}:${tag} already in rootful storage, skipping copy"
-    fi
-    source_image="${target_image}:${tag}"
-    ;;
-  *)
-    echo "Unknown source_type: $source_type" >&2
-    return 1
-    ;;
-  esac
+  # BIB requires rootful storage; import the (single-image) layout with podman
+  # so the localhost/... reference resolves inside the BIB container. A
+  # tagless pull is safe: chunkah/saved layouts hold exactly one image.
+  local target_image="localhost/chunked-img"
+  if ! sudo podman image exists "${target_image}:${tag}" 2>/dev/null; then
+    local id
+    id="$(sudo podman pull "oci:${source}")"
+    sudo podman tag "$id" "${target_image}:${tag}"
+  else
+    echo "Image ${target_image}:${tag} already in storage, skipping import"
+  fi
+  source_image="${target_image}:${tag}"
 
   _build_bib "$source_image" "$type" "$config" "$out_dir" "$bib_image"
 
-  if [[ "$source_type" == "oci" ]]; then
-    buildah rmi --force "$source_image" 2>/dev/null || true
-  fi
+  # The import exists only to feed BIB; drop it from rootful storage.
+  sudo podman rmi --force "$source_image" 2>/dev/null || true
+}
+
+# Print the per-variant chunked OCI layout dir left behind by the pipeline,
+# or nothing if there is none. Layouts live at
+# <OCI_OUTPUT_DIR or cache_dir/oci>/<variant>/chunked.
+variant_chunked_layout() {
+  local variant_name="${1:?variant_name required}"
+  local cache_dir="${2:-${CACHE_DIR:-$HOME/.cache/bazzite-nix}}"
+  local layout="${OCI_OUTPUT_DIR:-${cache_dir}/oci}/${variant_name}/chunked"
+  [[ -f "${layout}/index.json" ]] && echo "$layout"
+  return 0
+}
+
+# Export <image> ad-hoc to a temp OCI layout, feed it to build_bib, and remove
+# the layout afterwards. (The pipeline's per-variant layout, when present, is
+# preferred by the callers — see variant_chunked_layout.)
+# Usage: export_and_build_bib <image> <tag> <type> <config> <output_dir> <bib_image>
+export_and_build_bib() {
+  local image="${1:?image required}"
+  local tag="${2:?tag required}"
+  local type="${3:?type required}"
+  local config="${4:?config required}"
+  local output_dir="${5:-}"
+  local bib_image="${6:?bib_image required}"
+  local export_dir
+  export_dir="$(mktemp -d "${TMPDIR:-/tmp}/bib-oci-XXXXXX")"
+  # ponytail: podman save --format oci writes the layout to <dir>/oci
+  podman save --format oci -o "$export_dir" "$image"
+  build_bib "${export_dir}/oci" "$tag" "$type" "$config" "$output_dir" "$bib_image"
+  rm -rf "$export_dir"
 }
 
 # Build VM image (shared helper for build-qcow2 and build-raw)
@@ -195,19 +201,22 @@ build_vm_image() {
     rm -f "$_disk_file"
   fi
 
-  # Check for a rechunked containers-storage image first (avoids full image copy)
-  if [[ "$force_rebuild" != "1" ]] && buildah images --format '{{.Name}}:{{.Tag}}' "localhost/chunked-img:${TAG}" >/dev/null 2>&1; then
-    echo "Using existing rechunked containers-storage image: localhost/chunked-img:${TAG}"
-    build_bib "podman" "localhost/chunked-img" "${TAG}" "$type" "image.toml" "$output_dir" "$bib_image"
+  # Prefer the per-variant chunked OCI layout left behind by the pipeline
+  # (avoids building/exporting the image at all)
+  local _layout
+  _layout="$(variant_chunked_layout "$VARIANT_NAME" "$cache_dir")"
+  if [[ -n "$_layout" ]]; then
+    echo "Using existing rechunked OCI layout: ${_layout}"
+    build_bib "${_layout}" "${TAG}" "$type" "image.toml" "$output_dir" "$bib_image"
     return 0
   fi
 
-  # Build container if needed (build_image stages to raw-img)
+  # Fallback: build raw-img and export it ad-hoc to an OCI layout
   build_image_or_skip "$BASE_IMAGE" "$BUILD_SCRIPT" "$CANONICAL_TAG" "$VARIANT_NAME" "$force_rebuild"
-
-  # Tag for BIB — bootc-image-builder reads from podman storage
-  buildah tag raw-img "${TARGET_IMAGE}:${TAG}" 2>/dev/null || true
-  build_bib "podman" "$TARGET_IMAGE" "$TAG" "$type" "image.toml" "$output_dir" "$bib_image"
+  # Keep the local <image>:<tag> ref resolvable for run_vm's local-image path
+  # (cheap: same-storage ref, no copy)
+  podman tag localhost/raw-img "${TARGET_IMAGE}:${TAG}" 2>/dev/null || true
+  export_and_build_bib "localhost/raw-img" "${TAG}" "$type" "image.toml" "$output_dir" "$bib_image"
 }
 
 # ── VM execution ────────────────────────────────────────────────────────────
@@ -224,8 +233,10 @@ run_vm() {
   local clean="${7:-0}"
   local cache_dir="${8:-$HOME/.cache/bazzite-nix}"
   local bib_image="${9:?bib_image required}"
+  local variant_name="${10:-}"
 
   local OUTPUT_DIR disk_name image_file is_local QEMU_PID success i
+  local layout_dir=""
 
   OUTPUT_DIR="${output_dir}"
   [[ -z "$OUTPUT_DIR" ]] && OUTPUT_DIR="$cache_dir"
@@ -240,29 +251,32 @@ run_vm() {
   fi
 
   if [[ ! -f "$image_file" ]]; then
-    is_local=false
-    [[ "$target_image" == localhost/* ]] && is_local=true
-    # Prefer rechunked containers-storage image if available (avoids podman image copy)
-    if buildah images --format '{{.Name}}:{{.Tag}}' "localhost/chunked-img:${tag}" >/dev/null 2>&1; then
-      echo "Using existing rechunked containers-storage image: localhost/chunked-img:${tag}"
-      ensure_vm_images "$bib_image"
+    ensure_vm_images "$bib_image"
+
+    # Prefer the per-variant chunked OCI layout left behind by the pipeline;
+    # otherwise export the (rootless) source image ad-hoc to an OCI layout.
+    if [[ -n "$variant_name" ]]; then
+      layout_dir="$(variant_chunked_layout "$variant_name" "$cache_dir")"
+      [[ -n "$layout_dir" ]] && echo "Using existing rechunked OCI layout: ${layout_dir}"
+    fi
+    if [[ -n "$layout_dir" ]]; then
       echo "Building disk image..."
-      build_bib "podman" "localhost/chunked-img" "$tag" "$type" "$config" "$OUTPUT_DIR" "$bib_image"
-    elif [[ "$is_local" == "true" ]]; then
-      if ! podman image exists "${target_image}:${tag}" 2>/dev/null; then
-        echo "Image ${target_image}:${tag} not found in rootful storage."
-        echo "   Build it first with: just build-${type} ${target_image}:${tag}"
-        return 1
-      fi
-      ensure_vm_images "$bib_image"
-      echo "Building disk image..."
-      build_bib "podman" "$target_image" "$tag" "$type" "$config" "$OUTPUT_DIR" "$bib_image"
+      build_bib "$layout_dir" "$tag" "$type" "$config" "$OUTPUT_DIR" "$bib_image"
     else
-      echo "Pulling ${target_image}:${tag}..."
-      podman pull "${target_image}:${tag}"
-      ensure_vm_images "$bib_image"
+      is_local=false
+      [[ "$target_image" == localhost/* ]] && is_local=true
+      if [[ "$is_local" == "true" ]]; then
+        if ! podman image exists "${target_image}:${tag}" 2>/dev/null; then
+          echo "Image ${target_image}:${tag} not found in storage."
+          echo "   Build it first with: just build-${type} ${target_image}:${tag}"
+          return 1
+        fi
+      else
+        echo "Pulling ${target_image}:${tag}..."
+        podman pull "${target_image}:${tag}"
+      fi
       echo "Building disk image..."
-      build_bib "podman" "$target_image" "$tag" "$type" "$config" "$OUTPUT_DIR" "$bib_image"
+      export_and_build_bib "${target_image}:${tag}" "$tag" "$type" "$config" "$OUTPUT_DIR" "$bib_image"
     fi
   fi
 
@@ -272,7 +286,7 @@ run_vm() {
   fi
 
   echo "Starting VM... Connect to http://127.0.0.1:8006"
-  sudo podman run --rm --privileged \
+  podman run --rm --privileged \
     --env CPU_CORES=4 --env RAM_SIZE=6G --env DISK_SIZE=30G \
     --env TPM=N --env GPU=N \
     --device=/dev/kvm --device=/dev/net/tun \
@@ -305,58 +319,21 @@ run_vm() {
 
 # ── VM build/run wrapper functions ──────────────────────────────────────────
 
-# Build a QCOW2 VM disk image for a variant
-build_vm_image_qcow2() {
-  local variant_or_spec="${1:?variant_or_spec required}"
-  local output_dir="${2:-}"
-  local force_rebuild="${3:-0}"
-  local cache_dir="${4:-$HOME/.cache/bazzite-nix}"
-  local bib_image="${5:-quay.io/centos-bootc/bootc-image-builder:latest}"
-
-  build_vm_image "$variant_or_spec" "qcow2" "$output_dir" "$force_rebuild" \
-    "$cache_dir" "$bib_image"
-}
-
-# Build a RAW VM disk image for a variant
-build_vm_image_raw() {
-  local variant_or_spec="${1:?variant_or_spec required}"
-  local output_dir="${2:-}"
-  local force_rebuild="${3:-0}"
-  local cache_dir="${4:-$HOME/.cache/bazzite-nix}"
-  local bib_image="${5:-quay.io/centos-bootc/bootc-image-builder:latest}"
-
-  build_vm_image "$variant_or_spec" "raw" "$output_dir" "$force_rebuild" \
-    "$cache_dir" "$bib_image"
-}
-
-# Run a QCOW2 VM for a variant (resolves variant, then launches QEMU)
-run_vm_qcow2() {
-  local variant_or_spec="${1:?variant_or_spec required}"
-  local variants_config="${2:-.github/variants.json}"
-  local image_name="${3:-bazzite-nix}"
-  local output_dir="${4:-}"
-  local force_pull="${5:-0}"
-  local clean="${6:-0}"
-  local cache_dir="${7:-$HOME/.cache/bazzite-nix}"
-  local bib_image="${8:-quay.io/centos-bootc/bootc-image-builder:latest}"
-  local TARGET_IMAGE TAG
+# Run a VM for a variant (resolves variant, then launches QEMU)
+# Usage: run_variant_vm <type> <variant_or_spec> [variants_config] [image_name]
+#                          [output_dir] [force_pull] [clean] [cache_dir] [bib_image]
+run_variant_vm() {
+  local type="${1:?type required}"
+  local variant_or_spec="${2:?variant_or_spec required}"
+  local variants_config="${3:-.github/variants.json}"
+  local image_name="${4:-bazzite-nix}"
+  local output_dir="${5:-}"
+  local force_pull="${6:-0}"
+  local clean="${7:-0}"
+  local cache_dir="${8:-$HOME/.cache/bazzite-nix}"
+  local bib_image="${9:?bib_image required}"
+  local TARGET_IMAGE TAG VARIANT_NAME
   eval "$(resolve_variant "$variant_or_spec" "$variants_config" "$image_name")"
-  run_vm "$TARGET_IMAGE" "${TAG}" "qcow2" "image.toml" "$output_dir" \
-    "$force_pull" "$clean" "$cache_dir" "$bib_image"
-}
-
-# Run a RAW VM for a variant (resolves variant, then launches QEMU)
-run_vm_raw() {
-  local variant_or_spec="${1:?variant_or_spec required}"
-  local variants_config="${2:-.github/variants.json}"
-  local image_name="${3:-bazzite-nix}"
-  local output_dir="${4:-}"
-  local force_pull="${5:-0}"
-  local clean="${6:-0}"
-  local cache_dir="${7:-$HOME/.cache/bazzite-nix}"
-  local bib_image="${8:-quay.io/centos-bootc/bootc-image-builder:latest}"
-  local TARGET_IMAGE TAG
-  eval "$(resolve_variant "$variant_or_spec" "$variants_config" "$image_name")"
-  run_vm "$TARGET_IMAGE" "${TAG}" "raw" "image.toml" "$output_dir" \
-    "$force_pull" "$clean" "$cache_dir" "$bib_image"
+  run_vm "$TARGET_IMAGE" "${TAG}" "$type" "image.toml" "$output_dir" \
+    "$force_pull" "$clean" "$cache_dir" "$bib_image" "$VARIANT_NAME"
 }

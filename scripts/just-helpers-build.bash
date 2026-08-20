@@ -101,7 +101,7 @@ build_variant_core() {
       _step "Rechunk image (chunkah)"
       # chunkah applies the labels at chunk time (--label), so no separate
       # relabel pass is needed after rechunking.
-      rechunk_image "$anchor_tag" "$labels_file"
+      rechunk_image "$anchor_tag" "$labels_file" "$variant"
     else
       _step "Relabel image (raw-img)"
       relabel_image "$labels_file" "$KERNEL_VERSION" "raw-img" "$anchor_tag"

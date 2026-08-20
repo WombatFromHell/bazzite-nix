@@ -35,42 +35,35 @@ setup() {
 
 # ── clean_oci_layout ────────────────────────────────────────────────────────
 
-@test "clean_oci_layout removes directory when index.json exists" {
+@test "clean_oci_layout removes the layout base dir (per-variant layouts underneath)" {
   local test_dir
   test_dir="$(mktemp -d)"
-  mkdir -p "$test_dir"
-  touch "$test_dir/index.json"
-  # Mock sudo to use regular rm
-  sudo() { "$@"; }
-  export -f sudo
+  mkdir -p "$test_dir/stable/chunked"
 
   clean_oci_layout "$test_dir"
   [ ! -d "$test_dir" ]
 }
 
-@test "clean_oci_layout skips directory without index.json" {
-  local test_dir
-  test_dir="$(mktemp -d)"
-  mkdir -p "$test_dir"
-  # No index.json
-
+@test "clean_oci_layout is a no-op when the base dir is absent" {
   local output
-  output=$(clean_oci_layout "$test_dir" 2>&1) || true
-  [ -d "$test_dir" ] # Directory should still exist
+  output=$(clean_oci_layout "$(mktemp -d)/nonexistent" 2>&1)
+  [ -z "$output" ]
 }
 
 # ── clean_vm_cache ──────────────────────────────────────────────────────────
 
-@test "clean_vm_cache removes existing cache directory" {
+@test "clean_vm_cache removes only the cached disk images" {
   local test_dir
   test_dir="$(mktemp -d)"
-  mkdir -p "$test_dir"
-  touch "$test_dir/disk.qcow2"
-  sudo() { "$@"; }
-  export -f sudo
+  touch "$test_dir/disk.qcow2" "$test_dir/disk.raw" "$test_dir/install.iso"
+  touch "$test_dir/something-else"
 
   clean_vm_cache "$test_dir"
-  [ ! -d "$test_dir" ]
+  [ ! -f "$test_dir/disk.qcow2" ]
+  [ ! -f "$test_dir/disk.raw" ]
+  [ ! -f "$test_dir/install.iso" ]
+  [ -f "$test_dir/something-else" ]
+  [ -d "$test_dir" ]
 }
 
 @test "clean_vm_cache reports when cache does not exist" {
@@ -80,6 +73,25 @@ setup() {
   local output
   output=$(clean_vm_cache "$test_dir" 2>&1)
   [[ "$output" == *"VM cache does not exist"* ]]
+}
+
+# ── remove_images_and_prune ─────────────────────────────────────────────────
+
+@test "remove_images_and_prune removes images by hash then prunes" {
+  local log
+  log="$(mktemp)"
+  podman() {
+    printf 'podman %s\n' "$*" >>"$LOG"
+    if [[ "$1" == "image" && "$2" == "inspect" ]]; then
+      echo "sha256:deadbeef"
+    fi
+  }
+  export -f podman
+  export LOG="$log"
+
+  remove_images_and_prune podman localhost/raw-img localhost/chunked-img
+  grep -q 'podman rmi --force sha256:deadbeef' "$log"
+  grep -q 'podman image prune --force' "$log"
 }
 
 # ── resolve_variant ─────────────────────────────────────────────────────────
@@ -205,26 +217,67 @@ EOF
   [[ "$output" == *'TAG="testing"'* ]]
 }
 
-# ── build_bib (unified podman/oci) ───────────────────────────────────────────────
+# ── build_bib ───────────────────────────────────────────────────────────────────────
 
-@test "build_bib podman skips when disk file exists" {
+@test "build_bib skips when disk file exists (qcow2)" {
   local test_dir
   test_dir="$(mktemp -d)"
   touch "$test_dir/disk.qcow2"
 
+  sudo() { "$@"; }
+  export -f sudo
+
   local output
-  output=$(build_bib "podman" "localhost/test" "latest" "qcow2" "config.toml" "$test_dir" "quay.io/centos-bootc/bootc-image-builder:latest" 2>&1)
+  output=$(build_bib "/tmp/oci-layout" "latest" "qcow2" "config.toml" "$test_dir" "quay.io/centos-bootc/bootc-image-builder:latest" 2>&1)
   [[ "$output" == *"Disk image already exists"* ]]
 }
 
-@test "build_bib oci skips when disk file exists" {
+@test "build_bib skips when disk file exists (raw)" {
   local test_dir
   test_dir="$(mktemp -d)"
   touch "$test_dir/disk.raw"
 
+  sudo() { "$@"; }
+  export -f sudo
+
   local output
-  output=$(build_bib "oci" "oci:/test:latest" "latest" "raw" "config.toml" "$test_dir" "quay.io/centos-bootc/bootc-image-builder:latest" 2>&1)
+  output=$(build_bib "/tmp/oci-layout" "latest" "raw" "config.toml" "$test_dir" "quay.io/centos-bootc/bootc-image-builder:latest" 2>&1)
   [[ "$output" == *"Disk image already exists"* ]]
+}
+
+# ── variant_chunked_layout / export_and_build_bib ───────────────────────────
+
+@test "variant_chunked_layout finds the pipeline layout, empty when absent" {
+  local base
+  base="$(mktemp -d)"
+  mkdir -p "$base/testing/chunked"
+  touch "$base/testing/chunked/index.json"
+
+  [[ "$(OCI_OUTPUT_DIR="$base" variant_chunked_layout "testing")" == "$base/testing/chunked" ]]
+  [ -z "$(OCI_OUTPUT_DIR="$base" variant_chunked_layout "missing")" ]
+}
+
+@test "export_and_build_bib exports an ad-hoc OCI layout for build_bib and removes it" {
+  local out log
+  out="$(mktemp -d)"
+  log="$out/calls"
+  podman() {
+    # pretend `save --format oci -o <dir>` wrote <dir>/oci
+    [[ "$1" == "save" ]] && mkdir -p "${5:-}/oci"
+    return 0
+  }
+  export -f podman
+  build_bib() {
+    echo "layout=${1} exists=$([[ -d "$1" ]] && echo yes || echo no)" >>"$log"
+  }
+  export -f build_bib
+
+  export_and_build_bib "localhost/raw-img" "testing" "qcow2" "image.toml" "$out" "bib:latest"
+  grep -q '^layout=.*oci exists=yes$' "$log"
+  # temp export dir must be gone afterwards
+  local layout
+  layout="$(sed -n 's/^layout=//p' "$log" | head -1)"
+  [ ! -d "${layout%/oci}" ]
 }
 
 # ── check_variants ──────────────────────────────────────────────────────────
@@ -293,21 +346,21 @@ EOF
 # ── print_build_summary / echo_build_assignments ────────────────────────────
 
 @test "print_build_summary and echo_build_assignments emit the build refs" {
-    local out
-    out=$(VARIANT_NAME=stable CANONICAL_TAG=1.0.0 TAGS=stable KERNEL_VERSION=6.6.0 \
-      MANIFEST_PACKAGES=42 SOURCE_REF=containers-storage:localhost/chunked-img:stable \
-      FULL_BUILD_DIGEST=sha256:abc BUILD_DIGEST=abc \
-      print_build_summary "Test complete" 2>&1)
-    [[ "$out" == *"=== Test complete ==="* ]]
-    [[ "$out" == *"Variant      : stable"* ]]
-    [[ "$out" == *"Short digest : abc"* ]]
+  local out
+  out=$(VARIANT_NAME=stable CANONICAL_TAG=1.0.0 TAGS=stable KERNEL_VERSION=6.6.0 \
+    MANIFEST_PACKAGES=42 SOURCE_REF=containers-storage:localhost/chunked-img:stable \
+    FULL_BUILD_DIGEST=sha256:abc BUILD_DIGEST=abc \
+    print_build_summary "Test complete" 2>&1)
+  [[ "$out" == *"=== Test complete ==="* ]]
+  [[ "$out" == *"Variant      : stable"* ]]
+  [[ "$out" == *"Short digest : abc"* ]]
 
-    out=$(VARIANT_NAME=stable CANONICAL_TAG=1.0.0 TAGS=stable KERNEL_VERSION=6.6.0 \
-      MANIFEST_PACKAGES=42 SOURCE_REF=containers-storage:localhost/chunked-img:stable \
-      FULL_BUILD_DIGEST=sha256:abc BUILD_DIGEST=abc \
-      echo_build_assignments)
-    [[ "$out" == *"KERNEL_VERSION=6.6.0"* ]]
-    [[ "$out" == *"BUILD_DIGEST=abc"* ]]
+  out=$(VARIANT_NAME=stable CANONICAL_TAG=1.0.0 TAGS=stable KERNEL_VERSION=6.6.0 \
+    MANIFEST_PACKAGES=42 SOURCE_REF=containers-storage:localhost/chunked-img:stable \
+    FULL_BUILD_DIGEST=sha256:abc BUILD_DIGEST=abc \
+    echo_build_assignments)
+  [[ "$out" == *"KERNEL_VERSION=6.6.0"* ]]
+  [[ "$out" == *"BUILD_DIGEST=abc"* ]]
 }
 
 # ── build_variant_core (shared build pipeline core) ─────────────────────────
@@ -341,7 +394,7 @@ build_core_common="stable 2026-08-17T00:00:00Z desc 44.1 owner repo"
   [ "$KERNEL_VERSION" = "6.6.0" ]
   [ "$SOURCE_REF" = "containers-storage:localhost/raw-img:stable" ]
   grep -q "REL:raw-img" "$calls"
-  ! grep -q "RECHUNK:" "$calls"
+  run ! grep -q "RECHUNK:" "$calls"
 }
 
 @test "build_variant_core rechunks with labels via chunkah when rechunk enabled (force)" {
@@ -352,7 +405,7 @@ build_core_common="stable 2026-08-17T00:00:00Z desc 44.1 owner repo"
   eval "$(build_variant_core $build_core_common 1 1)"
   [ "$SOURCE_REF" = "containers-storage:localhost/chunked-img:stable" ]
   grep -q "RECHUNK:stable:/tmp/bazzite-nix-labels.txt" "$calls"
-  ! grep -q "REL:" "$calls"
+  run ! grep -q "REL:" "$calls"
 }
 
 @test "build_variant_core skips relabel & rechunk when chunked image already exists" {
@@ -364,8 +417,8 @@ build_core_common="stable 2026-08-17T00:00:00Z desc 44.1 owner repo"
   [ "$status" -eq 0 ]
   [[ "$output" == *"skipping relabel & rechunk"* ]]
   [[ "$output" == *"SOURCE_REF=containers-storage:localhost/chunked-img:stable"* ]]
-  ! grep -q "RECHUNK:" "$calls"
-  ! grep -q "REL:" "$calls"
+  run ! grep -q "RECHUNK:" "$calls"
+  run ! grep -q "REL:" "$calls"
 }
 
 # ── collect_successful_builds ───────────────────────────────────────────────

@@ -4,6 +4,19 @@
 
 set -euo pipefail
 
+# ── sudo credential cache ──────────────────────────────────────────────────
+# Prime the sudo credential cache once before the first `sudo podman` in the
+# VM path so users aren't prompted for a password per step.
+sudo_cache() {
+  sudo -v
+}
+
+# Refresh the sudo credential cache non-interactively; no-op when the
+# timestamp has already expired (interactive re-prime is sudo_cache's job).
+sudo_refresh() {
+  sudo -n true 2>/dev/null || true
+}
+
 # ── build image ─────────────────────────────────────────────────────────────
 # Usage: build_image <base_image> <build_script> <canonical_tag> <variant> <containerfile_path> <raw_tag>
 # Tags the result as both `raw-img` (default/latest) and `raw-img:<raw_tag>`.
@@ -195,27 +208,33 @@ relabel_image() {
 }
 
 # ── rechunk image ───────────────────────────────────────────────────────────
-# Usage: rechunk_image <comma_separated_tags> [labels_file]
-# Rechunks raw-img into containers-storage via coreos/chunkah (the upstream
-# ublue rechunk tool), mirroring the bazzite build step: labels are applied at
+# Usage: rechunk_image <comma_separated_tags> [labels_file] [variant] [oci_base_dir]
+# Rechunks raw-img via coreos/chunkah (the upstream ublue rechunk tool),
+# mirroring the bazzite build step: labels are applied at
 # chunk time (--label) so the separate post-rechunk relabel is unnecessary, and
 # the config comes from `podman image inspect` so Env/Cmd/containers.bootc carry
-# over. The chunked output is an OCI layout written to a host temp dir (mounted
-# into the container), pulled back as chunked-img, and all other tags are applied
-# as aliases after (the tag loop mirrors relabel_image's).
+# over. The chunked output is an OCI layout written to <oci_base_dir>/<variant>/chunked
+# (per-variant so concurrent pipelines never clobber each other), pulled back as
+# chunked-img, and all other tags are applied as aliases after (the tag loop
+# mirrors relabel_image's). VM builds consume the layout directly.
 rechunk_image() {
   local tags_csv="${1:-latest}"
   local labels_file="${2:-}"
+  local variant="${3:-latest}"
+  local oci_base_dir="${4:-${OCI_OUTPUT_DIR:-${CACHE_DIR:-$HOME/.cache/bazzite-nix}/oci}}"
   local tags=()
   IFS=',' read -ra tags <<<"$tags_csv"
-  local rechunk_dir chunkah_config chunkah_image chunkah_ref chunked
+  local layout_dir chunkah_config chunkah_image chunkah_ref chunked
   local label_args=()
   local stale
 
-  rechunk_dir="$(mktemp -d "${TMPDIR:-/tmp}/rechunk-XXXXXX")"
+  layout_dir="${oci_base_dir}/${variant}/chunked"
+  # Wipe any stale layout so an old index.json can't confuse the pull
+  rm -rf "$layout_dir"
+  mkdir -p "${oci_base_dir}/${variant}"
   chunkah_config="$(mktemp "${TMPDIR:-/tmp}/chunkah-config-XXXXXX.json")"
   # shellcheck disable=SC2064  # Intentional: capture local var values at definition time
-  trap "rm -rf '${rechunk_dir}' '${chunkah_config}'" EXIT
+  trap "rm -rf '${chunkah_config}'" EXIT
 
   chunkah_image="quay.io/coreos/chunkah:latest"
   echo "Pulling ${chunkah_image}..." >&2
@@ -245,11 +264,11 @@ rechunk_image() {
     label_args+=(--label "${stale}-")
   done
 
-  echo "Running 'chunkah build' -> ${rechunk_dir}/chunked..." >&2
+  echo "Running 'chunkah build' -> ${layout_dir}..." >&2
   if podman run --rm --pull=never \
     --mount=type=image,src=localhost/raw-img,target=/chunkah \
     --volume "${chunkah_config}:/chunkah-config.json:ro,Z" \
-    --volume "${rechunk_dir}:/run/out:Z" \
+    --volume "${oci_base_dir}/${variant}:/run/out:Z" \
     "${chunkah_ref}" \
     build \
     --verbose \
@@ -262,9 +281,9 @@ rechunk_image() {
     --config /chunkah-config.json \
     --output oci:/run/out/chunked 1>&2; then
 
-    chunked=$(podman pull "oci:${rechunk_dir}/chunked")
+    chunked=$(podman pull "oci:${layout_dir}")
     if [[ -z "$chunked" ]]; then
-      echo "::error::Failed to load rechunked OCI layout from ${rechunk_dir}/chunked" >&2
+      echo "::error::Failed to load rechunked OCI layout from ${layout_dir}" >&2
       exit 1
     fi
     podman tag "${chunked}" localhost/chunked-img
@@ -292,7 +311,7 @@ extract_final_ref() {
   local source_ref="containers-storage:localhost/${image_name}:${tag}"
 
   local full_digest
-  full_digest=$(skopeo inspect --format '{{.Digest}}' "$source_ref") || {
+  full_digest=$(podman image inspect --format '{{.Digest}}' "localhost/${image_name}:${tag}") || {
     echo "::error::Expected containers-storage image ${source_ref} not found after rechunk"
     exit 1
   }
