@@ -99,6 +99,18 @@ def main() -> None:
             print("| --- | --- | --- | --- |")
             print(changes)
 
+        prev_v = prev_manifest.get("Labels", {}).get("org.opencontainers.image.version")
+        curr_v = manifest.get("Labels", {}).get("org.opencontainers.image.version")
+        if prev_v and curr_v:
+            branch = name.split(":", 1)[-1]
+            commits = changelog.get_commits(
+                changelog.upstream_tag(branch, prev_v),
+                changelog.upstream_tag(branch, curr_v),
+            )
+            if commits:
+                print("")
+                print(commits)
+
 
 if __name__ == "__main__":
     main()

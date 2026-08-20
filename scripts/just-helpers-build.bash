@@ -67,7 +67,7 @@ build_variant_core() {
   local manifest_file="/tmp/bazzite-nix-manifest.json"
   local labels_file="/tmp/bazzite-nix-labels.txt"
   local KERNEL_VERSION="" MANIFEST_PACKAGES="" SOURCE_REF="" FULL_BUILD_DIGEST="" BUILD_DIGEST=""
-  local anchor_tag image_name_ref
+  local anchor_tag image_name_ref revision
   local _step_n=0
   _step() {
     _step_n=$((_step_n + 1))
@@ -93,10 +93,13 @@ build_variant_core() {
     _step "skipping relabel & rechunk: localhost/chunked-img:${anchor_tag} already exists"
   else
     _step "Assemble image labels"
+    # Preserve the base image's revision label (inherited by raw-img) before
+    # relabel wipes every label.
+    revision=$(skopeo inspect "containers-storage:localhost/raw-img" 2>/dev/null | jq -r '.Labels["org.opencontainers.image.revision"] // ""' 2>/dev/null || true)
     assemble_labels \
       "$date" "$image_desc" "$variant" "$version_label" \
       "$repo_owner" "$repo_name" "$KERNEL_VERSION" \
-      "$manifest_file" "$labels_file"
+      "$manifest_file" "$labels_file" "$revision"
     if [[ "$rechunk" == "1" ]]; then
       _step "Rechunk image (chunkah)"
       # chunkah applies the labels at chunk time (--label), so no separate
@@ -166,7 +169,7 @@ run_relabel() {
   local quiet="${7:-0}"
   local TAG="" VARIANT_NAME="" CANONICAL_TAG="" TAGS=""
   local KERNEL_VERSION="" MANIFEST_PACKAGES="" SOURCE_REF="" FULL_BUILD_DIGEST="" BUILD_DIGEST=""
-  local anchor_tag manifest_file labels_file
+  local anchor_tag manifest_file labels_file revision
 
   eval "$(resolve_variant "$variant_or_spec" "$variants_config" "$image_name")"
 
@@ -190,10 +193,11 @@ run_relabel() {
   labels_file="/tmp/bazzite-nix-labels.txt"
   unset GITHUB_OUTPUT
   eval "$(extract_image_info "$manifest_file" "localhost/${image_name_ref}:${anchor_tag}")"
+  revision=$(skopeo inspect "containers-storage:localhost/${image_name_ref}:${anchor_tag}" 2>/dev/null | jq -r '.Labels["org.opencontainers.image.revision"] // ""' 2>/dev/null || true)
   assemble_labels \
     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$image_desc" "$VARIANT_NAME" "$CANONICAL_TAG" \
     "$repo_organization" "$image_name" "$KERNEL_VERSION" \
-    "$manifest_file" "$labels_file"
+    "$manifest_file" "$labels_file" "$revision"
   relabel_image "$labels_file" "$KERNEL_VERSION" "$image_name_ref" "$anchor_tag"
   eval "$(extract_final_ref "$anchor_tag" "$image_name_ref")"
 

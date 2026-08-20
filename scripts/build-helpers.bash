@@ -119,8 +119,9 @@ extract_image_info() {
 # ── assemble labels file ────────────────────────────────────────────────────
 # Usage: assemble_labels <date> <image_desc> <variant> <parent_version> \
 #                        <repo_owner> <repo_name> <kernel_version> \
-#                        <manifest_file_path> <output_file>
+#                        <manifest_file_path> <output_file> [revision]
 # Reads manifest JSON from manifest_file_path and writes labels to output_file.
+# revision (optional) is the upstream commit SHA, preserved from the base image.
 
 assemble_labels() {
   local date="$1"
@@ -132,6 +133,7 @@ assemble_labels() {
   local kernel_version="$7"
   local manifest_file="$8"
   local output_file="$9"
+  local revision="${10:-}"
 
   # Read manifest from file to avoid shell quoting issues with JSON
   # Compact to single line so it survives label file write/read correctly
@@ -150,6 +152,7 @@ assemble_labels() {
     "org.opencontainers.image.url=https://github.com/${repo_owner}/${repo_name}"
     "org.opencontainers.image.vendor=${repo_owner}"
     "org.opencontainers.image.version=${parent_version}"
+    "org.opencontainers.image.revision=${revision}"
     "org.opencontainers.image.kernel-version=${kernel_version}"
     "containers.bootc=1"
     "ostree.rechunk.info=${manifest}"

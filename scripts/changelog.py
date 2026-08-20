@@ -41,10 +41,9 @@ PATTERN_CHANGE = "\n| 🔄 | {name} | {prev} | {new} |"
 PATTERN_REMOVE = "\n| ❌ | {name} | {version} | |"
 PATTERN_PKGREL_CHANGED = "{prev} ➡️ {new}"
 PATTERN_PKGREL = "{version}"
-# Upstream GitHub repo for commit fetching.
-# Set by the calling action via GITHUB_REPOSITORY env var (e.g. "wombatfromhell/bazzite-nix").
-# Falls back to ublue-os/bazzite for direct invocation.
-UPSTREAM_REPO = os.environ.get("GITHUB_REPOSITORY", "ublue-os/bazzite")
+# Upstream GitHub repo for commit fetching. bazzite-nix tags mirror upstream's
+# (e.g. testing-44.20260820.1), so the compare is tag-to-tag on ublue-os/bazzite.
+UPSTREAM_REPO = "ublue-os/bazzite"
 
 COMMON_PAT = "### All Images\n| | Name | Previous | New |\n| --- | --- | --- | --- |{changes}\n\n"
 OTHER_NAMES = {
@@ -55,7 +54,8 @@ OTHER_NAMES = {
 }
 
 COMMITS_FORMAT = (
-    "### Commits\n| Hash | Subject | Author |\n| --- | --- | --- |{commits}\n\n"
+    "### Commits\n**Full diff**: [Compare](https://github.com/{repo}/compare/{prev}...{curr})\n\n"
+    "| Hash | Subject | Author |\n| --- | --- | --- |{commits}\n\n"
 )
 COMMIT_FORMAT = "\n| **[{short}](https://github.com/{repo}/commit/{hash})** | {subject} | {author} |"
 
@@ -388,23 +388,31 @@ def calculate_changes(pkgs: list[str], prev: dict[str, str], curr: dict[str, str
     return out
 
 
-def get_commits(prev_manifests, manifests):
-    """Fetch commits using revision hashes from image labels."""
-    try:
-        start = next(iter(prev_manifests.values()))["Labels"][
-            "org.opencontainers.image.revision"
-        ]
-        finish = next(iter(manifests.values()))["Labels"][
-            "org.opencontainers.image.revision"
-        ]
+def upstream_tag(branch: str, version: str) -> str:
+    """Map a container version label/tag to the upstream git tag GitHub can compare.
 
-        # Use GitHub API to compare commits
+    Upstream git tags are {branch}-{version} for testing/unstable, bare {version}
+    for stable (the stable-* container tags don't exist as git refs).
+    """
+    if branch == "stable":
+        return version.removeprefix("stable-")
+    if branch and not version.startswith(f"{branch}-"):
+        return f"{branch}-{version}"
+    return version
+
+
+def get_commits(prev: str, curr: str):
+    """Fetch upstream commits between two tags, e.g. testing-44.20260812.1...testing-44.20260820.1."""
+    try:
+        headers = ["-s", "-H", "Accept: application/vnd.github+json"]
+        if token := os.environ.get("GH_TOKEN"):
+            headers += ["-H", f"Authorization: Bearer {token}"]
         api_url = (
-            f"https://api.github.com/repos/{UPSTREAM_REPO}/compare/{start}...{finish}"
+            f"https://api.github.com/repos/{UPSTREAM_REPO}/compare/{prev}...{curr}"
         )
 
         response = subprocess.run(
-            ["curl", "-s", "-H", "Accept: application/vnd.github+json", api_url],
+            ["curl", *headers, api_url],
             check=True,
             stdout=subprocess.PIPE,
         ).stdout.decode("utf-8")
@@ -436,7 +444,9 @@ def get_commits(prev_manifests, manifests):
             )
 
         if out:
-            return COMMITS_FORMAT.format(commits=out)
+            return COMMITS_FORMAT.format(
+                repo=UPSTREAM_REPO, prev=prev, curr=curr, commits=out
+            )
         return ""
     except Exception as e:
         print(f"Failed to get commits:\n{e}")
@@ -536,7 +546,7 @@ def generate_changelog(
         chg = calculate_changes(v, prev_versions, versions)
         if chg:
             changes += OTHER_NAMES[k].format(changes=chg)
-    changes += get_commits(prev_manifests, manifests)
+    changes += get_commits(upstream_tag(target, prev), upstream_tag(target, curr))
 
     changelog = changelog.replace("{changes}", changes)
 
