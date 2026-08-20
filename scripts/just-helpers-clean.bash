@@ -25,13 +25,28 @@ remove_images_and_prune() {
   podman) tool=(podman) ;;
   sudo-podman) tool=(sudo podman) ;;
   esac
-  local img id
-  for img in "$@"; do
-    id="$("${tool[@]}" image inspect --format '{{.Id}}' "$img" 2>/dev/null)" || continue
-    [[ -n "$id" ]] || continue
-    echo "  Removing $img ($id)"
-    "${tool[@]}" rmi --force "$id" 2>/dev/null || true
+
+  # Fetch repository names and full IDs once
+  local images
+  images="$("${tool[@]}" images --format '{{.Repository}}|{{.ID}}' 2>/dev/null)"
+
+  local target repo id
+  for target in "$@"; do
+    local removed=0
+
+    # Cross-reference target against the repository list
+    while IFS='|' read -r repo id; do
+      # Match if target is the bare repository name, the short ID, or the full sha256 ID
+      if [[ "$repo" == "$target" || "$id" == "$target" || "$id" == "sha256:$target" ]]; then
+        echo "  Removing $target ($id)"
+        "${tool[@]}" rmi --force "$id" 2>/dev/null || true
+        removed=1
+      fi
+    done <<<"$images"
+
+    [[ $removed -eq 0 ]] && echo "  Not found: $target" >&2
   done
+
   "${tool[@]}" image prune --force 2>/dev/null || true
 }
 

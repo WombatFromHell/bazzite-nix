@@ -39,7 +39,7 @@ clean:
     set -euo pipefail
     source "{{ just_helpers }}"
     clean_oci_layout "{{ oci_output_dir }}"
-    remove_images_and_prune podman localhost/raw-img localhost/chunked-img
+    remove_images_and_prune podman localhost/raw-img localhost/chunked-img || true
 
 # Aggressive clean (cache dir, build outputs and build inputs, rootless + rootful)
 [group('Utility')]
@@ -51,8 +51,8 @@ cleaner:
     rm -rf "{{ cache_dir }}"
     remove_images_and_prune podman localhost/raw-img localhost/chunked-img \
         ghcr.io/ublue-os/bazzite quay.io/centos-bootc/bootc-image-builder \
-        quay.io/coreos/chunkah quay.io/centos-bootc/centos-bootc docker.io/qemux/qemu
-    remove_images_and_prune sudo-podman localhost/chunked-img "{{ bib_image }}"
+        quay.io/coreos/chunkah quay.io/centos-bootc/centos-bootc docker.io/qemux/qemu || true
+    remove_images_and_prune sudo-podman localhost/chunked-img "{{ bib_image }}" || true
 
 # Clean cached VM disk images
 [group('Utility')]
