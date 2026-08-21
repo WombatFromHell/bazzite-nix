@@ -6,7 +6,7 @@ set -euo pipefail
 # CONFIGURATION
 #==============================================================================
 CONTAINER_NAME="${CONTAINER_NAME:-bravebox}"
-CONTAINER_IMAGE="${CONTAINER_IMAGE:-fedora:44}"
+CONTAINER_IMAGE="${CONTAINER_IMAGE:-ghcr.io/ultramarine-linux/ultramarine:44}"
 DBX_USE_ROOT="false"
 DBX_EXPORT_APP="brave-browser"
 
@@ -30,6 +30,8 @@ _dbx_brave_pre_export() {
 }
 
 _dbx_brave_post_export() {
+  # ponytail: distrobox-export copies Icon= verbatim from the container .desktop; stable RPM's icon is brave-browser-stable
+  [[ "${INSTALL_TYPE:-stable}" == "stable" ]] && DBX_ICON_NAME="brave-browser-stable"
   dbx_browser_cleanup_exported "$CONTAINER_NAME" "$DBX_FLATPAK_ID"
   dbx_browser_configure_desktop "$CONTAINER_NAME" "$DBX_PKG_NAME" "false" "$DBX_FLATPAK_ID" "$(dbx_browser_detect_wrapper "$DBX_WRAPPER")" "$DBX_ICON_NAME"
 }
