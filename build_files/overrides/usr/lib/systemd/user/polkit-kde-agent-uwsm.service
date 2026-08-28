@@ -1,0 +1,11 @@
+[Unit]
+Description=Polkit KDE authentication agent
+PartOf=wayland-session@niri.desktop.target wayland-session@hyprland.desktop.target
+After=wayland-session@niri.desktop.target wayland-session@hyprland.desktop.target
+
+[Service]
+ExecStart=/usr/libexec/kf6/polkit-kde-authentication-agent-1
+Restart=on-failure
+
+[Install]
+WantedBy=wayland-session@niri.desktop.target wayland-session@hyprland.desktop.target

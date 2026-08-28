@@ -167,12 +167,12 @@ export_and_build_bib() {
   local config="${4:?config required}"
   local output_dir="${5:-}"
   local bib_image="${6:?bib_image required}"
-  local export_dir
-  export_dir="$(mktemp -d "${TMPDIR:-/tmp}/bib-oci-XXXXXX")"
-  # ponytail: podman save --format oci writes the layout to <dir>/oci
-  podman save --format oci -o "$export_dir" "$image"
-  build_bib "${export_dir}/oci" "$tag" "$type" "$config" "$output_dir" "$bib_image"
-  rm -rf "$export_dir"
+  # Stream rootless image straight into rootful storage (no temp disk round-trip).
+  local size
+  size="$(podman inspect --format '{{.Size}}' "$image" 2>/dev/null || echo 0)"
+  podman save "$image" | pv -s "${size:-0}" | sudo podman load
+  sudo podman tag "$image" "localhost/chunked-img:${tag}"
+  build_bib "localhost/chunked-img:${tag}" "$tag" "$type" "$config" "$output_dir" "$bib_image"
 }
 
 # Build VM image (shared helper for build-qcow2 and build-raw)

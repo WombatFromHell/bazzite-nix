@@ -1,0 +1,5 @@
+[Desktop Entry]
+Name=Hyprland (UWSM)
+Comment=Hyprland Wayland compositor, session-managed by UWSM
+Exec=uwsm start -- hyprland.desktop
+Type=Application

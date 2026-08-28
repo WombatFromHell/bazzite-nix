@@ -36,21 +36,37 @@ dnf5_retry -y install --refresh --enable-repo=terra \
 # shellcheck disable=SC2140
 dnf5 config-manager setopt "*terra*".exclude="nerd-fonts scx-tools scx-scheds python3-protobuf zlib-devel uupd"
 
+# bring in hyprland via copr
+dnf5 -y copr enable lionheartp/Hyprland
+dnf5 -y copr disable lionheartp/Hyprland
+dnf5_retry -y install --refresh --enable-repo="*lionheartp*" \
+  hyprland hyprland-guiutils hyprland-qt-support \
+  hyprcursor hypridle hyprlock hyprpaper hyprpicker hyprpolkitagent hyprqt6engine \
+  hyprshot hyprshutdown hyprutils kitty
+#
+# ensure we install a uwsm session variant for hyprland
+install -Z -D -m 0644 \
+  "$OVERRIDES_ROOT"/usr/share/wayland-sessions/hyprland-uwsm.desktop \
+  /usr/share/wayland-sessions/
+#
+install -Z -b -m 0644 \
+  "$OVERRIDES_ROOT"/usr/share/xdg-desktop-portal/niri-portals.conf \
+  /usr/share/xdg-desktop-portal/hyprland-portals.conf
+#
+install -Z -D -m 0644 \
+  "$OVERRIDES_ROOT"/usr/share/uwsm/env-niri \
+  /usr/share/uwsm/env-hyprland
+
 # use our pre-built niri-spicy RPM
 dnf5_retry install -y https://github.com/WombatFromHell/niri-spicy-builder/releases/download/v26.04-1.fc44/niri-26.04-1.fc44.x86_64.rpm
 # include DMS and friends from a verified repo
 dnf5 -y copr enable avengemedia/dms-git &&
   dnf5 -y copr disable avengemedia/dms-git &&
   dnf5_retry -y install --refresh --enable-repo="*avengemedia*" \
-    quickshell-git dms danksearch dgop fuzzel \
+    quickshell-git dms danksearch dankcalendar-git dgop fuzzel \
     cava matugen cups-pk-helper xdg-desktop-portal-kde \
     xdg-desktop-portal-gnome qt6ct-kde ghostty swayidle \
     xwayland-satellite
-
-# include hyprpicker so we get a magnifying glass with our color picker
-dnf5 -y copr enable solopasha/hyprland &&
-  dnf5 -y copr disable solopasha/hyprland &&
-  dnf5_retry -y install --refresh --enable-repo="*solopasha*" hyprpicker
 
 # use our niri-portals.conf override customized for KDE
 install -Z -b -m 0644 \
@@ -74,9 +90,9 @@ install -Z -D -m 0644 \
   "$OVERRIDES_ROOT"/usr/lib/systemd/user/*.service \
   /usr/lib/systemd/user/
 systemctl --global enable \
-  dms-niri-uwsm.service \
-  kwallet-pam-init.service \
-  polkit-kde-agent.service
+  dms-uwsm.service \
+  kwallet-pam-init-uwsm.service \
+  polkit-kde-agent-uwsm.service
 systemctl --global disable dms.service fumon.service
 # use our niri config override as well
 install -Z -D -m 0644 \
