@@ -13,6 +13,7 @@ SEARCH_PATHS=(
   /var/lib/flatpak/exports/share/applications
   /run/current-system/sw/share/applications
   "$HOME/.nix-profile/share/applications"
+  "$HOME/.local/share/nix-profile/share/applications"
 )
 
 NEW_WINDOW_BROWSERS=(
@@ -30,7 +31,7 @@ strip_field_codes() {
 # Substitute %U/%u with a URL, then strip remaining field codes.
 apply_url() {
   local cmd="$1" url="${2:-}"
-  if [[ -n "$url" ]]; then
+  if [[ -n $url ]]; then
     cmd="$(echo "$cmd" | sed "s|%U|$url|g; s|%u|$url|g")"
   fi
   strip_field_codes "$cmd"
@@ -50,7 +51,7 @@ find_desktop_path() {
 }
 
 is_flatpak_desktop_file() {
-  [[ "$1" =~ ^[a-zA-Z][a-zA-Z0-9-]*\.[a-zA-Z][a-zA-Z0-9-]*\.[a-zA-Z0-9][a-zA-Z0-9-]*\.desktop$ ]]
+  [[ $1 =~ ^[a-zA-Z][a-zA-Z0-9-]*\.[a-zA-Z][a-zA-Z0-9-]*\.[a-zA-Z0-9][a-zA-Z0-9-]*\.desktop$ ]]
 }
 
 extract_exec_line() {
@@ -62,7 +63,7 @@ extract_exec_line() {
 supports_new_window() {
   local name="$1" pattern
   for pattern in "${NEW_WINDOW_BROWSERS[@]}"; do
-    [[ "$name" == "$pattern"* ]] && return 0
+    [[ $name == "$pattern"* ]] && return 0
   done
   return 1
 }
@@ -75,9 +76,9 @@ new_window_flag() {
 
 detect_launcher_type() {
   local line="$1"
-  if [[ "$line" =~ ^(/usr/bin/)?flatpak[[:space:]]+run ]]; then
+  if [[ $line =~ ^(/usr/bin/)?flatpak[[:space:]]+run ]]; then
     echo "flatpak"
-  elif [[ "$line" =~ ^distrobox[[:space:]]+run[[:space:]]+([^[:space:]]+) ]]; then
+  elif [[ $line =~ ^distrobox[[:space:]]+run[[:space:]]+([^[:space:]]+) ]]; then
     echo "distrobox"
   else
     echo "native"
@@ -109,7 +110,7 @@ spawn_browser() {
   fi
 
   local cmd=()
-  [[ -n "${PREFIX:-}" ]] && cmd+=("$PREFIX")
+  [[ -n ${PREFIX:-} ]] && cmd+=("$PREFIX")
 
   local spawn_cmd
   spawn_cmd="$(build_spawn_cmd "$launcher_type" "$target" "$browser_name")"
@@ -126,13 +127,13 @@ resolve_flatpak() {
   local app_id
   app_id="$(echo "$exec_line" | grep -oiE '[a-z][a-z0-9]*\.[a-z][a-z0-9.-]*\.[a-z][a-z0-9.-]*' | head -n1)"
 
-  [[ -z "$app_id" ]] && {
+  [[ -z $app_id ]] && {
     echo "Error: could not determine flatpak app ID from '$exec_line'" >&2
     exit 1
   }
 
   local browser_name
-  if [[ "$exec_line" =~ --command=([^[:space:]]+) ]]; then
+  if [[ $exec_line =~ --command=([^[:space:]]+) ]]; then
     browser_name="${BASH_REMATCH[1]}"
   else
     browser_name="$app_id"
@@ -143,7 +144,7 @@ resolve_flatpak() {
 
 resolve_distrobox() {
   local exec_line="$1"
-  [[ "$exec_line" =~ ^distrobox[[:space:]]+run[[:space:]]+([^[:space:]]+) ]] || {
+  [[ $exec_line =~ ^distrobox[[:space:]]+run[[:space:]]+([^[:space:]]+) ]] || {
     echo "Error: could not parse distrobox command" >&2
     exit 1
   }
@@ -154,7 +155,7 @@ resolve_distrobox() {
   distro_cmd="${distro_cmd#"${distro_cmd%%[![:space:]]*}"}"
 
   local browser_bin="${distro_cmd%% *}"
-  [[ -z "$browser_bin" ]] && {
+  [[ -z $browser_bin ]] && {
     echo "Error: could not determine browser command from '$exec_line'" >&2
     exit 1
   }
@@ -167,7 +168,7 @@ resolve_native() {
   local browser_bin="${exec_line%% *}"
   browser_bin="$(command -v "$browser_bin" 2>/dev/null || echo "$browser_bin")"
 
-  [[ -z "$browser_bin" ]] && {
+  [[ -z $browser_bin ]] && {
     echo "Error: could not resolve browser binary" >&2
     exit 1
   }
@@ -191,7 +192,7 @@ run_helper() {
   find-desktop-file)
     local input
     input="$(cat)"
-    if [[ -z "$input" ]]; then
+    if [[ -z $input ]]; then
       echo "Error: could not determine default browser" >&2
       return 1
     fi
@@ -208,7 +209,7 @@ run_helper() {
 
 URL="${1:-}"
 
-if [[ "${1:-}" == --helper-* ]]; then
+if [[ ${1:-} == --helper-* ]]; then
   run_helper "${1#--helper-}" "${@:2}"
   exit $?
 fi
@@ -221,15 +222,15 @@ DESKTOP_FILE="$(xdg-settings get default-web-browser 2>/dev/null)" || {
 
 DESKTOP_PATH="$(find_desktop_path "$DESKTOP_FILE")"
 
-[[ -z "$DESKTOP_PATH" ]] && {
+[[ -z $DESKTOP_PATH ]] && {
   echo "Error: .desktop file not found for '$DESKTOP_FILE'" >&2
   exit 1
 }
 
 RAW_EXEC_LINE="$(extract_exec_line "$DESKTOP_PATH")"
 
-# Wrapper scripts (chromium-flags.sh, brave-wrapper.sh) are exec'd directly
-if [[ "$RAW_EXEC_LINE" =~ chromium-flags\.sh|brave-wrapper\.sh ]]; then
+# Wrapper scripts (chromium-flags.sh, chromium-wrapper.sh) are exec'd directly
+if [[ $RAW_EXEC_LINE =~ chromium-flags\.sh|chromium-wrapper\.sh ]]; then
   exec bash -c "$(apply_url "$RAW_EXEC_LINE" "$URL")"
 fi
 

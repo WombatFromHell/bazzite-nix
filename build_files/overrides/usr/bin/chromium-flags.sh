@@ -11,16 +11,16 @@ readonly FLAGS_CONFIG="${FLAGS_CONFIG:-${HOME}/.config/chromium-flags.conf}"
 # DATA LAYER: Load and clean flags
 #------------------------------------------------------------------------------
 load_flags() {
-  if [[ ! -f "$FLAGS_CONFIG" ]]; then
+  if [[ ! -f $FLAGS_CONFIG ]]; then
     return 0
   fi
 
   local flags=()
-  while IFS= read -r line || [[ -n "$line" ]]; do
+  while IFS= read -r line || [[ -n $line ]]; do
     # Trim whitespace and skip empty/comments
     local trimmed
     trimmed=$(echo "$line" | xargs)
-    [[ -z "$trimmed" || "$trimmed" == \#* ]] && continue
+    [[ -z $trimmed || $trimmed == \#* ]] && continue
     flags+=("$trimmed")
   done <"$FLAGS_CONFIG"
 
@@ -66,11 +66,11 @@ strategy_distrobox() {
   local result=()
 
   for arg in "${args[@]}"; do
-    if [[ "$after_dash_dash" == true && "$browser_found" == false ]]; then
+    if [[ $after_dash_dash == true && $browser_found == false ]]; then
       browser_found=true
       result+=("$arg")
       [[ ${#flags[@]} -gt 0 ]] && result+=("${flags[@]}")
-    elif [[ "$arg" == "--" ]]; then
+    elif [[ $arg == "--" ]]; then
       after_dash_dash=true
       result+=("$arg")
     else
@@ -86,7 +86,7 @@ strategy_distrobox() {
 
 main() {
   local dry_run=false
-  if [[ "${1:-}" == "--dry-run" ]]; then
+  if [[ ${1:-} == "--dry-run" ]]; then
     dry_run=true
     shift
   fi
@@ -103,15 +103,15 @@ main() {
   local final_args=()
 
   # Strategy Selection (The "Context")
-  if [[ "$command" == "flatpak" && "${2:-}" == "run" ]]; then
+  if [[ $command == "flatpak" && ${2:-} == "run" ]]; then
     mapfile -t final_args < <(strategy_flatpak "$@")
-  elif [[ "$command" == "distrobox-enter" || "$command" == "distrobox" ]]; then
+  elif [[ $command == "distrobox-enter" || $command == "distrobox" ]]; then
     mapfile -t final_args < <(strategy_distrobox "$@")
   else
     mapfile -t final_args < <(strategy_standard "$@")
   fi
 
-  if [[ "$dry_run" == true ]]; then
+  if [[ $dry_run == true ]]; then
     printf '%s\n' "${final_args[@]}"
     exit 0
   fi
