@@ -134,6 +134,7 @@ install -Z -m 0644 \
 install -Z -m 0755 \
   "$OVERRIDES_ROOT"/usr/bin/urh.pyz \
   "$OVERRIDES_ROOT"/usr/bin/nscb.pyz \
+  "$OVERRIDES_ROOT"/usr/bin/niri-hdr.py \
   "$OVERRIDES_ROOT"/usr/bin/gamemode.pyz \
   "$OVERRIDES_ROOT"/usr/bin/protonfetcher.pyz \
   /usr/bin/
