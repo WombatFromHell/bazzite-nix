@@ -33,6 +33,7 @@ print_build_summary() {
 
 # Eval-able build refs (the stdout contract of build_variant_core / run_rechunk / run_relabel)
 echo_build_assignments() {
+  echo "VARIANT_NAME=${VARIANT_NAME}"
   echo "KERNEL_VERSION=${KERNEL_VERSION}"
   echo "MANIFEST_PACKAGES=${MANIFEST_PACKAGES}"
   echo "SOURCE_REF=${SOURCE_REF}"

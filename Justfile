@@ -48,11 +48,12 @@ cleaner:
     set -euo pipefail
     source "{{ just_helpers }}"
     clean_artifacts
-    rm -rf "{{ cache_dir }}"
+    sudo find -L "{{ cache_dir }}" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || true
     remove_images_and_prune podman localhost/raw-img localhost/chunked-img \
         ghcr.io/ublue-os/bazzite quay.io/centos-bootc/bootc-image-builder \
         quay.io/coreos/chunkah quay.io/centos-bootc/centos-bootc docker.io/qemux/qemu || true
     remove_images_and_prune sudo-podman localhost/chunked-img "{{ bib_image }}" || true
+    sudo rm -rf /var/tmp/buildah* /var/tmp/podman*
 
 # Clean cached VM disk images
 [group('Utility')]
@@ -117,6 +118,18 @@ rechunk $variant_or_spec="{{ default_tag }}":
     set -euo pipefail
     source "{{ just_helpers }}"
     eval "$(run_rechunk "{{ variant_or_spec }}" "{{ variants_config }}" "{{ image_name }}" "{{ image_desc }}" "{{ repo_organization }}")"
+    just rootful-load "{{ variant_or_spec }}"
+
+# Transfer the chunked image from rootless to rootful podman storage, so it can
+# be used with `sudo bootc switch`. Requires an existing chunked-img for the variant.
+# Usage: just rootful-load [variant-name]
+[group('Build Container Image')]
+rootful-load $variant_or_spec="{{ default_tag }}":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    source "{{ just_helpers }}"
+    eval "$(resolve_variant "{{ variant_or_spec }}" "{{ variants_config }}" "{{ image_name }}")"
+    podman save "localhost/chunked-img:${VARIANT_NAME}" | pv | sudo podman load
 
 # Relabel an existing image (chunked-img if present, else raw-img) without
 # rebuilding or rechunking. For iterating on the relabel flow.
