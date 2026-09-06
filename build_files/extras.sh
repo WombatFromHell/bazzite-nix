@@ -36,6 +36,12 @@ dnf5_retry -y install --refresh --enable-repo=terra \
 # shellcheck disable=SC2140
 dnf5 config-manager setopt "*terra*".exclude="nerd-fonts scx-tools scx-scheds python3-protobuf zlib-devel uupd"
 
+# include KDE-Rounded-Corners in case the user wants to use 'karousel'
+dnf5 -y copr enable matinlotfali/KDE-Rounded-Corners
+dnf5 -y copr disable matinlotfali/KDE-Rounded-Corners
+dnf5_retry -y install --refresh --enable-repo="*matinlotfali*" \
+  kwin-effect-roundcorners
+
 # bring in hyprland via copr
 dnf5 -y copr enable lionheartp/Hyprland
 dnf5 -y copr disable lionheartp/Hyprland
