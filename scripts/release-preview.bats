@@ -1,4 +1,5 @@
 #!/usr/bin/env bats
+bats_require_minimum_version 1.5.0
 # release-preview.bats — Smoke test for scripts/release-preview.py using a
 # mocked skopeo, so it runs without a local image or registry access.
 #

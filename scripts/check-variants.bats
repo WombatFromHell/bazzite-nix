@@ -1,4 +1,5 @@
 #!/usr/bin/env bats
+bats_require_minimum_version 1.5.0
 # check-variants.bats — Tests for the check-variants helper parts
 #
 # Run with: bats scripts/check-variants.bats

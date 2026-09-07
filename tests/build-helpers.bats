@@ -1,4 +1,5 @@
 #!/usr/bin/env bats
+bats_require_minimum_version 1.5.0
 # helpers.bats — Smoke tests for build-reusable/helpers.sh using mocked tooling.
 #
 # Run with: bats tests/build-helpers.bats

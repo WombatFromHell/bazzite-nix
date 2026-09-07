@@ -1,4 +1,5 @@
 #!/usr/bin/env bats
+bats_require_minimum_version 1.5.0
 # just-helpers.bats — Tests for scripts/just-helpers.sh
 #
 # Run with: bats scripts/just-helpers.bats
@@ -81,16 +82,17 @@ setup() {
   local log
   log="$(mktemp)"
   podman() {
-    printf 'podman %s\n' "$*" >>"$LOG"
-    if [[ "$1" == "image" && "$2" == "inspect" ]]; then
-      echo "sha256:deadbeef"
+    printf 'podman %s\n' "$*" >>"$log"
+    if [[ "$1" == "images" ]]; then
+      # podman reports bare repo names, no localhost/ prefix
+      printf 'raw-img|sha256:deadbeef\nchunked-img|sha256:cafebabe\n'
     fi
   }
   export -f podman
-  export LOG="$log"
 
   remove_images_and_prune podman localhost/raw-img localhost/chunked-img
   grep -q 'podman rmi --force sha256:deadbeef' "$log"
+  grep -q 'podman rmi --force sha256:cafebabe' "$log"
   grep -q 'podman image prune --force' "$log"
 }
 
@@ -257,27 +259,21 @@ EOF
   [ -z "$(OCI_OUTPUT_DIR="$base" variant_chunked_layout "missing")" ]
 }
 
-@test "export_and_build_bib exports an ad-hoc OCI layout for build_bib and removes it" {
+@test "export_and_build_bib streams image into rootful storage and feeds build_bib" {
   local out log
   out="$(mktemp -d)"
   log="$out/calls"
-  podman() {
-    # pretend `save --format oci -o <dir>` wrote <dir>/oci
-    [[ "$1" == "save" ]] && mkdir -p "${5:-}/oci"
-    return 0
-  }
+  sudo() { echo "sudo $*" >>"$log"; "$@"; }
+  export -f sudo
+  podman() { echo "podman $*" >>"$log"; }
   export -f podman
-  build_bib() {
-    echo "layout=${1} exists=$([[ -d "$1" ]] && echo yes || echo no)" >>"$log"
-  }
+  build_bib() { echo "build_bib $*" >>"$log"; }
   export -f build_bib
 
   export_and_build_bib "localhost/raw-img" "testing" "qcow2" "image.toml" "$out" "bib:latest"
-  grep -q '^layout=.*oci exists=yes$' "$log"
-  # temp export dir must be gone afterwards
-  local layout
-  layout="$(sed -n 's/^layout=//p' "$log" | head -1)"
-  [ ! -d "${layout%/oci}" ]
+  grep -q '^podman save localhost/raw-img$' "$log"
+  grep -q '^sudo podman tag localhost/raw-img localhost/chunked-img:testing$' "$log"
+  grep -q "^build_bib localhost/chunked-img:testing testing qcow2 image.toml $out bib:latest$" "$log"
 }
 
 # ── check_variants ──────────────────────────────────────────────────────────
@@ -413,6 +409,7 @@ build_core_common="stable 2026-08-17T00:00:00Z desc 44.1 owner repo"
   calls="$(mktemp)"
   build_core_mocks "$calls"
   sudo() { return 0; }
+  buildah() { return 0; } # pretend localhost/chunked-img:stable exists
   run build_variant_core $build_core_common 0 1
   [ "$status" -eq 0 ]
   [[ "$output" == *"skipping relabel & rechunk"* ]]

@@ -67,6 +67,7 @@ build_variant_core() {
   local rechunk="${8:-0}"
   local manifest_file="/tmp/bazzite-nix-manifest.json"
   local labels_file="/tmp/bazzite-nix-labels.txt"
+  local VARIANT_NAME="$variant"
   local KERNEL_VERSION="" MANIFEST_PACKAGES="" SOURCE_REF="" FULL_BUILD_DIGEST="" BUILD_DIGEST=""
   local anchor_tag image_name_ref revision
   local _step_n=0

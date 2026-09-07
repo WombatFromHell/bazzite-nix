@@ -30,14 +30,16 @@ remove_images_and_prune() {
   local images
   images="$("${tool[@]}" images --format '{{.Repository}}|{{.ID}}' 2>/dev/null)"
 
-  local target repo id
+  local target bare repo id
   for target in "$@"; do
     local removed=0
+    # podman reports bare repo names ("raw-img"); callers pass "localhost/raw-img"
+    bare="${target#localhost/}"
 
     # Cross-reference target against the repository list
     while IFS='|' read -r repo id; do
       # Match if target is the bare repository name, the short ID, or the full sha256 ID
-      if [[ "$repo" == "$target" || "$id" == "$target" || "$id" == "sha256:$target" ]]; then
+      if [[ "$repo" == "$target" || "$repo" == "$bare" || "$id" == "$target" || "$id" == "sha256:$target" ]]; then
         echo "  Removing $target ($id)"
         "${tool[@]}" rmi --force "$id" 2>/dev/null || true
         removed=1
