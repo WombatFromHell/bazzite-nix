@@ -32,7 +32,7 @@ dnf5 config-manager setopt terra.baseurl="https://repos.fyralabs.com/terra\$rele
 dnf5_retry -y install --refresh --enable-repo=terra \
   rocm-smi uwsm qt5-qttools qt6-qttools \
   tmux gvfs-smb gvfs-fuse openrgb openrgb-udev-rules \
-  gamescope-session-steam
+  gamescope-session-steam xwayland-satellite
 # shellcheck disable=SC2140
 dnf5 config-manager setopt "*terra*".exclude="nerd-fonts scx-tools scx-scheds python3-protobuf zlib-devel uupd"
 
@@ -72,8 +72,7 @@ dnf5 -y copr enable avengemedia/dms-git &&
   dnf5_retry -y install --refresh --enable-repo="*avengemedia*" \
     quickshell-git dms danksearch dankcalendar-git dgop fuzzel \
     cava matugen cups-pk-helper xdg-desktop-portal-kde \
-    xdg-desktop-portal-gnome qt6ct-kde ghostty swayidle \
-    xwayland-satellite
+    xdg-desktop-portal-gnome qt6ct-kde ghostty swayidle
 
 # use our niri-portals.conf override customized for KDE
 install -Z -b -m 0644 \
