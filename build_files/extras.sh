@@ -64,8 +64,8 @@ install -Z -D -m 0644 \
   /usr/share/uwsm/env-hyprland
 
 # use our pre-built niri-spicy RPM's
-dnf5_retry install -y https://github.com/WombatFromHell/niri-spicy-builder/releases/download/v26.04.git%2B641335f-1.fc44/xwayland-satellite-0.8.2.git+add2795-1.fc44.x86_64.rpm
-dnf5_retry install -y https://github.com/WombatFromHell/niri-spicy-builder/releases/download/v26.04.git%2B641335f-1.fc44/niri-26.04.git+641335f-1.fc44.x86_64.rpm
+dnf5_retry install -y https://github.com/WombatFromHell/niri-spicy-builder/releases/download/v26.04.git%2B15c93f6-1.fc44/xwayland-satellite-0.8.2.git+add2795-1.fc44.x86_64.rpm
+dnf5_retry install -y https://github.com/WombatFromHell/niri-spicy-builder/releases/download/v26.04.git%2B15c93f6-1.fc44/niri-26.04.git+15c93f6-1.fc44.x86_64.rpm
 
 # include DMS and friends from a verified repo
 dnf5 -y copr enable avengemedia/dms-git &&
