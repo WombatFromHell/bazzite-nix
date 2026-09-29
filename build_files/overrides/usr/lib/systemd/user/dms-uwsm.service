@@ -1,5 +1,5 @@
 [Unit]
-Description=DMS Service
+Description=Dank Material Shell (DMS)
 PartOf=wayland-session@niri.desktop.target wayland-session@hyprland.desktop.target
 After=wayland-session@niri.desktop.target wayland-session@hyprland.desktop.target
 
@@ -7,9 +7,13 @@ After=wayland-session@niri.desktop.target wayland-session@hyprland.desktop.targe
 Type=dbus
 BusName=org.freedesktop.Notifications
 ExecStart=/usr/bin/dms run --session
-ExecReload=/usr/bin/pkill -USR1 -x dms
+ExecReload=/bin/kill -USR1 $MAINPID
+LimitNOFILE=16384:infinity
 Restart=on-failure
+RestartForceExitStatus=TEMPFAIL
+SuccessExitStatus=TEMPFAIL
 RestartSec=1.23
+TimeoutStartSec=90s
 TimeoutStopSec=10
 
 [Install]
