@@ -43,25 +43,25 @@ dnf5_retry -y install --refresh --enable-repo="*matinlotfali*" \
   kwin-effect-roundcorners
 
 # bring in hyprland via copr
-dnf5 -y copr enable lionheartp/Hyprland
-dnf5 -y copr disable lionheartp/Hyprland
-dnf5_retry -y install --refresh --enable-repo="*lionheartp*" \
-  hyprland hyprland-guiutils hyprland-qt-support \
-  hyprcursor hypridle hyprlock hyprpaper hyprpicker hyprpolkitagent hyprqt6engine \
-  hyprshot hyprshutdown hyprutils kitty
+# dnf5 -y copr enable lionheartp/Hyprland
+# dnf5 -y copr disable lionheartp/Hyprland
+# dnf5_retry -y install --refresh --enable-repo="*lionheartp*" \
+#   hyprland hyprland-guiutils hyprland-qt-support \
+#   hyprcursor hypridle hyprlock hyprpaper hyprpicker hyprpolkitagent hyprqt6engine \
+#   hyprshot hyprshutdown hyprutils kitty
 #
 # ensure we install a uwsm session variant for hyprland
-install -Z -D -m 0644 \
-  "$OVERRIDES_ROOT"/usr/share/wayland-sessions/hyprland-uwsm.desktop \
-  /usr/share/wayland-sessions/
+# install -Z -D -m 0644 \
+#   "$OVERRIDES_ROOT"/usr/share/wayland-sessions/hyprland-uwsm.desktop \
+#   /usr/share/wayland-sessions/
 #
-install -Z -b -m 0644 \
-  "$OVERRIDES_ROOT"/usr/share/xdg-desktop-portal/niri-portals.conf \
-  /usr/share/xdg-desktop-portal/hyprland-portals.conf
+# install -Z -b -m 0644 \
+#   "$OVERRIDES_ROOT"/usr/share/xdg-desktop-portal/niri-portals.conf \
+#   /usr/share/xdg-desktop-portal/hyprland-portals.conf
 #
-install -Z -D -m 0644 \
-  "$OVERRIDES_ROOT"/usr/share/uwsm/env-niri \
-  /usr/share/uwsm/env-hyprland
+# install -Z -D -m 0644 \
+#   "$OVERRIDES_ROOT"/usr/share/uwsm/env-niri \
+#   /usr/share/uwsm/env-hyprland
 
 # use our pre-built niri-spicy RPM's
 dnf5_retry install -y https://github.com/WombatFromHell/niri-spicy-builder/releases/download/v26.04.git%2B15c93f6-1.fc44/xwayland-satellite-0.8.2.git+add2795-1.fc44.x86_64.rpm
