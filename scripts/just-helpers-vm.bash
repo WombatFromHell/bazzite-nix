@@ -1,6 +1,9 @@
 # just-helpers-vm.bash — VM image build/run functions and their Justfile wrappers.
 # Sourced by just-helpers.bash (no shebang/set — see umbrella).
 
+# shellcheck disable=SC2153
+# CACHE_DIR is exported by build-helpers.bash, which the umbrella sources first.
+
 # ── VM image building ───────────────────────────────────────────────────────
 
 # Map a disk type to its filename
@@ -32,8 +35,6 @@ _build_bib() {
   local bib_image="${5:?bib_image required}"
 
   local disk_name disk_file BUILDTMP
-
-  local CACHE_DIR="${CACHE_DIR:-$HOME/.cache/bazzite-nix}"
 
   disk_name="$(disk_file_name "$type")"
   disk_file="${out_dir}/${disk_name}"
@@ -112,7 +113,7 @@ build_bib() {
 
   out_dir="${output_dir}"
   if [[ -z "$out_dir" ]]; then
-    out_dir="${CACHE_DIR:-$HOME/.cache/bazzite-nix}"
+    out_dir="$CACHE_DIR"
   fi
   mkdir -p "$out_dir"
 
@@ -129,15 +130,14 @@ build_bib() {
   # BIB requires rootful storage; import the (single-image) layout with podman
   # so the localhost/... reference resolves inside the BIB container. A
   # tagless pull is safe: chunkah/saved layouts hold exactly one image.
-  local target_image="localhost/chunked-img"
-  if ! sudo podman image exists "${target_image}:${tag}" 2>/dev/null; then
+  if ! sudo podman image exists "$(image_ref chunked-img "$tag")" 2>/dev/null; then
     local id
     id="$(sudo podman pull "oci:${source}")"
-    sudo podman tag "$id" "${target_image}:${tag}"
+    sudo podman tag "$id" "$(image_ref chunked-img "$tag")"
   else
-    echo "Image ${target_image}:${tag} already in storage, skipping import"
+    echo "Image $(image_ref chunked-img "$tag") already in storage, skipping import"
   fi
-  source_image="${target_image}:${tag}"
+  source_image="$(image_ref chunked-img "$tag")"
 
   _build_bib "$source_image" "$type" "$config" "$out_dir" "$bib_image"
 
@@ -150,7 +150,7 @@ build_bib() {
 # <OCI_OUTPUT_DIR or cache_dir/oci>/<variant>/chunked.
 variant_chunked_layout() {
   local variant_name="${1:?variant_name required}"
-  local cache_dir="${2:-${CACHE_DIR:-$HOME/.cache/bazzite-nix}}"
+  local cache_dir="${2:-$CACHE_DIR}"
   local layout="${OCI_OUTPUT_DIR:-${cache_dir}/oci}/${variant_name}/chunked"
   [[ -f "${layout}/index.json" ]] && echo "$layout"
   return 0
@@ -171,25 +171,44 @@ export_and_build_bib() {
   local size
   size="$(podman inspect --format '{{.Size}}' "$image" 2>/dev/null || echo 0)"
   podman save "$image" | pv -s "${size:-0}" | sudo podman load
-  sudo podman tag "$image" "localhost/chunked-img:${tag}"
-  build_bib "localhost/chunked-img:${tag}" "$tag" "$type" "$config" "$output_dir" "$bib_image"
+  sudo podman tag "$image" "$(image_ref chunked-img "$tag")"
+  build_bib "$(image_ref chunked-img "$tag")" "$tag" "$type" "$config" "$output_dir" "$bib_image"
+}
+
+# Resolve a variant name or image:tag spec into the record the VM entrypoints
+# consume.
+# Usage: vm_record_json <variant_or_spec> [variants_config] [image_name]
+vm_record_json() {
+  local variant_or_spec="${1:?variant_or_spec required}"
+  local variants_config="${2:-${VARIANTS_CONFIG:-.github/variants.json}}"
+  local image_name="${3:?image_name required}"
+  # shellcheck disable=SC2034
+  local TARGET_IMAGE TAG BASE_IMAGE BUILD_SCRIPT VARIANT_NAME CANONICAL_TAG TAGS
+  eval "$(resolve_variant "$variant_or_spec" "$variants_config" "$image_name")"
+  jq -cn --arg variant "$VARIANT_NAME" --arg tag "$TAG" --arg target_image "$TARGET_IMAGE" \
+    --arg base_image "$BASE_IMAGE" --arg build_script "$BUILD_SCRIPT" --arg canonical_tag "$CANONICAL_TAG" \
+    '{variant: $variant, tag: $tag, target_image: $target_image, base_image: $base_image, build_script: $build_script, canonical_tag: $canonical_tag}'
 }
 
 # Build VM image (shared helper for build-qcow2 and build-raw)
+# Usage: build_vm_image <record_json> [options_json]
+# Record fields: variant, tag, target_image, base_image, build_script, canonical_tag
+# Options: {"type":..,"output_dir":..,"force_rebuild":0|1,"cache_dir":..,"bib_image":..}
 build_vm_image() {
-  local image_spec="${1:?image_spec required}"
-  local type="${2:?type required}"
-  local output_dir="${3:-}"
-  local force_rebuild="${4:-0}"
-  local cache_dir="${5:-$HOME/.cache/bazzite-nix}"
-  local bib_image="${6:-quay.io/centos-bootc/bootc-image-builder:latest}"
-  # shellcheck disable=SC2034
-  local TARGET_IMAGE TAG BASE_IMAGE BUILD_SCRIPT VARIANT_NAME CANONICAL_TAG TAGS
+  local record_json="${1:?record_json required}"
+  local options_json="${2:-}"
+
+  local variant tag target_image base_image build_script canonical_tag
+  local type output_dir force_rebuild cache_dir bib_image
+  IFS=$'\037' read -r variant tag target_image base_image build_script canonical_tag < <(jq -r '[.variant, .tag, .target_image, .base_image, .build_script, (.canonical_tag // "")] | join("\u001f")' <<<"$record_json")
+  IFS=$'\037' read -r type output_dir force_rebuild cache_dir bib_image < <(jq -r '[(.type // ""), (.output_dir // ""), (.force_rebuild // "0"), (.cache_dir // ""), (.bib_image // "quay.io/centos-bootc/bootc-image-builder:latest")] | join("\u001f")' <<<"$options_json")
+  [[ -n "$cache_dir" ]] || cache_dir="$CACHE_DIR"
+  if [[ -z "$type" || -z "$variant" ]]; then
+    echo "ERROR: type and record variant are required" >&2
+    return 1
+  fi
   local _out_dir _disk_name _disk_file
 
-  eval "$(resolve_variant "$image_spec" "${VARIANTS_CONFIG:-.github/variants.json}" "${IMAGE_NAME:-bazzite-nix}")"
-
-  # Determine output dir and disk filename early
   _out_dir="${output_dir}"
   [[ -z "$_out_dir" ]] && _out_dir="$cache_dir"
   _disk_name="$(disk_file_name "$type")"
@@ -204,19 +223,19 @@ build_vm_image() {
   # Prefer the per-variant chunked OCI layout left behind by the pipeline
   # (avoids building/exporting the image at all)
   local _layout
-  _layout="$(variant_chunked_layout "$VARIANT_NAME" "$cache_dir")"
+  _layout="$(variant_chunked_layout "$variant" "$cache_dir")"
   if [[ -n "$_layout" ]]; then
     echo "Using existing rechunked OCI layout: ${_layout}"
-    build_bib "${_layout}" "${TAG}" "$type" "image.toml" "$output_dir" "$bib_image"
+    build_bib "${_layout}" "${tag}" "$type" "image.toml" "$output_dir" "$bib_image"
     return 0
   fi
 
   # Fallback: build raw-img and export it ad-hoc to an OCI layout
-  build_image_or_skip "$BASE_IMAGE" "$BUILD_SCRIPT" "$CANONICAL_TAG" "$VARIANT_NAME" "$force_rebuild"
+  build_image_or_skip "$base_image" "$build_script" "$canonical_tag" "$variant" "$force_rebuild"
   # Keep the local <image>:<tag> ref resolvable for run_vm's local-image path
   # (cheap: same-storage ref, no copy)
-  podman tag localhost/raw-img "${TARGET_IMAGE}:${TAG}" 2>/dev/null || true
-  export_and_build_bib "localhost/raw-img" "${TAG}" "$type" "image.toml" "$output_dir" "$bib_image"
+  podman tag "$(image_ref raw-img)" "${target_image}:${tag}" 2>/dev/null || true
+  export_and_build_bib "$(image_ref raw-img)" "${tag}" "$type" "image.toml" "$output_dir" "$bib_image"
 }
 
 # ── VM execution ────────────────────────────────────────────────────────────
@@ -231,7 +250,7 @@ run_vm() {
   # shellcheck disable=SC2034
   local force_pull="${6:-0}"
   local clean="${7:-0}"
-  local cache_dir="${8:-$HOME/.cache/bazzite-nix}"
+  local cache_dir="${8:-$CACHE_DIR}"
   local bib_image="${9:?bib_image required}"
   local variant_name="${10:-}"
 
@@ -320,20 +339,26 @@ run_vm() {
 # ── VM build/run wrapper functions ──────────────────────────────────────────
 
 # Run a VM for a variant (resolves variant, then launches QEMU)
-# Usage: run_variant_vm <type> <variant_or_spec> [variants_config] [image_name]
+# Usage: run_variant_vm <type> <variant_or_spec> [variants_config] <image_name>
 #                          [output_dir] [force_pull] [clean] [cache_dir] [bib_image]
+# Usage: run_variant_vm <record_json> [options_json]
+# Record fields: variant, tag, target_image
+# Options: {"type":..,"output_dir":..,"force_pull":0|1,"clean":0|1,
+#           "cache_dir":..,"bib_image":..}
 run_variant_vm() {
-  local type="${1:?type required}"
-  local variant_or_spec="${2:?variant_or_spec required}"
-  local variants_config="${3:-.github/variants.json}"
-  local image_name="${4:-bazzite-nix}"
-  local output_dir="${5:-}"
-  local force_pull="${6:-0}"
-  local clean="${7:-0}"
-  local cache_dir="${8:-$HOME/.cache/bazzite-nix}"
-  local bib_image="${9:?bib_image required}"
-  local TARGET_IMAGE TAG VARIANT_NAME
-  eval "$(resolve_variant "$variant_or_spec" "$variants_config" "$image_name")"
-  run_vm "$TARGET_IMAGE" "${TAG}" "$type" "image.toml" "$output_dir" \
-    "$force_pull" "$clean" "$cache_dir" "$bib_image" "$VARIANT_NAME"
+  local record_json="${1:?record_json required}"
+  local options_json="${2:-}"
+
+  local variant tag target_image
+  local type output_dir force_pull clean cache_dir bib_image
+  IFS=$'\037' read -r variant tag target_image < <(jq -r '[.variant, .tag, .target_image] | join("\u001f")' <<<"$record_json")
+  IFS=$'\037' read -r type output_dir force_pull clean cache_dir bib_image < <(jq -r '[(.type // ""), (.output_dir // ""), (.force_pull // "0"), (.clean // "0"), (.cache_dir // ""), (.bib_image // "")] | join("\u001f")' <<<"$options_json")
+  [[ -n "$cache_dir" ]] || cache_dir="$CACHE_DIR"
+  if [[ -z "$type" || -z "$variant" ]]; then
+    echo "ERROR: type and record variant are required" >&2
+    return 1
+  fi
+
+  run_vm "$target_image" "$tag" "$type" "image.toml" "$output_dir" \
+    "$force_pull" "$clean" "$cache_dir" "$bib_image" "$variant"
 }

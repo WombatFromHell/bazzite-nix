@@ -31,6 +31,17 @@ readonly JUST_HELPERS_BUILD="scripts/build-helpers.bash"
 # Path to push/sign helpers (skopeo retry, cosign)
 readonly JUST_HELPERS_PUSH="scripts/push-helpers.bash"
 
+# Single home for one run's artifacts: variant check results, and per-variant
+# changelog/release files. check-variants.sh clears it at the start of a run.
+# Override ARTIFACTS_DIR to relocate a run; it must be a dedicated directory,
+# because clean_artifacts removes it.
+ARTIFACTS_DIR="${ARTIFACTS_DIR:-.artifacts}"
+if [[ "$ARTIFACTS_DIR" == "." || "$ARTIFACTS_DIR" == ".." || "$ARTIFACTS_DIR" == "/" ]]; then
+  echo "::error::ARTIFACTS_DIR must be a dedicated directory, not . .. or /"
+  exit 1
+fi
+export ARTIFACTS_DIR
+
 # shellcheck disable=SC1090
 source "${_parts_dir}/check-variants-registry.bash"
 # shellcheck disable=SC1090

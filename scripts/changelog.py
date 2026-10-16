@@ -8,22 +8,19 @@ from pathlib import Path
 import os
 
 
-# Registry prefix for skopeo inspect, derived from IMAGE_PREFIX env var.
-# IMAGE_PREFIX is set by the calling action as e.g. "ghcr.io/owner/repo".
-# We strip the repo name to get the registry + org, then prepend "docker://".
-def _registry_prefix():
+# Registry prefix for skopeo inspect, derived from IMAGE_PREFIX env var
+# (set by the caller as "<registry>/<package>").
+def registry_prefix() -> str:
     """Return skopeo-compatible registry prefix from IMAGE_PREFIX env var."""
     image_prefix = os.environ.get("IMAGE_PREFIX", "")
-    if image_prefix:
-        # "ghcr.io/owner/repo" → "docker://ghcr.io/owner/"
-        parts = image_prefix.rsplit("/", 1)
-        if len(parts) == 2:
-            return f"docker://{parts[0]}/"
-    # Fallback for direct invocation without IMAGE_PREFIX
-    return "docker://ghcr.io/wombatfromhell/"
+    registry, _, _ = image_prefix.rpartition("/")
+    if not registry:
+        raise ValueError(
+            "IMAGE_PREFIX must be set to <registry>/<package> "
+            "(for example ghcr.io/owner/name)"
+        )
+    return f"docker://{registry}/"
 
-
-REGISTRY = _registry_prefix()
 
 RETRIES = 3
 RETRY_WAIT = 5
@@ -63,7 +60,7 @@ CHANGELOG_TITLE = "{tag}: {pretty}"
 CHANGELOG_FORMAT = """\
 {handwritten}
 
-From previous `{target}` version `{prev}` there have been the following changes. **One package per new version shown.**
+{intro}
 
 ### Major packages
 | Name | Version |
@@ -102,14 +99,10 @@ BLACKLIST_VERSIONS = [
 ]
 
 
-def load_variants(variants_config: str | None = None) -> list[dict[str, Any]]:
-    """Load variant configuration from variants.json file."""
+def load_variants(variants_config: str) -> list[dict[str, Any]]:
+    """Load enabled variants from a variants.json file."""
     if not variants_config:
-        # Default images if no config provided
-        return [
-            {"name": "bazzite-nix", "suffix": ""},
-            {"name": "bazzite-nix-nvidia-open", "suffix": "-nvidia-open"},
-        ]
+        raise ValueError("variants config path is required")
 
     config_path = Path(variants_config)
     if not config_path.exists():
@@ -119,23 +112,18 @@ def load_variants(variants_config: str | None = None) -> list[dict[str, Any]]:
         data = json.load(f)
 
     variants = data.get("variants", [])
-    # Filter out disabled variants
     return [v for v in variants if not v.get("disabled", False)]
 
 
-def get_images(variants: list[dict[str, Any]] | None = None):
+def get_images(variants: list[dict[str, Any]], package: str):
     """Generate image names from variants config.
 
     Yields tuples of (image_name, base_type, desktop_environment).
-    If no variants provided, loads from default variants.json.
     """
-    if variants is None:
-        variants = load_variants()
-
     for variant in variants:
         name = variant["name"]
         suffix = variant.get("suffix", "")
-        img = f"bazzite-nix{suffix}"
+        img = f"{package}{suffix}"
 
         # Determine base type and DE from variant name/suffix
         if "deck" in name or "deck" in suffix:
@@ -151,16 +139,17 @@ def get_images(variants: list[dict[str, Any]] | None = None):
         yield img, base, de
 
 
-def get_manifests(target: str, variants: list[dict[str, Any]]):
+def get_manifests(target: str, variants: list[dict[str, Any]], package: str):
     out = {}
-    imgs = list(get_images(variants))
+    imgs = list(get_images(variants, package))
+    prefix = registry_prefix()
     for j, (img, _, _) in enumerate(imgs):
         output = None
         print(f"Getting {img}:{target} manifest ({j + 1}/{len(imgs)}).")
         for i in range(RETRIES):
             try:
                 output = subprocess.run(
-                    ["skopeo", "inspect", REGISTRY + img + ":" + target],
+                    ["skopeo", "inspect", prefix + img + ":" + target],
                     check=True,
                     stdout=subprocess.PIPE,
                 ).stdout
@@ -177,7 +166,7 @@ def get_manifests(target: str, variants: list[dict[str, Any]]):
     return out
 
 
-def get_tags(target: str, manifests: dict[str, Any]):
+def get_tags(target: str, manifests: dict[str, Any]) -> tuple[str | None, str]:
     tags = set()
 
     # Select random manifest to get reference tags from
@@ -202,7 +191,10 @@ def get_tags(target: str, manifests: dict[str, Any]):
                 tags.remove(tag)
 
     tags = list(sorted(tags))
-    assert len(tags) > 2, "No current and previous tags found"
+    assert tags, "No current and previous tags found"
+    # One version tag: this variant's first release, so there is nothing to diff.
+    if len(tags) == 1:
+        return None, tags[0]
     return tags[-2], tags[-1]
 
 
@@ -277,10 +269,9 @@ def is_nvidia(img: str, lts: bool):
 def get_package_groups(
     prev: dict[str, Any],
     manifests: dict[str, Any],
-    variants: list[dict[str, Any]] | None = None,
+    variants: list[dict[str, Any]],
+    package: str,
 ):
-    if variants is None:
-        variants = load_variants()
     common = set()
     others = {k: set() for k in OTHER_NAMES.keys()}
 
@@ -294,7 +285,7 @@ def get_package_groups(
 
     # Find common packages
     first = True
-    for img, base, de in get_images(variants):
+    for img, base, de in get_images(variants, package):
         if img not in pkg:
             continue
 
@@ -311,7 +302,7 @@ def get_package_groups(
     # Find other packages
     for t, other in others.items():
         first = True
-        for img, base, de in get_images(variants):
+        for img, base, de in get_images(variants, package):
             if img not in pkg:
                 continue
 
@@ -462,8 +453,9 @@ def generate_changelog(
     prev_manifests,
     manifests,
     variants: list[dict[str, Any]],
+    package: str,
 ):
-    common, others = get_package_groups(prev_manifests, manifests, variants)
+    common, others = get_package_groups(prev_manifests, manifests, variants, package)
     versions = get_versions(manifests)
     prev_versions = get_versions(prev_manifests)
 
@@ -492,12 +484,20 @@ def generate_changelog(
 
     changelog = CHANGELOG_FORMAT
 
+    if prev is None:
+        intro = f"First `{target}` release: `{curr}`."
+    else:
+        intro = (
+            f"From previous `{target}` version `{prev}` there have been the "
+            "following changes. **One package per new version shown.**"
+        )
+
     changelog = (
         changelog.replace(
             "{handwritten}", handwritten if handwritten else HANDWRITTEN_PLACEHOLDER
         )
+        .replace("{intro}", intro)
         .replace("{target}", target)
-        .replace("{prev}", prev)
         .replace("{curr}", curr)
     )
 
@@ -540,14 +540,15 @@ def generate_changelog(
             )
 
     changes = ""
-    common = calculate_changes(common, prev_versions, versions)
-    if common:
-        changes += COMMON_PAT.format(changes=common)
-    for k, v in others.items():
-        chg = calculate_changes(v, prev_versions, versions)
-        if chg:
-            changes += OTHER_NAMES[k].format(changes=chg)
-    changes += get_commits(upstream_tag(target, prev), upstream_tag(target, curr))
+    if prev is not None:
+        common = calculate_changes(common, prev_versions, versions)
+        if common:
+            changes += COMMON_PAT.format(changes=common)
+        for k, v in others.items():
+            chg = calculate_changes(v, prev_versions, versions)
+            if chg:
+                changes += OTHER_NAMES[k].format(changes=chg)
+        changes += get_commits(upstream_tag(target, prev), upstream_tag(target, curr))
 
     changelog = changelog.replace("{changes}", changes)
 
@@ -565,7 +566,12 @@ def main():
     parser.add_argument("--workdir", help="Git directory for commits")
     parser.add_argument("--handwritten", help="Handwritten changelog")
     parser.add_argument(
-        "--variants-config", help="Path to variants.json configuration file"
+        "--package",
+        required=True,
+        help="Package name the variants' suffixes attach to",
+    )
+    parser.add_argument(
+        "--variants-config", required=True, help="Path to variants.json"
     )
     args = parser.parse_args()
 
@@ -577,12 +583,17 @@ def main():
         target = "stable"
 
     variants = load_variants(args.variants_config)
-    manifests = get_manifests(target, variants)
+    manifests = get_manifests(target, variants, args.package)
     prev, curr = get_tags(target, manifests)
-    print(f"Previous tag: {prev}")
+    if prev is None:
+        print(f"No previous tag for {target}: first release")
+    else:
+        print(f"Previous tag: {prev}")
     print(f" Current tag: {curr}")
 
-    prev_manifests = get_manifests(prev, variants)
+    prev_manifests = {}
+    if prev is not None:
+        prev_manifests = get_manifests(prev, variants, args.package)
     title, changelog = generate_changelog(
         args.handwritten,
         target,
@@ -591,6 +602,7 @@ def main():
         prev_manifests,
         manifests,
         variants,
+        args.package,
     )
 
     print(f"Changelog:\n# {title}\n{changelog}")

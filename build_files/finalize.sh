@@ -8,5 +8,3 @@ rm -rf /var/tmp/* /var/cache/* /var/lib/dnf 2>/dev/null || true
 
 mkdir -p /var/tmp
 chmod -R 1777 /var/tmp
-
-ostree container commit

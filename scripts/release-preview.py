@@ -62,8 +62,8 @@ def main() -> None:
     parser.add_argument("image_ref", nargs="?", default="localhost/chunked-img")
     parser.add_argument(
         "--prev",
-        help="Previous release ref to diff against, e.g. "
-        "ghcr.io/wombatfromhell/bazzite-nix:latest",
+        help="Previous release ref to diff against, for example "
+        "ghcr.io/<owner>/<package>:latest",
     )
     args = parser.parse_args()
 

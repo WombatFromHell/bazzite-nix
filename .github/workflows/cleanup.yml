@@ -23,29 +23,15 @@ jobs:
     runs-on: ubuntu-26.04
     outputs:
       packages: ${{ steps.variants.outputs.packages }}
-      owner_type: ${{ steps.detect_owner.outputs.owner_type }}
-      registry_owner: ${{ steps.variants.outputs.registry_owner }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
-
-      - name: Detect owner type for API calls
-        id: detect_owner
-        run: |
-          if gh api "/orgs/${{ github.repository_owner }}" &>/dev/null; then
-            OWNER_TYPE="orgs"
-          else
-            OWNER_TYPE="users"
-          fi
-          echo "owner_type=${OWNER_TYPE}" >> "$GITHUB_OUTPUT"
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build package matrix
         id: variants
         run: |
           FILTER="${{ inputs.package_filter }}"
-          BASE="bazzite-nix"
+          BASE="${GITHUB_REPOSITORY#*/}"
           if [ -n "$FILTER" ]; then
             jq -r --arg base "$BASE" \
               '[.variants[] | ($base + (.suffix // "")) | ascii_downcase] | unique[]' \
@@ -62,11 +48,7 @@ jobs:
           echo "Packages to process:"
           cat /tmp/packages.txt
 
-          REPO_LC="${GITHUB_REPOSITORY#*/}"
-          {
-            echo "packages=$(jq -Rnc '[inputs]' < /tmp/packages.txt)"
-            echo "registry_owner=${REPO_LC,,}"
-          } >> "$GITHUB_OUTPUT"
+          echo "packages=$(jq -Rnc '[inputs]' < /tmp/packages.txt)" >> "$GITHUB_OUTPUT"
 
   cleanup-images:
     needs: [prepare]
@@ -85,13 +67,6 @@ jobs:
       packages: write
 
     steps:
-      - name: Set registry env
-        run: |
-          {
-            echo "REGISTRY_OWNER_LC=${{ needs.prepare.outputs.registry_owner }}"
-            echo "OWNER_TYPE=${{ needs.prepare.outputs.owner_type }}"
-          } >> "$GITHUB_ENV"
-
       - name: Cleanup container images
         uses: dataaxiom/ghcr-cleanup-action@v1
         with:

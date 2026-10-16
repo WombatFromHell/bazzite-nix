@@ -50,6 +50,6 @@ format_scripts() {
 list_available_variants() {
   local variants_config="${1:-.github/variants.json}"
   echo "Available variants:"
-  jq -r '.variants[] | select((.disabled // false) == false) | "  \(.name)  →  \(.base_image)  [\(.build_script // "build.sh")]"' \
+  jq -r '.variants[] | select(.disabled != true) | "  \(.name)  →  \(.base_image)  [\(.build_script // "build.sh")]"' \
     "$variants_config"
 }

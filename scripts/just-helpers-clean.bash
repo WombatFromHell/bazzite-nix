@@ -8,7 +8,8 @@ clean_artifacts() {
   find "$PWD" -maxdepth 1 -name "*_build*" -exec rm -rf {} \; 2>/dev/null || true
   rm -rf .pytest_cache .ruff_cache
   find "$PWD" -name "__pycache__" -type d -exec rm -rf {} \; 2>/dev/null || true
-  rm -f previous.manifest.json changelog.md output.env
+  rm -f previous.manifest.json
+  rm -rf -- "$ARTIFACTS_DIR"
   rm -rf output/
 }
 

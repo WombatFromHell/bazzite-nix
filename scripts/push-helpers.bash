@@ -47,28 +47,23 @@ run_with_retry() {
 
   local cmd=("$@")
 
-  local attempt output exit_code tmpfile
+  local attempt output exit_code tmpfile sink
   for attempt in $(seq 1 "$MAX_ATTEMPTS"); do
     echo "  ${label} (attempt ${attempt}/${MAX_ATTEMPTS})" >&2
 
     tmpfile=$(mktemp)
     set +e
-    if [[ -n "$stdin_data" ]]; then
-      if $stream; then
-        printf '%s' "$stdin_data" | "${cmd[@]}" 2>&1 | tee /dev/stderr >"$tmpfile"
-        exit_code=${PIPESTATUS[1]}
-      else
-        printf '%s' "$stdin_data" | "${cmd[@]}" >"$tmpfile" 2>&1
-        exit_code=$?
-      fi
+    if $stream; then
+      sink=/dev/stderr
     else
-      if $stream; then
-        "${cmd[@]}" 2>&1 | tee /dev/stderr >"$tmpfile"
-        exit_code=${PIPESTATUS[0]}
-      else
-        "${cmd[@]}" >"$tmpfile" 2>&1
-        exit_code=$?
-      fi
+      sink=/dev/null
+    fi
+    if [[ -n "$stdin_data" ]]; then
+      printf '%s' "$stdin_data" | "${cmd[@]}" 2>&1 | tee "$tmpfile" >&"$sink"
+      exit_code=${PIPESTATUS[1]}
+    else
+      "${cmd[@]}" 2>&1 | tee "$tmpfile" >&"$sink"
+      exit_code=${PIPESTATUS[0]}
     fi
     set -e
 
@@ -100,25 +95,8 @@ run_with_retry() {
   return 1
 }
 
-# ── convenience wrapper for skopeo copy ─────────────────────────────────────
-# Hardcodes authfile, streams output, and retries on transient errors.
-
-skopeo_copy_with_retry() {
-  local src="$1"
-  local dst="$2"
-  shift 2
-  local extra_flags=("$@")
-
-  run_with_retry "skopeo copy ${src} → ${dst}" \
-    --stream \
-    skopeo copy \
-    --authfile /tmp/skopeo-auth/auth.json \
-    "${extra_flags[@]}" \
-    "${src}" "${dst}"
-}
-
 # ── push image and additional tags ──────────────────────────────────────────
-# Usage: push_image_with_tags <source_ref> <tags_csv> <base_img>
+# Usage: push_image_with_tags <source_ref> <tags_csv> <base_img> <authfile>
 # Writes to stderr (logs/groups); prints to stdout for $GITHUB_OUTPUT:
 #   remote_digest=<digest>
 #   remote_digest_ref=<ref>
@@ -127,6 +105,7 @@ push_image_with_tags() {
   local source_ref="$1"
   local tags_csv="$2"
   local base_img="$3"
+  local authfile="$4"
 
   IFS=',' read -r -a TAGS_ARR <<<"$tags_csv"
 
@@ -137,7 +116,7 @@ push_image_with_tags() {
   # handles chunked-img/raw-img source refs alike.
   run_with_retry "podman push docker://${base_img}:${TAGS_ARR[0]}" \
     --stream \
-    podman push --authfile /tmp/skopeo-auth/auth.json \
+    podman push --authfile "$authfile" \
     "${source_ref#containers-storage:}" \
     "docker://${base_img}:${TAGS_ARR[0]}"
   echo "::endgroup::" >&2
@@ -145,7 +124,7 @@ push_image_with_tags() {
   echo "::group::Inspect primary digest" >&2
   local remote_digest
   remote_digest=$(skopeo inspect \
-    --authfile /tmp/skopeo-auth/auth.json \
+    --authfile "$authfile" \
     --format='{{.Digest}}' \
     "docker://${base_img}:${TAGS_ARR[0]}")
 
@@ -170,7 +149,10 @@ push_image_with_tags() {
   fi
   for tag in "${extra_tags[@]}"; do
     echo "  → ${base_img}:${tag}" >&2
-    skopeo_copy_with_retry \
+    run_with_retry "skopeo copy docker://${remote_digest_ref} → docker://${base_img}:${tag}" \
+      --stream \
+      skopeo copy \
+      --authfile "$authfile" \
       "docker://${remote_digest_ref}" \
       "docker://${base_img}:${tag}"
   done

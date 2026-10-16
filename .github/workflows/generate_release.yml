@@ -32,14 +32,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           source scripts/just-helpers.bash
-          VARIANTS=$(resolve_release_variants "${{ inputs.variants }}" ".github/variants.json")
-          [ -n "$VARIANTS" ] || { echo "::error::No valid variants to process"; exit 1; }
-          MATRIX_JSON=$(echo "$VARIANTS" | jq -R . | jq -sc .)
-          {
-            echo "matrix<<EOF"
-            echo "$MATRIX_JSON"
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
+          MATRIX_JSON=$(release_matrix_json "${{ inputs.variants }}" ".github/variants.json")
+          if [ "$MATRIX_JSON" == "[]" ]; then
+            echo "::error::No valid variants to process"
+            exit 1
+          fi
+          echo "matrix=$MATRIX_JSON" >> "$GITHUB_OUTPUT"
           echo "Resolved variants: $MATRIX_JSON"
 
   generate-release:

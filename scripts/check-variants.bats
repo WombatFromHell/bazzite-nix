@@ -41,42 +41,35 @@ teardown() {
 
 @test "generate_tags default fallback mirrors the unstable variant" {
   local out
-  out=$(generate_tags "stable" "44.20260520" "false" "" "")
+  out=$(generate_tags "stable" "44.20260520" "false" "")
   [ "$out" = "stable-44.20260520,stable-44,stable" ]
 }
 
 @test "generate_tags appends latest last" {
   local out
-  out=$(generate_tags "testing" "44.20260520" "true" "" "")
+  out=$(generate_tags "testing" "44.20260520" "true" "")
   [ "$out" = "testing-44.20260520,testing-44,testing,latest" ]
 }
 
 @test "generate_tags expands tags_json placeholders" {
   local tags_json='{"branch":"custom","versioned":["{branch}-{canonical}","{branch}-{major}-{canonical}"]}'
   local out
-  out=$(generate_tags "unstable" "44.20260520.1" "false" "$tags_json" "")
+  out=$(generate_tags "unstable" "44.20260520.1" "false" "$tags_json")
   [ "$out" = "custom-44.20260520.1,custom-44-44.20260520.1" ]
 }
 
 @test "generate_tags defaults tags branch to base image tag" {
   local tags_json='{"versioned":["{branch}-{canonical}"]}'
   local out
-  out=$(generate_tags "unstable" "44.20260520.1" "false" "$tags_json" "")
+  out=$(generate_tags "unstable" "44.20260520.1" "false" "$tags_json")
   [ "$out" = "unstable-44.20260520.1" ]
 }
 
 @test "generate_tags skips sha256 placeholders when digest is empty" {
   local tags_json='{"versioned":["{branch}-{canonical}","{branch}-{sha256}"]}'
   local out
-  out=$(generate_tags "unstable" "44.20260520.1" "false" "$tags_json" "")
+  out=$(generate_tags "unstable" "44.20260520.1" "false" "$tags_json")
   [ "$out" = "unstable-44.20260520.1" ]
-}
-
-@test "generate_tags resolves sha256 placeholder when digest is given" {
-  local tags_json='{"versioned":["{branch}-{sha256}"]}'
-  local out
-  out=$(generate_tags "unstable" "44.20260520.1" "false" "$tags_json" "abc123")
-  [ "$out" = "unstable-abc123" ]
 }
 
 # ── extract_image_metadata ──────────────────────────────────────────────────

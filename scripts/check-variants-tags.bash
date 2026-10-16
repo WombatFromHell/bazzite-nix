@@ -91,8 +91,15 @@ compute_canonical_tag() {
   echo "$canonical $collision_detected"
 }
 
+# Does this tag template want the image digest, which push resolves later?
+# Usage: tag_needs_digest <tag_template>
+tag_needs_digest() {
+  local template="${1:?tag template required}"
+  [[ "$template" == *"{sha256}"* ]]
+}
+
 # ── generate tags ───────────────────────────────────────────────────────────
-# Usage: generate_tags <base_image_tag> <canonical> <latest> <tags_json> <digest>
+# Usage: generate_tags <base_image_tag> <canonical> <latest> <tags_json>
 # Generates comma-separated tags based on configuration.
 # Supports {canonical}, {branch}, {major}, {sha256} placeholders in tags_json.versioned.
 
@@ -101,7 +108,6 @@ generate_tags() {
   local canonical="$2"
   local latest="$3"
   local tags_json="$4"
-  local digest="${5:-}"
   local major="${canonical%%.*}"
   local tags_array=()
 
@@ -116,9 +122,7 @@ generate_tags() {
         versioned_tag="${versioned_tag//\{canonical\}/$canonical}"
         versioned_tag="${versioned_tag//\{branch\}/$branch}"
         versioned_tag="${versioned_tag//\{major\}/$major}"
-        if [[ -n "$digest" ]]; then
-          versioned_tag="${versioned_tag//\{sha256\}/$digest}"
-        elif [[ "$versioned_tag" == *"{sha256}"* ]]; then
+        if tag_needs_digest "$versioned_tag"; then
           continue
         fi
         tags_array+=("$versioned_tag")
@@ -146,7 +150,7 @@ generate_tags() {
 resolve_variant() {
   local variant_or_spec="${1:?variant_or_spec required}"
   local variants_config="${2:-.github/variants.json}"
-  local image_name="${3:-bazzite-nix}"
+  local image_name="${3:?image_name required}"
   local force_build="${4:-0}"
   local registry="${5:-}"
   local spec row base_image build_script suffix image_name_resolved tag canonical
@@ -165,7 +169,7 @@ resolve_variant() {
   if [[ "$spec" == *"/"* ]] || [[ "$spec" == *":"* ]]; then
     tag="${spec##*:}"
     build_script=$(jq -r --arg bi "$spec" '
-            .variants[] | select(.base_image == $bi and (.disabled // false) == false)
+            .variants[] | select(.base_image == $bi and .disabled != true)
             | (.build_script // "build.sh")
         ' "$variants_config" | head -1)
     [[ -z "$build_script" ]] && build_script="build.sh"
@@ -173,7 +177,7 @@ resolve_variant() {
     canonical="$(get_parent_version "$spec")" || canonical="$tag"
     # No variants.json entry to source a tags template from — single-tag fallback
     tags_csv="$tag"
-    echo "TARGET_IMAGE=\"localhost/$image_name\""
+    echo "TARGET_IMAGE=\"$(image_ref "$image_name")\""
     echo "TAG=\"$tag\""
     echo "BASE_IMAGE=\"$spec\""
     echo "BUILD_SCRIPT=\"$build_script\""
@@ -184,14 +188,11 @@ resolve_variant() {
   fi
 
   # Look up variant by name
-  row=$(jq -r --arg n "$spec" '
-        .variants[]
-        | select(.name == $n and (.disabled // false) == false)
-    ' "$variants_config")
-  if [[ -z "$row" ]]; then
+  row=$(variant_record "$spec" "$variants_config" 2>/dev/null) || row=""
+  if [[ -z "$row" || "$(jq -r '.disabled' <<<"$row")" == "true" ]]; then
     echo "ERROR: Unknown or disabled variant: $spec" >&2
     echo "Available variants:" >&2
-    jq -r '.variants[] | select((.disabled // false) == false) | "  " + .name' "$variants_config" >&2
+    enabled_variant_names "$variants_config" | sed 's/^/  /' >&2
     return 1
   fi
 
@@ -216,9 +217,10 @@ resolve_variant() {
   if [[ -n "$registry_prefix" ]]; then
     registry_prefix="${registry_prefix}/${image_name_resolved}"
   elif [[ "$force_build" == "true" ]]; then
-    local owner="${GITHUB_REPOSITORY_OWNER:-${repo_organization:-}}"
+    local owner
+    owner="$(registry_owner)"
     if [[ -n "$owner" ]]; then
-      registry_prefix="ghcr.io/${owner,,}/${image_name_resolved}"
+      registry_prefix="$(registry_url "$owner")/${image_name_resolved}"
     else
       echo "::warning::force_build collision handling needs GITHUB_REPOSITORY_OWNER (or a registry arg); skipping collision check" >&2
     fi
@@ -236,9 +238,9 @@ resolve_variant() {
   # variant .name into compute_canonical_tag/generate_tags.
   # No digest is passed: {sha256} tags are resolved at push time from the built
   # image's digest (mirrors check-variants.sh).
-  tags_csv=$(generate_tags "$spec" "$canonical" "$latest" "$tags_json" "")
+  tags_csv=$(generate_tags "$spec" "$canonical" "$latest" "$tags_json")
 
-  echo "TARGET_IMAGE=\"localhost/$image_name_resolved\""
+  echo "TARGET_IMAGE=\"$(image_ref "$image_name_resolved")\""
   echo "TAG=\"${spec}\""
   echo "BASE_IMAGE=\"${base_image}\""
   echo "BUILD_SCRIPT=\"${build_script}\""

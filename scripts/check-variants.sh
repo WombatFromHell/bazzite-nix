@@ -12,9 +12,10 @@
 #   FORCE_BUILD        - "true" to force rebuild regardless of digest
 #   VARIANTS_CONFIG    - Path to variants.json config file
 #   VARIANTS_OVERRIDE  - Comma-delimited list of variant names to build (overrides default selection)
+#   ARTIFACTS_DIR      - Directory for this run's artifacts (set by just-helpers.bash)
 #
 # Output:
-#   Writes variant check results to /tmp/variants_results.json
+#   Writes variant check results to $ARTIFACTS_DIR/variants_results.json
 #
 
 # shellcheck disable=SC2153
@@ -31,7 +32,7 @@ source "${SCRIPT_DIR}/check-variants-registry.bash"
 source "${SCRIPT_DIR}/check-variants-tags.bash"
 
 # Validate required environment variables
-for var in REGISTRY REPO FORCE_BUILD; do
+for var in REGISTRY REPO FORCE_BUILD ARTIFACTS_DIR; do
   if [[ -z "${!var+x}" ]]; then
     echo "::error::${var} environment variable must be set"
     exit 1
@@ -41,6 +42,15 @@ done
 # Set defaults
 VARIANTS_CONFIG="${VARIANTS_CONFIG:-.github/variants.json}"
 
+# Start the run in a clean artifact directory, so no file from a previous run
+# can be read as this run's result.
+if [[ "$ARTIFACTS_DIR" == "." || "$ARTIFACTS_DIR" == ".." || "$ARTIFACTS_DIR" == "/" ]]; then
+  echo "::error::ARTIFACTS_DIR must be a dedicated directory, not . .. or /"
+  exit 1
+fi
+rm -rf -- "$ARTIFACTS_DIR"
+mkdir -p "$ARTIFACTS_DIR"
+
 # Validate variants config file exists
 if [[ ! -f "$VARIANTS_CONFIG" ]]; then
   echo "::error::Variants config file not found: $VARIANTS_CONFIG"
@@ -49,6 +59,9 @@ fi
 
 # Ensure registry is lowercase (GHCR requirement)
 REGISTRY="${REGISTRY,,}"
+
+# The package name inside the namespace (GHCR requires lowercase)
+REPO="$(package_repo "$REPO")"
 
 # Parse variants override list if provided
 override_variants=()
@@ -65,17 +78,19 @@ if [[ -n "${VARIANTS_OVERRIDE:-}" ]]; then
     if [[ -z "$requested_variant" ]]; then
       continue
     fi
-    FOUND=$(jq -r --arg v "$requested_variant" '.variants[] | select(.name == $v) | .name' "$VARIANTS_CONFIG")
-    if [[ -z "$FOUND" ]]; then
-      AVAILABLE=$(jq -r '.variants[].name' "$VARIANTS_CONFIG" | paste -sd ', ' -)
+    if ! variant_record "$requested_variant" "$VARIANTS_CONFIG" >/dev/null 2>&1; then
+      AVAILABLE=$(variant_names "$VARIANTS_CONFIG" | paste -sd ', ' -)
       echo "::error::Variant '$requested_variant' not found in $VARIANTS_CONFIG. Available: $AVAILABLE"
       exit 1
     fi
   done
 fi
 
-# Initialize results array
+# Initialize results array; the file starts as [] so a run killed mid-loop still
+# leaves valid JSON for aggregate_variants.
 results=()
+results_file="$ARTIFACTS_DIR/variants_results.json"
+echo "[]" >"$results_file"
 
 # Get variant count
 variant_count=$(jq '.variants | length' "$VARIANTS_CONFIG")
@@ -132,7 +147,6 @@ for ((i = 0; i < variant_count; i++)); do
     exit 1
   fi
   parent_version=$(echo "$metadata" | awk '{print $1}')
-  digest=$(echo "$metadata" | awk '{print $2}')
 
   # Parse base image for output naming
   base_image_tag="${base_image##*:}"
@@ -147,18 +161,10 @@ for ((i = 0; i < variant_count; i++)); do
 
   # Generate tags (no digest — {sha256} tags are resolved at push time from the
   # built image's digest, not the upstream base image's)
-  tags=$(generate_tags "$variant" "$canonical" "$latest" "$tags_json" "")
-
-  # Find previous build reference for rechunk
-  prev_ref=""
-  if prev_ref=$(find_prev_ref "$prefix" "$variant" "$canonical" "$tags_json"); then
-    echo "::debug::Found previous build: ${prev_ref}" >&2
-  else
-    echo "::debug::No previous build found for ${prefix}" >&2
-  fi
+  tags=$(generate_tags "$variant" "$canonical" "$latest" "$tags_json")
 
   # Check if build is needed
-  check_output=$(check_build_needed "$prefix" "$canonical" "$variant" "$base_image_tag" "$parent_version" "$FORCE_BUILD") || {
+  check_output=$(check_build_needed "$prefix" "$variant" "$base_image_tag" "$parent_version" "$FORCE_BUILD") || {
     echo "::endgroup::"
     continue
   }
@@ -173,10 +179,8 @@ for ((i = 0; i < variant_count; i++)); do
     --arg build_script "$build_script" \
     --arg suffix "$suffix" \
     --arg parent_version "$parent_version" \
-    --arg digest "$digest" \
     --arg canonical_tag "$canonical" \
     --arg tags "$tags" \
-    --arg prev_ref "$prev_ref" \
     --arg collision_detected "$collision_detected" \
     '{
         variant: $variant,
@@ -184,10 +188,8 @@ for ((i = 0; i < variant_count; i++)); do
         build_script: $build_script,
         suffix: $suffix,
         parent_version: $parent_version,
-        digest: $digest,
         canonical_tag: $canonical_tag,
         tags: $tags,
-        prev_ref: $prev_ref,
         collision_detected: ($collision_detected == "true"),
         needs_build: true
     }')
@@ -198,11 +200,7 @@ for ((i = 0; i < variant_count; i++)); do
   echo "::endgroup::"
 done
 
-# Write all results to single temp file
-if [[ ${#results[@]} -eq 0 ]]; then
-  echo "[]" >/tmp/variants_results.json
-else
-  printf '%s\n' "${results[@]}" | jq -s '.' >/tmp/variants_results.json
-fi
+# Write all results to the run artifact directory
+printf '%s\n' "${results[@]}" | jq -s '.' >"$results_file"
 
-echo "::notice::Results written to /tmp/variants_results.json"
+echo "::notice::Results written to $results_file"

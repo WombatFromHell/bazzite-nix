@@ -6,6 +6,56 @@
 MAX_RETRIES=3
 RETRY_DELAY=10
 
+# The image package namespace: owner-derived, lowercase (ADR 0006).
+# Usage: registry_url <owner>
+registry_url() {
+  echo "ghcr.io/${1,,}"
+}
+
+# The owner half of the ghcr namespace: CI's GITHUB_REPOSITORY_OWNER, else the
+# Justfile's repo_organization.
+# Usage: registry_owner
+registry_owner() {
+  echo "${GITHUB_REPOSITORY_OWNER:-${repo_organization:-}}"
+}
+
+# The package name inside that namespace: the repository name, lowercase, with
+# the owner half stripped when a full owner/name repository was given. Falls
+# back to GITHUB_REPOSITORY when no repository is passed.
+# Usage: package_repo [repo]
+package_repo() {
+  local repo="${1:-${GITHUB_REPOSITORY:-}}"
+  repo="${repo#*/}"
+  echo "${repo,,}"
+}
+
+# ── variant lookup ────────────────────────────────────────────────────────
+# The one place that answers "does this variant exist": its record, with the
+# disabled flag filled in so callers decide the policy. Unknown names fail,
+# listing the enabled ones.
+# Usage: variant_record <name> [variants_config]
+variant_record() {
+  local variant="${1:?variant required}"
+  local variants_config="${2:-.github/variants.json}"
+  local record
+  record=$(jq -c --arg n "$variant" '.variants[] | select(.name == $n) | . + {disabled: (.disabled // false), variant: .name}' "$variants_config")
+  if [[ -z "$record" ]]; then
+    echo "Variant '${variant}' not found in ${variants_config}. Available: $(enabled_variant_names "$variants_config" | paste -sd ', ' -)" >&2
+    return 1
+  fi
+  printf '%s\n' "$record"
+}
+
+# Variant names, one per line; the enabled form skips disabled variants.
+# Usage: variant_names [variants_config]
+variant_names() {
+  jq -r '.variants[].name' "${1:-.github/variants.json}"
+}
+
+enabled_variant_names() {
+  jq -r '.variants[] | select(.disabled != true) | .name' "${1:-.github/variants.json}"
+}
+
 # ── inspect image with retry ────────────────────────────────────────────────
 # Usage: inspect_image_with_retry <image_ref>
 # Outputs: Echoes skopeo inspect JSON on success
@@ -87,102 +137,6 @@ find_latest_versioned_tag() {
   return 1
 }
 
-# ── find previous build reference ───────────────────────────────────────────
-# Usage: find_prev_ref <prefix> <base_image_tag> <canonical_tag> <tags_json>
-# Finds the previous build reference for rechunk using canonical tag format.
-# Prints: Full image ref (registry/image:tag) on success
-# Returns: 0 on success, 1 on failure
-
-find_prev_ref() {
-  local prefix="$1"
-  local base_image_tag="$2"
-  local canonical_tag="$3"
-  local tags_json="$4"
-  local available_tags
-
-  available_tags=$(skopeo list-tags "docker://${prefix}" 2>/dev/null | jq -r '.Tags[]' 2>/dev/null) || {
-    echo "::debug::Failed to list tags for ${prefix}" >&2
-    return 1
-  }
-
-  # If tags config exists with versioned patterns, use them
-  if [[ -n "$tags_json" && "$tags_json" != "null" && "$tags_json" != "{}" ]]; then
-    local versioned_patterns
-    versioned_patterns=$(echo "$tags_json" | jq -r '.versioned[]?' 2>/dev/null)
-    local best_match="" best_version=""
-
-    # First pass: patterns containing {canonical}
-    while IFS= read -r pattern; do
-      if [[ -n "$pattern" && "$pattern" == *"{canonical}"* ]]; then
-        local resolved="${pattern//\{branch\}/$base_image_tag}"
-        local prefix_part="${resolved%%\{*}"
-        local suffix_part="${resolved##*\}}"
-
-        while IFS= read -r tag; do
-          if [[ "$tag" == "${prefix_part}"* && "$tag" == *"${suffix_part}" ]]; then
-            local extracted="${tag#"${prefix_part}"}"
-            extracted="${extracted%"${suffix_part}"}"
-            if [[ -n "$extracted" && "$extracted" < "$canonical_tag" ]]; then
-              if [[ -z "$best_version" || "$extracted" > "$best_version" ]]; then
-                best_version="$extracted"
-                best_match="$tag"
-              fi
-            fi
-          fi
-        done <<<"$available_tags"
-      fi
-    done <<<"$versioned_patterns"
-
-    if [[ -n "$best_match" ]]; then
-      echo "${prefix}:${best_match}"
-      return 0
-    fi
-
-    # Second pass: other patterns
-    while IFS= read -r pattern; do
-      if [[ -n "$pattern" && "$pattern" != *"{canonical}"* ]]; then
-        local resolved="${pattern//\{branch\}/$base_image_tag}"
-        while IFS= read -r tag; do
-          if [[ "$tag" == "$resolved" ]]; then
-            echo "${prefix}:${tag}"
-            return 0
-          fi
-        done <<<"$available_tags"
-      fi
-    done <<<"$versioned_patterns"
-  fi
-
-  # Fallback: {branch}-{version} where version < canonical
-  local best_prev_tag="" best_prev_version=""
-
-  while IFS= read -r tag; do
-    if [[ "$tag" == "${base_image_tag}-"* ]]; then
-      local tag_version="${tag#"${base_image_tag}"-}"
-      if [[ "$tag_version" < "$canonical_tag" ]]; then
-        if [[ -z "$best_prev_version" || "$tag_version" > "$best_prev_version" ]]; then
-          best_prev_version="$tag_version"
-          best_prev_tag="$tag"
-        fi
-      fi
-    fi
-  done <<<"$available_tags"
-
-  if [[ -n "$best_prev_tag" ]]; then
-    echo "${prefix}:${best_prev_tag}"
-    return 0
-  fi
-
-  # Last fallback: branch tag
-  while IFS= read -r tag; do
-    if [[ "$tag" == "$base_image_tag" ]]; then
-      echo "${prefix}:${tag}"
-      return 0
-    fi
-  done <<<"$available_tags"
-
-  return 1
-}
-
 # Decide build-needed from a fetched parent_version. Prints the REASON= line;
 # returns 0 (build needed) if it differs from upstream, 1 (skip) if identical.
 # Callers pass a non-empty local_version (the "no usable label" case is the
@@ -206,17 +160,17 @@ version_check() {
 }
 
 # ── check build needed ──────────────────────────────────────────────────────
-# Usage: check_build_needed <prefix> <canonical> <variant_name> <base_image_tag> <upstream_parent_version> <force_build>
+# Usage: check_build_needed <prefix> <variant_name> <base_image_tag> <upstream_parent_version> <force_build>
 # Checks if build is needed for this variant.
 # Returns: 0 if build needed, 1 if skip.
 # Prints: REASON=<reason> to stdout (can be eval'd)
 
 check_build_needed() {
   local prefix="$1"
-  local variant_name="$3"
-  local base_image_tag="$4"
-  local upstream_parent_version="$5"
-  local force_build="$6"
+  local variant_name="$2"
+  local base_image_tag="$3"
+  local upstream_parent_version="$4"
+  local force_build="$5"
 
   if [[ "$force_build" == "true" ]]; then
     echo "REASON=\"Force build requested\""

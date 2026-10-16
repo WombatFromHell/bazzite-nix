@@ -10,7 +10,7 @@ setup() {
 
 # ── sudo credential caching ─────────────────────────────────────────────────
 
-@test "sudo_cache validates and sudo_refresh refreshes non-interactively" {
+@test "sudo_cache primes the credential cache" {
   local log
   log="$(mktemp)"
   sudo() {
@@ -21,9 +21,7 @@ setup() {
   export LOG="$log"
 
   sudo_cache
-  sudo_refresh
   grep -q '^sudo -v$' "$log"
-  grep -q '^sudo -n true$' "$log"
 }
 
 # ── build_image_or_skip ─────────────────────────────────────────────────────
@@ -53,8 +51,6 @@ setup() {
 # ── extract_image_info ──────────────────────────────────────────────────────
 
 @test "extract_image_info reads kernel and manifest in one podman run" {
-  unset GITHUB_OUTPUT
-
   # Mock sudo to exec through, and podman to serve both files at once.
   sudo() { "$@"; }
   export -f sudo
@@ -66,6 +62,21 @@ EOF
   }
   export -f podman
 
+  local output
+  output=$(extract_image_info)
+  echo "$output" | grep -q '^KERNEL_VERSION=6.19.8-400.fc41.x86_64$'
+  echo "$output" | grep -q '^MANIFEST_PACKAGES=1$'
+}
+
+@test "extract_image_info prints the same assignments when GITHUB_OUTPUT is set" {
+  GITHUB_OUTPUT="$(mktemp)"
+  podman() {
+    cat <<'EOF'
+6.19.8-400.fc41.x86_64
+{"packages":{"kernel":"6.19.8"}}
+EOF
+  }
+  export -f podman
   local output
   output=$(extract_image_info)
   echo "$output" | grep -q '^KERNEL_VERSION=6.19.8-400.fc41.x86_64$'
@@ -97,11 +108,11 @@ EOF
   export -f buildah
   export LOG="$log"
 
-  # buildah commit digests must not leak to stdout (build_variant_core evals
+  # buildah commit digests must not leak to stdout (the build sequence evals
   # this function's stdout, so a stray commit digest would be executed).
   run relabel_image "$labels_file" "6.19.8-400.fc41.x86_64"
   [ "$status" -eq 0 ]
-  run ! echo "$output" | grep -q "sha256:deadbeef"
+  [[ "$output" != *"sha256:deadbeef"* ]]
   # progress echoes go to stderr
   echo "$output" | grep -q "Relabeling raw-img: clearing inherited labels..."
   echo "$output" | grep -q "Relabeling raw-img: applying 4 labels and annotations..."
@@ -177,8 +188,6 @@ EOF
 # ── extract_final_ref ───────────────────────────────────────────────────────
 
 @test "extract_final_ref digs from single podman image inspect" {
-  unset GITHUB_OUTPUT
-
   sudo() { "$@"; }
   export -f sudo
   podman() {
@@ -188,6 +197,21 @@ EOF
   }
   export -f podman
 
+  local output
+  output=$(extract_final_ref "latest")
+  echo "$output" | grep -q '^SOURCE_REF=containers-storage:localhost/chunked-img:latest$'
+  echo "$output" | grep -q '^FULL_BUILD_DIGEST=sha256:abc123$'
+  echo "$output" | grep -q '^BUILD_DIGEST=abc123$'
+}
+
+@test "extract_final_ref prints the same assignments when GITHUB_OUTPUT is set" {
+  GITHUB_OUTPUT="$(mktemp)"
+  podman() {
+    if [[ "$1" == "image" && "$2" == "inspect" ]]; then
+      echo "sha256:abc123"
+    fi
+  }
+  export -f podman
   local output
   output=$(extract_final_ref "latest")
   echo "$output" | grep -q '^SOURCE_REF=containers-storage:localhost/chunked-img:latest$'

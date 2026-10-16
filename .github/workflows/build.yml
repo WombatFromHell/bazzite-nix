@@ -50,9 +50,10 @@ jobs:
       - name: Prepare refs
         id: refs
         run: |
+          source scripts/check-variants-registry.bash
           {
-            echo "registry=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}"
-            echo "repo=${GITHUB_REPOSITORY#*/}"
+            echo "registry=$(registry_url "$GITHUB_REPOSITORY_OWNER")"
+            echo "repo=$(package_repo)"
             echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           } >> "$GITHUB_OUTPUT"
 
@@ -106,15 +107,14 @@ jobs:
         id: build
         shell: bash
         run: |
-          just ci-pipeline \
-            "${{ matrix.variant_data.variant }}" \
-            "${{ matrix.variant_data.base_image }}" \
-            "${{ matrix.variant_data.build_script || 'build.sh' }}" \
-            "${{ matrix.variant_data.canonical_tag }}" \
-            "${{ needs.check_and_aggregate.outputs.date }}" \
-            "${{ needs.check_and_aggregate.outputs.image_desc }}" \
-            "${{ matrix.variant_data.parent_version }}" \
-            "1"
+          RECORD=$(jq -c \
+            --arg date "${{ needs.check_and_aggregate.outputs.date }}" \
+            --arg image_desc "${{ needs.check_and_aggregate.outputs.image_desc }}" \
+            --arg repo_owner "${{ github.repository_owner }}" \
+            --arg repo_name "${{ env.IMAGE_NAME }}" \
+            '. + {date: $date, image_desc: $image_desc, repo_owner: $repo_owner, repo_name: $repo_name, version_label: .parent_version}' \
+            <<< '${{ toJSON(matrix.variant_data) }}')
+          just ci-pipeline "$RECORD" '{"rechunk":1}'
 
       - name: Install Cosign
         uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
@@ -126,57 +126,51 @@ jobs:
           GITHUB_ACTOR: ${{ github.actor }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           SIGNING_SECRET: ${{ secrets.SIGNING_SECRET }}
+          REGISTRY: ${{ needs.check_and_aggregate.outputs.registry }}
+          REPO: ${{ needs.check_and_aggregate.outputs.repo }}
+          DATE: ${{ needs.check_and_aggregate.outputs.date }}
         run: |
-          just push \
-            "${{ steps.build.outputs.source_ref }}" \
-            "${{ matrix.variant_data.tags }}" \
-            "${{ needs.check_and_aggregate.outputs.registry }}" \
-            "${{ needs.check_and_aggregate.outputs.repo }}" \
-            "${{ matrix.variant_data.suffix }}" \
-            "${{ matrix.variant_data.variant }}" \
-            "${{ needs.check_and_aggregate.outputs.date }}" \
-            "${{ matrix.variant_data.parent_version }}"
+          RECORD='${{ steps.build.outputs.record }}'
+          OPTIONS=$(jq -cn --arg registry "$REGISTRY" --arg repo "$REPO" --arg date "$DATE" '{registry: $registry, repo: $repo, date: $date}')
+          just push "$RECORD" "$OPTIONS"
 
-  collect_build_results:
+  collect_release_variants:
     needs: [check_and_aggregate, build_push]
     if: needs.check_and_aggregate.outputs.any_builds_needed == 'true'
     runs-on: ubuntu-26.04
     outputs:
-      successful_variants: ${{ steps.collect.outputs.successful_variants }}
-      any_successful: ${{ steps.collect.outputs.any_successful }}
-      registry: ${{ needs.check_and_aggregate.outputs.registry }}
-      repo: ${{ needs.check_and_aggregate.outputs.repo }}
+      matrix: ${{ steps.collect.outputs.matrix }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
 
-      - name: Collect successful builds
+      - name: Collect variants to release
         id: collect
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           source scripts/just-helpers.bash
-          JOBS=$(gh run view "${{ github.run_id }}" --repo "${{ github.repository }}" --json jobs)
-          collect_successful_builds "$JOBS"
+          BUILT_VARIANTS=$(echo '${{ needs.check_and_aggregate.outputs.variants_to_build }}' | jq -r '[.[].variant] | join(",")')
+          MATRIX_JSON=$(release_matrix_json "$BUILT_VARIANTS" "${{ env.VARIANTS_CONFIG }}")
+          echo "matrix=$MATRIX_JSON" >> "$GITHUB_OUTPUT"
+          echo "Variants built this run with something to release: $MATRIX_JSON"
 
   generate_release:
-    needs: [check_and_aggregate, build_push, collect_build_results]
+    needs: [check_and_aggregate, build_push, collect_release_variants]
     if: |
-      needs.collect_build_results.outputs.any_successful == 'true' &&
+      needs.collect_release_variants.outputs.matrix != '[]' &&
       (github.event.inputs.generate_release == 'true' || github.event_name == 'schedule')
-    name: Generate Release ${{ matrix.variant.variant }}
+    name: Generate Release ${{ matrix.variant }}
     runs-on: ubuntu-26.04
     permissions:
       contents: write
 
     concurrency:
-      group: generate-release-${{ matrix.variant.variant }}-${{ github.ref }}
+      group: generate-release-${{ matrix.variant }}-${{ github.ref }}
       cancel-in-progress: false
 
     strategy:
       fail-fast: false
       matrix:
-        variant: ${{ fromJson(needs.collect_build_results.outputs.successful_variants) }}
+        variant: ${{ fromJson(needs.collect_release_variants.outputs.matrix) }}
 
     steps:
       - name: Checkout
@@ -193,4 +187,4 @@ jobs:
         id: release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: just release "${{ matrix.variant.variant }}" "" "${{ env.VARIANTS_CONFIG }}" true
+        run: just release "${{ matrix.variant }}" "" "${{ env.VARIANTS_CONFIG }}" true

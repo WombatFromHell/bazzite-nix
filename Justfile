@@ -1,3 +1,6 @@
+# Every recipe runs in bash with these flags; recipes no longer repeat them.
+set shell := ["bash", "-euo", "pipefail", "-c"]
+
 export repo_organization := env("GITHUB_REPOSITORY_OWNER", "wombatfromhell")
 export image_name := env("IMAGE_NAME", "bazzite-nix")
 export image_desc := env("IMAGE_DESC", "Customized Bazzite image with Nix mount support and other sugar")
@@ -20,7 +23,6 @@ default:
 [group('Just')]
 check:
     #!/usr/bin/env bash
-    set -euo pipefail
     source "{{ just_helpers }}"
     check_just_files
 
@@ -28,7 +30,6 @@ check:
 [group('Just')]
 fix:
     #!/usr/bin/env bash
-    set -euo pipefail
     source "{{ just_helpers }}"
     fix_just_files
 
@@ -36,7 +37,6 @@ fix:
 [group('Utility')]
 clean:
     #!/usr/bin/env bash
-    set -euo pipefail
     source "{{ just_helpers }}"
     clean_oci_layout "{{ oci_output_dir }}"
     remove_images_and_prune podman localhost/raw-img localhost/chunked-img || true
@@ -45,7 +45,6 @@ clean:
 [group('Utility')]
 cleaner:
     #!/usr/bin/env bash
-    set -euo pipefail
     source "{{ just_helpers }}"
     clean_artifacts
     sudo find -L "{{ cache_dir }}" -mindepth 1 -maxdepth 1 -exec rm -rf {} + || true
@@ -59,7 +58,6 @@ cleaner:
 [group('Utility')]
 clean-vm:
     #!/usr/bin/env bash
-    set -euo pipefail
     source "{{ just_helpers }}"
     clean_vm_cache "{{ cache_dir }}"
 
@@ -67,7 +65,6 @@ clean-vm:
 [group('Utility')]
 lint:
     #!/usr/bin/env bash
-    set -euo pipefail
     source "{{ just_helpers }}"
     lint_scripts
     check_just_files
@@ -76,7 +73,6 @@ lint:
 [group('Utility')]
 format:
     #!/usr/bin/env bash
-    set -euo pipefail
     source "{{ just_helpers }}"
     format_scripts
     fix_just_files
@@ -85,6 +81,7 @@ format:
 [group('Utility')]
 test:
     bats scripts/just-helpers.bats tests/build-helpers.bats scripts/check-variants.bats scripts/release-preview.bats
+    python3 -m pytest tests/test_changelog.py
 
 # ── Build commands (sources scripts/build-helpers.bash) ─────────────────────
 # Build a container image (stages to localhost/raw-img)
@@ -97,7 +94,6 @@ test:
 [group('Build Container Image')]
 build $variant_or_spec="{{ default_tag }}" $base_image_override="" $force_rebuild="0":
     #!/usr/bin/env bash
-    set -euo pipefail
     source "{{ just_helpers }}"
     run_build "{{ variant_or_spec }}" "{{ variants_config }}" "{{ image_name }}" "{{ base_image_override }}" "{{ force_rebuild }}"
 
@@ -115,9 +111,9 @@ rebuild $variant_or_spec="{{ default_tag }}" $base_image_override="":
 [group('Build Container Image')]
 rechunk $variant_or_spec="{{ default_tag }}":
     #!/usr/bin/env bash
-    set -euo pipefail
     source "{{ just_helpers }}"
-    eval "$(run_rechunk "{{ variant_or_spec }}" "{{ variants_config }}" "{{ image_name }}" "{{ image_desc }}" "{{ repo_organization }}")"
+    RUN_FIELDS=$(jq -cn --arg variants_config "{{ variants_config }}" --arg image_name "{{ image_name }}" --arg image_desc "{{ image_desc }}" --arg repo_organization "{{ repo_organization }}" '{variants_config: $variants_config, image_name: $image_name, image_desc: $image_desc, repo_organization: $repo_organization}')
+    eval "$(run_rechunk "{{ variant_or_spec }}" "$RUN_FIELDS")"
     just rootful-load "{{ variant_or_spec }}"
 
 # Transfer the chunked image from rootless to rootful podman storage, so it can
@@ -126,7 +122,6 @@ rechunk $variant_or_spec="{{ default_tag }}":
 [group('Build Container Image')]
 rootful-load $variant_or_spec="{{ default_tag }}":
     #!/usr/bin/env bash
-    set -euo pipefail
     source "{{ just_helpers }}"
     eval "$(resolve_variant "{{ variant_or_spec }}" "{{ variants_config }}" "{{ image_name }}")"
     podman save "localhost/chunked-img:${VARIANT_NAME}" | pv | sudo podman load
@@ -137,9 +132,9 @@ rootful-load $variant_or_spec="{{ default_tag }}":
 [group('Build Container Image')]
 relabel $variant_or_spec="{{ default_tag }}":
     #!/usr/bin/env bash
-    set -euo pipefail
     source "{{ just_helpers }}"
-    eval "$(run_relabel "{{ variant_or_spec }}" "{{ variants_config }}" "{{ image_name }}" "{{ image_desc }}" "{{ repo_organization }}")"
+    RUN_FIELDS=$(jq -cn --arg variants_config "{{ variants_config }}" --arg image_name "{{ image_name }}" --arg image_desc "{{ image_desc }}" --arg repo_organization "{{ repo_organization }}" '{variants_config: $variants_config, image_name: $image_name, image_desc: $image_desc, repo_organization: $repo_organization}')
+    eval "$(run_relabel "{{ variant_or_spec }}" "$RUN_FIELDS")"
 
 # ── Full pipeline (mirrors the GitHub Actions workflow) ─────────────────────
 # Run the full build pipeline for a single variant:
@@ -150,9 +145,9 @@ relabel $variant_or_spec="{{ default_tag }}":
 [group('Build Container Image')]
 pipeline $variant_or_spec="{{ default_tag }}" $base_image_override="" $force_rebuild="0" $rechunk="0":
     #!/usr/bin/env bash
-    set -euo pipefail
     source "{{ just_helpers }}"
-    run_pipeline "{{ variant_or_spec }}" "{{ variants_config }}" "{{ image_name }}" "{{ image_desc }}" "{{ repo_organization }}" "{{ base_image_override }}" "{{ force_rebuild }}" "{{ rechunk }}"
+    RUN_FIELDS=$(jq -cn --arg variants_config "{{ variants_config }}" --arg image_name "{{ image_name }}" --arg image_desc "{{ image_desc }}" --arg repo_organization "{{ repo_organization }}" --arg base_image_override "{{ base_image_override }}" --arg force_rebuild "{{ force_rebuild }}" --arg rechunk "{{ rechunk }}" '{variants_config: $variants_config, image_name: $image_name, image_desc: $image_desc, repo_organization: $repo_organization, base_image_override: $base_image_override, force_rebuild: $force_rebuild, rechunk: $rechunk}')
+    run_pipeline "{{ variant_or_spec }}" "$RUN_FIELDS"
 
 # Pipeline with rechunking enabled (just pipeline <variant> "" "" 1)
 # Usage: just pipeline-rechunk [variant-name | image:tag] [base_image_override] [force_rebuild]
@@ -170,7 +165,6 @@ pipeline-rechunk $variant_or_spec="stable" $base_image_override="" $force_rebuil
 [group('Build Container Image')]
 build-all $force_build="0":
     #!/usr/bin/env bash
-    set -euo pipefail
     source "{{ just_helpers }}"
     check_variants "{{ force_build }}" "{{ repo_organization }}" "{{ image_name }}" "{{ variants_config }}"
     build_all_variants "{{ repo_organization }}" "{{ image_name }}" "{{ image_desc }}"
@@ -188,32 +182,29 @@ build-all $force_build="0":
 [group('Build Container Image')]
 release-preview $variants="" $prev="" $config="{{ variants_config }}":
     #!/usr/bin/env bash
-    set -euo pipefail
     source "{{ just_helpers }}"
     release_preview "{{ variants }}" "{{ prev }}" "{{ config }}"
 
 # ── CI recipes (called from build.yml; use pre-resolved matrix values) ──────
 
 # Build a single pre-resolved variant (mirrors old build-reusable action).
-# Values come from check-variants output — no re-resolution.
-# Usage: just ci-pipeline <variant> <base_image> <build_script> <canonical_tag> <date> <image_desc> <parent_version> [rechunk]
-# rechunk=1 enables chunkah chunking (build.yml passes 1; leave 0 for raw-img-only).
+# The record comes from check-variants output; its version_label is parent_version.
+# Usage: just ci-pipeline <record_json> [options_json]
+# options_json carries {"rechunk":0|1} (build.yml passes 1; leave 0 for raw-img-only).
 [group('Build Container Image')]
-ci-pipeline $variant $base_image $build_script $canonical_tag $date $image_desc $parent_version $rechunk="0":
+ci-pipeline $record_json $options_json="{}":
     #!/usr/bin/env bash
-    set -euo pipefail
     source "{{ just_helpers }}"
-    build_variant_ci "{{ variant }}" "{{ base_image }}" "{{ build_script }}" "{{ canonical_tag }}" "{{ date }}" "{{ image_desc }}" "{{ parent_version }}" "{{ repo_organization }}" "{{ image_name }}" "{{ rechunk }}"
+    build_variant_ci '{{ record_json }}' '{{ options_json }}'
 
 # Push, sign, and verify a built image (mirrors old push-reusable action).
 # Env required: GITHUB_ACTOR, GITHUB_TOKEN, SIGNING_SECRET.
-# Usage: just push <source_ref> <tags> <registry> <repo> <suffix> <variant> <date> <parent_version>
+# Usage: just push <record_json> [options_json]
 [group('Build Container Image')]
-push $source_ref $tags $registry $repo $suffix $variant $date $parent_version:
+push $record_json $options_json="{}":
     #!/usr/bin/env bash
-    set -euo pipefail
     source "{{ just_helpers }}"
-    push_variant "{{ source_ref }}" "{{ tags }}" "{{ registry }}" "{{ repo }}" "{{ suffix }}" "{{ variant }}" "{{ date }}" "{{ parent_version }}"
+    push_variant '{{ record_json }}' '{{ options_json }}'
 
 # Generate a GitHub release for a variant (mirrors old release-reusable action).
 # Skips publishing when the version tag already has a release.
@@ -222,9 +213,10 @@ push $source_ref $tags $registry $repo $suffix $variant $date $parent_version:
 [group('Build Container Image')]
 release $variant $handwritten="" $config="{{ variants_config }}" $allow_disabled="false":
     #!/usr/bin/env bash
-    set -euo pipefail
     source "{{ just_helpers }}"
-    release_variant "{{ variant }}" "{{ handwritten }}" "{{ config }}" "{{ allow_disabled }}"
+    RECORD=$(variant_record "{{ variant }}" "{{ config }}")
+    OPTIONS=$(jq -cn --arg handwritten "{{ handwritten }}" --arg variants_config "{{ config }}" --arg allow_disabled "{{ allow_disabled }}" '{handwritten: $handwritten, variants_config: $variants_config, allow_disabled: $allow_disabled}')
+    release_variant "$RECORD" "$OPTIONS"
 
 # ── Variant helpers ─────────────────────────────────────────────────────────
 
@@ -232,7 +224,6 @@ release $variant $handwritten="" $config="{{ variants_config }}" $allow_disabled
 [group('Utility')]
 list-variants:
     #!/usr/bin/env bash
-    set -euo pipefail
     source "{{ just_helpers }}"
     list_available_variants "{{ variants_config }}"
 
@@ -243,7 +234,6 @@ list-variants:
 [group('Build Container Image')]
 check-variants $force_build="0" $variants_override="":
     #!/usr/bin/env bash
-    set -euo pipefail
     source "{{ just_helpers }}"
     check_variants "{{ force_build }}" "{{ repo_organization }}" "{{ image_name }}" "{{ variants_config }}" "{{ variants_override }}"
 
@@ -252,7 +242,6 @@ check-variants $force_build="0" $variants_override="":
 [group('Build Container Image')]
 tags-preview $variant_or_spec="{{ default_tag }}":
     #!/usr/bin/env bash
-    set -euo pipefail
     source "{{ just_helpers }}"
     preview_tags "{{ variant_or_spec }}" "{{ variants_config }}" "{{ image_name }}" "{{ repo_organization }}"
 
@@ -263,9 +252,10 @@ tags-preview $variant_or_spec="{{ default_tag }}":
 [group('Build Virtual Machine Image')]
 build-qcow2 $variant_or_spec="{{ default_tag }}" $output_dir="" $force_rebuild="0":
     #!/usr/bin/env bash
-    set -euo pipefail
     source "{{ just_helpers }}"
-    build_vm_image "{{ variant_or_spec }}" "qcow2" "{{ output_dir }}" "{{ force_rebuild }}" "{{ cache_dir }}" "{{ bib_image }}"
+    RECORD=$(vm_record_json "{{ variant_or_spec }}" "{{ variants_config }}" "{{ image_name }}")
+    OPTIONS=$(jq -cn --arg type "qcow2" --arg output_dir "{{ output_dir }}" --arg force_rebuild "{{ force_rebuild }}" --arg cache_dir "{{ cache_dir }}" --arg bib_image "{{ bib_image }}" '{type: $type, output_dir: $output_dir, force_rebuild: $force_rebuild, cache_dir: $cache_dir, bib_image: $bib_image}')
+    build_vm_image "$RECORD" "$OPTIONS"
 
 # Build a RAW VM disk image
 
@@ -273,9 +263,10 @@ build-qcow2 $variant_or_spec="{{ default_tag }}" $output_dir="" $force_rebuild="
 [group('Build Virtual Machine Image')]
 build-raw $variant_or_spec="{{ default_tag }}" $output_dir="" $force_rebuild="0":
     #!/usr/bin/env bash
-    set -euo pipefail
     source "{{ just_helpers }}"
-    build_vm_image "{{ variant_or_spec }}" "raw" "{{ output_dir }}" "{{ force_rebuild }}" "{{ cache_dir }}" "{{ bib_image }}"
+    RECORD=$(vm_record_json "{{ variant_or_spec }}" "{{ variants_config }}" "{{ image_name }}")
+    OPTIONS=$(jq -cn --arg type "raw" --arg output_dir "{{ output_dir }}" --arg force_rebuild "{{ force_rebuild }}" --arg cache_dir "{{ cache_dir }}" --arg bib_image "{{ bib_image }}" '{type: $type, output_dir: $output_dir, force_rebuild: $force_rebuild, cache_dir: $cache_dir, bib_image: $bib_image}')
+    build_vm_image "$RECORD" "$OPTIONS"
 
 # Build and force-rebuild a QCOW2 image (skips cached container image)
 [group('Build Virtual Machine Image')]
@@ -293,9 +284,10 @@ rebuild-raw $variant_or_spec="{{ default_tag }}" $output_dir="":
 [group('Run Virtual Machine')]
 run-vm-qcow2 $variant_or_spec="{{ default_tag }}" $output_dir="" $force_pull="0" $clean="0":
     #!/usr/bin/env bash
-    set -euo pipefail
     source "{{ just_helpers }}"
-    run_variant_vm "qcow2" "{{ variant_or_spec }}" "{{ variants_config }}" "{{ image_name }}" "{{ output_dir }}" "{{ force_pull }}" "{{ clean }}" "{{ cache_dir }}" "{{ bib_image }}"
+    RECORD=$(vm_record_json "{{ variant_or_spec }}" "{{ variants_config }}" "{{ image_name }}")
+    OPTIONS=$(jq -cn --arg type "qcow2" --arg output_dir "{{ output_dir }}" --arg force_pull "{{ force_pull }}" --arg clean "{{ clean }}" --arg cache_dir "{{ cache_dir }}" --arg bib_image "{{ bib_image }}" '{type: $type, output_dir: $output_dir, force_pull: $force_pull, clean: $clean, cache_dir: $cache_dir, bib_image: $bib_image}')
+    run_variant_vm "$RECORD" "$OPTIONS"
 
 # Run a RAW VM
 
@@ -303,6 +295,7 @@ run-vm-qcow2 $variant_or_spec="{{ default_tag }}" $output_dir="" $force_pull="0"
 [group('Run Virtual Machine')]
 run-vm-raw $variant_or_spec="{{ default_tag }}" $output_dir="" $force_pull="0" $clean="0":
     #!/usr/bin/env bash
-    set -euo pipefail
     source "{{ just_helpers }}"
-    run_variant_vm "raw" "{{ variant_or_spec }}" "{{ variants_config }}" "{{ image_name }}" "{{ output_dir }}" "{{ force_pull }}" "{{ clean }}" "{{ cache_dir }}" "{{ bib_image }}"
+    RECORD=$(vm_record_json "{{ variant_or_spec }}" "{{ variants_config }}" "{{ image_name }}")
+    OPTIONS=$(jq -cn --arg type "raw" --arg output_dir "{{ output_dir }}" --arg force_pull "{{ force_pull }}" --arg clean "{{ clean }}" --arg cache_dir "{{ cache_dir }}" --arg bib_image "{{ bib_image }}" '{type: $type, output_dir: $output_dir, force_pull: $force_pull, clean: $clean, cache_dir: $cache_dir, bib_image: $bib_image}')
+    run_variant_vm "$RECORD" "$OPTIONS"

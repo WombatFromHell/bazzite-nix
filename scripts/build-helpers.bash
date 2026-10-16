@@ -4,17 +4,40 @@
 
 set -euo pipefail
 
+# Home for one run's OCI layouts and VM images. The Justfile's cache_dir points
+# at the same place; this is the only default, and every reader is a plain read.
+export CACHE_DIR="${CACHE_DIR:-$HOME/.cache/bazzite-nix}"
+
+# ── image identity ──────────────────────────────────────────────────────────────────
+# The one spelling of a local image reference: localhost/<name>[:tag].
+# Usage: image_ref <name> [tag]
+image_ref() {
+  local name="${1:?name required}"
+  local tag="${2:-}"
+  if [[ -n "$tag" ]]; then
+    echo "localhost/${name}:${tag}"
+  else
+    echo "localhost/${name}"
+  fi
+}
+
+# The digest of a local image, as podman spells it (sha256:...).
+# Usage: image_digest <ref>
+image_digest() {
+  podman image inspect --format '{{.Digest}}' "${1:?ref required}"
+}
+
+# The alias every build leaves behind.
+# Usage: image_tag <name>
+image_tag() {
+  image_ref "${1:?name required}" latest
+}
+
 # ── sudo credential cache ──────────────────────────────────────────────────
 # Prime the sudo credential cache once before the first `sudo podman` in the
 # VM path so users aren't prompted for a password per step.
 sudo_cache() {
   sudo -v
-}
-
-# Refresh the sudo credential cache non-interactively; no-op when the
-# timestamp has already expired (interactive re-prime is sudo_cache's job).
-sudo_refresh() {
-  sudo -n true 2>/dev/null || true
 }
 
 # ── build image ─────────────────────────────────────────────────────────────
@@ -66,13 +89,11 @@ build_image_or_skip() {
 # image_ref defaults to localhost/raw-img; pass the chunked image when raw-img
 # no longer exists (relabeling a prior rechunked image).
 # If manifest_output_file is provided, writes manifest JSON to that file.
-# Prints to stdout:
-#   CI (GITHUB_OUTPUT set): lowercase key=value for >> "$GITHUB_OUTPUT"
-#   Local (no GITHUB_OUTPUT): uppercase KEY=value for eval
+# Prints eval-able assignments (KERNEL_VERSION, MANIFEST_PACKAGES) to stdout.
 
 extract_image_info() {
   local manifest_output_file="${1:-}"
-  local image_ref="${2:-localhost/raw-img}"
+  local image_ref="${2:-$(image_ref raw-img)}"
 
   # Read kernel version and package manifest in a single container run.
   # manifest.json is single-line (jq -c) so the first line is the kernel,
@@ -101,14 +122,8 @@ extract_image_info() {
     exit 1
   fi
 
-  # Output format depends on context: lowercase for CI, uppercase for local eval
-  if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
-    echo "kernel_version=${kernel_version}"
-    echo "manifest_packages=${packages_count}"
-  else
-    echo "KERNEL_VERSION=${kernel_version}"
-    echo "MANIFEST_PACKAGES=${packages_count}"
-  fi
+  echo "KERNEL_VERSION=${kernel_version}"
+  echo "MANIFEST_PACKAGES=${packages_count}"
 
   # Write manifest to file if path provided (avoids shell quoting issues)
   if [ -n "$manifest_output_file" ]; then
@@ -205,8 +220,8 @@ relabel_image() {
   # buildah commit updates only the bare reference; re-point the anchor/alias
   # tags so downstream lookups (extract_final_ref, run_vm) see the relabeled image.
   if [[ -n "$anchor_tag" ]]; then
-    podman tag "localhost/${image}" "localhost/${image}:${anchor_tag}" 2>/dev/null || true
-    podman tag "localhost/${image}" "localhost/${image}:latest" 2>/dev/null || true
+    podman tag "$(image_ref "$image")" "$(image_ref "$image" "$anchor_tag")" 2>/dev/null || true
+    podman tag "$(image_ref "$image")" "$(image_tag "$image")" 2>/dev/null || true
   fi
 }
 
@@ -224,7 +239,7 @@ rechunk_image() {
   local tags_csv="${1:-latest}"
   local labels_file="${2:-}"
   local variant="${3:-latest}"
-  local oci_base_dir="${4:-${OCI_OUTPUT_DIR:-${CACHE_DIR:-$HOME/.cache/bazzite-nix}/oci}}"
+  local oci_base_dir="${4:-${OCI_OUTPUT_DIR:-${CACHE_DIR}/oci}}"
   local tags=()
   IFS=',' read -ra tags <<<"$tags_csv"
   local layout_dir chunkah_config chunkah_image chunkah_ref chunked
@@ -254,7 +269,7 @@ rechunk_image() {
 
   # Carries Env, Cmd and containers.bootc over to the chunked image
   # shellcheck disable=SC2024  # Intentional: write as user; root container reads it ro
-  podman image inspect localhost/raw-img >"${chunkah_config}"
+  podman image inspect "$(image_ref raw-img)" >"${chunkah_config}"
 
   if [[ -n "$labels_file" && -f "$labels_file" ]]; then
     while IFS= read -r line; do
@@ -269,7 +284,7 @@ rechunk_image() {
 
   echo "Running 'chunkah build' -> ${layout_dir}..." >&2
   if podman run --rm --pull=never \
-    --mount=type=image,src=localhost/raw-img,target=/chunkah \
+    --mount=type=image,src="$(image_ref raw-img)",target=/chunkah \
     --volume "${chunkah_config}:/chunkah-config.json:ro,Z" \
     --volume "${oci_base_dir}/${variant}:/run/out:Z" \
     "${chunkah_ref}" \
@@ -289,12 +304,12 @@ rechunk_image() {
       echo "::error::Failed to load rechunked OCI layout from ${layout_dir}" >&2
       exit 1
     fi
-    podman tag "${chunked}" localhost/chunked-img
+    podman tag "${chunked}" "$(image_ref chunked-img)"
 
     local t
     for t in "${tags[@]}"; do
       [[ -z "$t" || "$t" == "latest" ]] && continue
-      podman tag localhost/chunked-img "localhost/chunked-img:${t}"
+      podman tag "$(image_ref chunked-img)" "$(image_ref chunked-img "$t")"
     done
   else
     echo "Something went wrong during rechunking!" >&2
@@ -304,17 +319,16 @@ rechunk_image() {
 
 # ── extract final image ref ─────────────────────────────────────────────────
 # Usage: extract_final_ref <tag> [image_name]
-# Prints to stdout:
-#   CI (GITHUB_OUTPUT set): lowercase key=value for >> "$GITHUB_OUTPUT"
-#   Local (no GITHUB_OUTPUT): uppercase KEY=value for eval
+# Prints eval-able assignments (SOURCE_REF, FULL_BUILD_DIGEST, BUILD_DIGEST) to stdout.
 
 extract_final_ref() {
   local tag="${1:-latest}"
   local image_name="${2:-chunked-img}"
-  local source_ref="containers-storage:localhost/${image_name}:${tag}"
+  local source_ref
+  source_ref="containers-storage:$(image_ref "$image_name" "$tag")"
 
   local full_digest
-  full_digest=$(podman image inspect --format '{{.Digest}}' "localhost/${image_name}:${tag}") || {
+  full_digest=$(image_digest "$(image_ref "$image_name" "$tag")") || {
     echo "::error::Expected containers-storage image ${source_ref} not found after rechunk"
     exit 1
   }
@@ -325,14 +339,7 @@ extract_final_ref() {
 
   local short_digest="${full_digest#sha256:}"
 
-  # Output format depends on context: lowercase for CI, uppercase for local eval
-  if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
-    echo "source_ref=${source_ref}"
-    echo "full_build_digest=${full_digest}"
-    echo "build_digest=${short_digest}"
-  else
-    echo "SOURCE_REF=${source_ref}"
-    echo "FULL_BUILD_DIGEST=${full_digest}"
-    echo "BUILD_DIGEST=${short_digest}"
-  fi
+  echo "SOURCE_REF=${source_ref}"
+  echo "FULL_BUILD_DIGEST=${full_digest}"
+  echo "BUILD_DIGEST=${short_digest}"
 }

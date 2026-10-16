@@ -23,14 +23,14 @@ setup() {
   [ ! -d "another_build_dir" ]
 }
 
-@test "clean_artifacts removes manifest and output files" {
+@test "clean_artifacts removes manifest, artifact directory, and output dir" {
   cd "$(mktemp -d)"
-  touch previous.manifest.json changelog.md output.env
-  mkdir -p output/
+  touch previous.manifest.json
+  mkdir -p .artifacts/testing output/
+  touch .artifacts/testing/changelog.md
   clean_artifacts
   [ ! -f "previous.manifest.json" ]
-  [ ! -f "changelog.md" ]
-  [ ! -f "output.env" ]
+  [ ! -d ".artifacts" ]
   [ ! -d "output" ]
 }
 
@@ -263,7 +263,10 @@ EOF
   local out log
   out="$(mktemp -d)"
   log="$out/calls"
-  sudo() { echo "sudo $*" >>"$log"; "$@"; }
+  sudo() {
+    echo "sudo $*" >>"$log"
+    "$@"
+  }
   export -f sudo
   podman() { echo "podman $*" >>"$log"; }
   export -f podman
@@ -291,7 +294,9 @@ EOF
   gh_out="$test_dir/gh_output"
   touch "$gh_out"
 
-  cat >/tmp/variants_results.json <<'EOF'
+  export ARTIFACTS_DIR="$test_dir/artifacts"
+  mkdir -p "$ARTIFACTS_DIR"
+  cat >"$ARTIFACTS_DIR/variants_results.json" <<'EOF'
 [
   {"variant":"stable","needs_build":false},
   {"variant":"testing","needs_build":true,"canonical_tag":"1.2.3"}
@@ -310,7 +315,9 @@ EOF
   gh_out="$test_dir/gh_output"
   touch "$gh_out"
 
-  echo '[]' >/tmp/variants_results.json
+  export ARTIFACTS_DIR="$test_dir/artifacts"
+  mkdir -p "$ARTIFACTS_DIR"
+  echo '[]' >"$ARTIFACTS_DIR/variants_results.json"
 
   GITHUB_OUTPUT="$gh_out" aggregate_variants "ghcr.io/owner" "bazzite-nix" "$test_dir/summary" >/dev/null
 
@@ -319,22 +326,24 @@ EOF
   [ -f "$test_dir/summary" ]
 }
 
-# ── release_variant ─────────────────────────────────────────────────────────
+# ── variant_record / release_variant ────────────────────────────────────────
 
-@test "release_variant rejects unknown variant" {
+@test "variant_record rejects unknown variant" {
   local test_dir
   test_dir="$(setup_variant_json)"
 
-  GH_TOKEN=x run release_variant "nope" "" "$test_dir/variants.json"
+  GH_TOKEN=x run variant_record "nope" "$test_dir/variants.json"
   [ "$status" -ne 0 ]
-  [[ "$output" == *"not found in variants.json"* ]]
+  [[ "$output" == *"not found in"* ]]
+  [[ "$output" == *"Available:"* ]]
 }
 
 @test "release_variant rejects disabled variant" {
-  local test_dir
+  local test_dir record
   test_dir="$(setup_variant_json)"
+  record=$(variant_record "disabled-variant" "$test_dir/variants.json")
 
-  GH_TOKEN=x run release_variant "disabled-variant" "" "$test_dir/variants.json"
+  GH_TOKEN=x run release_variant "$record" '{"allow_disabled": false}'
   [ "$status" -ne 0 ]
   [[ "$output" == *"is disabled in variants.json"* ]]
 }
@@ -359,9 +368,9 @@ EOF
   [[ "$out" == *"BUILD_DIGEST=abc"* ]]
 }
 
-# ── build_variant_core (shared build pipeline core) ─────────────────────────
+# ── build_variant_pipeline (the one build sequence) ───────────────────────
 
-# Mock the build-helpers functions so build_variant_core's branch logic can be
+# Mock the build-helpers functions so the sequence's branch logic can be
 # tested without real containers. Records relabel/rechunk calls to a calls file.
 build_core_mocks() {
   local calls="$1"
@@ -379,99 +388,142 @@ build_core_mocks() {
   }
 }
 
-build_core_common="stable 2026-08-17T00:00:00Z desc 44.1 owner repo"
+build_core_record='{"variant":"stable","version_label":"44.1","repo_owner":"owner","repo_name":"repo"}'
 
-@test "build_variant_core relabels raw-img directly when rechunk disabled" {
-  local calls
+@test "build_variant_pipeline relabels raw-img directly when rechunk disabled" {
+  local calls out
   calls="$(mktemp)"
+  export ARTIFACTS_DIR="$(mktemp -d)"
   build_core_mocks "$calls"
-  local SOURCE_REF KERNEL_VERSION
-  eval "$(build_variant_core $build_core_common 0 0)"
-  [ "$KERNEL_VERSION" = "6.6.0" ]
-  [ "$SOURCE_REF" = "containers-storage:localhost/raw-img:stable" ]
+  out=$(build_variant_pipeline "$build_core_record" '{"build":"none"}')
+  [[ "$(jq -r .kernel_version <<<"$out")" == "6.6.0" ]]
+  [[ "$(jq -r .source_ref <<<"$out")" == "containers-storage:localhost/raw-img:stable" ]]
   grep -q "REL:raw-img" "$calls"
   run ! grep -q "RECHUNK:" "$calls"
 }
 
-@test "build_variant_core rechunks with labels via chunkah when rechunk enabled (force)" {
-  local calls
+@test "build_variant_pipeline rechunks with labels via chunkah when rechunk enabled (force)" {
+  local calls out
   calls="$(mktemp)"
+  export ARTIFACTS_DIR="$(mktemp -d)"
   build_core_mocks "$calls"
-  local SOURCE_REF
-  eval "$(build_variant_core $build_core_common 1 1)"
-  [ "$SOURCE_REF" = "containers-storage:localhost/chunked-img:stable" ]
-  grep -q "RECHUNK:stable:/tmp/bazzite-nix-labels.txt" "$calls"
+  out=$(build_variant_pipeline "$build_core_record" '{"rechunk":1,"force_rebuild":1,"build":"none"}')
+  [[ "$(jq -r .source_ref <<<"$out")" == "containers-storage:localhost/chunked-img:stable" ]]
+  grep -q "RECHUNK:stable:$ARTIFACTS_DIR/stable/labels.txt" "$calls"
   run ! grep -q "REL:" "$calls"
 }
 
-@test "build_variant_core skips relabel & rechunk when chunked image already exists" {
-  local calls
+@test "build_variant_pipeline skips relabel & rechunk when chunked image already exists" {
+  local calls out
   calls="$(mktemp)"
+  export ARTIFACTS_DIR="$(mktemp -d)"
   build_core_mocks "$calls"
   sudo() { return 0; }
   buildah() { return 0; } # pretend localhost/chunked-img:stable exists
-  run build_variant_core $build_core_common 0 1
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"skipping relabel & rechunk"* ]]
-  [[ "$output" == *"SOURCE_REF=containers-storage:localhost/chunked-img:stable"* ]]
+  out=$(build_variant_pipeline "$build_core_record" '{"rechunk":1,"build":"none"}')
+  [[ "$(jq -r .source_ref <<<"$out")" == "containers-storage:localhost/chunked-img:stable" ]]
   run ! grep -q "RECHUNK:" "$calls"
   run ! grep -q "REL:" "$calls"
 }
 
-# ── collect_successful_builds ───────────────────────────────────────────────
-
-@test "collect_successful_builds extracts successful Build & Push variants" {
-  local jobs out
-  jobs='{"jobs":[{"name":"Check variants","conclusion":"success"},{"name":"Build & Push stable","conclusion":"success"},{"name":"Build & Push testing","conclusion":"failure"},{"name":"Build & Push unstable","conclusion":"success"}]}'
-  out=$(collect_successful_builds "$jobs")
-  [[ "$out" == '[{"variant":"stable"},{"variant":"unstable"}]' ]]
+@test "build_variant_pipeline fails naming the missing record field" {
+  local err
+  err="$(mktemp)"
+  build_variant_pipeline '{"variant":"stable","repo_owner":"owner","repo_name":"repo"}' 2>"$err" || true
+  grep -q "missing required field" "$err"
 }
 
-@test "collect_successful_builds returns empty array when none succeeded" {
-  local jobs out
-  jobs='{"jobs":[{"name":"Build & Push stable","conclusion":"failure"}]}'
-  out=$(collect_successful_builds "$jobs")
-  [[ "$out" == '[]' ]]
+# build_variant_ci captures this stdout and hands it to GitHub's $GITHUB_OUTPUT,
+# which reads one key=value line; a chatty build callee must not reach stdout.
+@test "build_variant_pipeline stdout stays one record line when the build is chatty" {
+  local calls out
+  calls="$(mktemp)"
+  export ARTIFACTS_DIR="$(mktemp -d)"
+  build_core_mocks "$calls"
+  build_image() { echo "STEP 1/2: FROM base"; }
+  out=$(build_variant_pipeline "$build_core_record" '{"build":"always"}')
+  [[ "$(wc -l <<<"$out")" -eq 1 ]]
+  jq -e . >/dev/null <<<"$out"
 }
 
-@test "collect_successful_builds writes GITHUB_OUTPUT" {
-  local test_dir gh_out jobs
-  test_dir="$(mktemp -d)"
-  gh_out="$test_dir/gh_output"
-  touch "$gh_out"
-  jobs='{"jobs":[{"name":"Build & Push stable","conclusion":"success"}]}'
-  GITHUB_OUTPUT="$gh_out" collect_successful_builds "$jobs" >/dev/null
-  grep -q '^successful_variants=\[{"variant":"stable"}\]$' "$gh_out"
-  grep -q '^any_successful=true$' "$gh_out"
+@test "build_variant_pipeline returns the caller's record fields with the build fields" {
+  local calls out
+  calls="$(mktemp)"
+  export ARTIFACTS_DIR="$(mktemp -d)"
+  build_core_mocks "$calls"
+  out=$(build_variant_pipeline "$build_core_record" '{"build":"none"}')
+  [[ "$(jq -r .variant <<<"$out")" == "stable" ]]
+  [[ "$(jq -r .version_label <<<"$out")" == "44.1" ]]
+  [[ "$(jq -r .repo_name <<<"$out")" == "repo" ]]
+}
+
+# ── pushed_variants ───────────────────────────────────────────────
+
+@test "pushed_variants lists enabled variants that have a versioned tag" {
+  local test_dir out
+  test_dir="$(setup_variant_json)"
+  find_latest_versioned_tag() { return 0; }
+  export -f find_latest_versioned_tag
+  out=$(pushed_variants "$test_dir/variants.json")
+  [[ "$out" == "testing" ]]
+}
+
+@test "pushed_variants is empty when no variant has a versioned tag" {
+  local test_dir out
+  test_dir="$(setup_variant_json)"
+  find_latest_versioned_tag() { return 1; }
+  export -f find_latest_versioned_tag
+  out=$(pushed_variants "$test_dir/variants.json")
+  [[ -z "$out" ]]
 }
 
 # ── resolve_release_variants ────────────────────────────────────────────────
 
-@test "resolve_release_variants returns all enabled variants when blank" {
+@test "resolve_release_variants returns every pushed variant when blank" {
   local test_dir out
   test_dir="$(setup_variant_json)"
+  find_latest_versioned_tag() { [[ "$2" == "testing" ]]; }
+  export -f find_latest_versioned_tag
   out=$(resolve_release_variants "" "$test_dir/variants.json")
   [[ "$out" == "testing" ]]
 }
 
-@test "resolve_release_variants intersects explicit input with recent successful builds" {
+@test "resolve_release_variants drops variants the registry has not seen" {
   local test_dir out
   test_dir="$(setup_variant_json)"
-  recent_successful_builds() { printf 'stable\ntesting\n'; }
-  export -f recent_successful_builds
-  out=$(resolve_release_variants "testing,stable,nope" "$test_dir/variants.json")
-  [[ "$out" == $'stable\ntesting' ]]
+  find_latest_versioned_tag() { [[ "$2" == "testing" ]]; }
+  export -f find_latest_versioned_tag
+  out=$(resolve_release_variants "testing,missing" "$test_dir/variants.json")
+  [[ "$out" == "testing" ]]
 }
 
-@test "resolve_release_variants warns and drops variants not recently built" {
+@test "resolve_release_variants warns about variants never pushed" {
   local test_dir out err
   test_dir="$(setup_variant_json)"
-  recent_successful_builds() { printf 'testing\n'; }
-  export -f recent_successful_builds
+  find_latest_versioned_tag() { return 1; }
+  export -f find_latest_versioned_tag
   err="$test_dir/err"
-  out=$(resolve_release_variants "testing,stable" "$test_dir/variants.json" 2>"$err")
-  [[ "$out" == "testing" ]]
-  grep -q "no recent successful build" "$err"
+  out=$(resolve_release_variants "testing" "$test_dir/variants.json" 2>"$err")
+  [[ -z "$out" ]]
+  grep -q "never pushed to the registry" "$err"
+}
+
+@test "release_matrix_json prints an empty selection as []" {
+  local test_dir out
+  test_dir="$(setup_variant_json)"
+  find_latest_versioned_tag() { return 1; }
+  export -f find_latest_versioned_tag
+  out=$(release_matrix_json "" "$test_dir/variants.json")
+  [[ "$out" == "[]" ]]
+}
+
+@test "release_matrix_json prints pushed variants as a JSON array" {
+  local test_dir out
+  test_dir="$(setup_variant_json)"
+  find_latest_versioned_tag() { [[ "$2" == "testing" ]]; }
+  export -f find_latest_versioned_tag
+  out=$(release_matrix_json "" "$test_dir/variants.json")
+  [[ "$out" == '["testing"]' ]]
 }
 
 # ── release_variant (missing-tag gate & dry run) ────────────────────────────
@@ -481,11 +533,11 @@ release_variant_mocks() {
   local fake_bin="$1"
   cat >"$fake_bin/python3" <<'EOF'
 #!/usr/bin/env bash
-cat > output.env <<'OUT'
+cat > "$3" <<'OUT'
 TITLE="Testing (F44)"
 TAG="testing-44.1"
 OUT
-touch changelog.md
+touch "$4"
 EOF
   chmod +x "$fake_bin/python3"
 }
@@ -505,7 +557,7 @@ EOF
 
   cd "$test_dir"
   local out
-  out=$(PATH="$fake_bin:$PATH" GITHUB_REPOSITORY="owner/repo" release_variant "testing" "" "$BATS_TEST_DIRNAME/../.github/variants.json" 2>&1) || true
+  out=$(PATH="$fake_bin:$PATH" GITHUB_REPOSITORY="owner/repo" release_variant '{"variant": "testing", "disabled": false}' "$(jq -cn --arg variants_config "$BATS_TEST_DIRNAME/../.github/variants.json" '{variants_config: $variants_config}')" 2>&1) || true
   [[ "$out" == *"already exists"* ]]
 }
 
@@ -524,7 +576,70 @@ EOF
 
   cd "$test_dir"
   local out
-  out=$(PATH="$fake_bin:$PATH" GITHUB_REPOSITORY="owner/repo" release_variant "testing" "" "$BATS_TEST_DIRNAME/../.github/variants.json" "" "" "" "1" 2>&1) || true
+  out=$(PATH="$fake_bin:$PATH" GITHUB_REPOSITORY="owner/repo" release_variant '{"variant": "testing", "disabled": false}' "$(jq -cn --arg variants_config "$BATS_TEST_DIRNAME/../.github/variants.json" '{variants_config: $variants_config, dry_run: 1}')" 2>&1) || true
   [[ "$out" == *"WOULD CREATE release: testing-44.1"* ]]
   [[ "$out" == *"dry run"* ]]
+}
+
+# ── CI entry points (build_variant_ci, push_variant) ────────────────────────
+
+# The CI steps reach these through the ci-pipeline and push recipes, so the
+# recipe's quoting of the JSON arguments is part of the same contract. Check
+# what just would run, without touching containers or the registry.
+@test "ci-pipeline recipe passes its JSON arguments as single words" {
+  local record out
+  record='{"variant":"stable","image_desc":"Customized Bazzite image with Nix mount support"}'
+  out=$(just --justfile "$BATS_TEST_DIRNAME/../Justfile" --dry-run ci-pipeline "$record" '{"rechunk":1}' 2>&1)
+  grep -qF "build_variant_ci '$record' '{\"rechunk\":1}'" <<<"$out"
+}
+
+@test "push recipe passes its JSON arguments as single words" {
+  local record out
+  record='{"variant":"stable","image_desc":"Customized Bazzite image with Nix mount support"}'
+  out=$(just --justfile "$BATS_TEST_DIRNAME/../Justfile" --dry-run push "$record" '{"registry":"ghcr.io/owner"}' 2>&1)
+  grep -qF "push_variant '$record' '{\"registry\":\"ghcr.io/owner\"}'" <<<"$out"
+}
+
+@test "build_variant_ci passes its record and options through intact" {
+  local captured gh
+  captured="$(mktemp)"
+  gh="$(mktemp)"
+  build_variant_pipeline() {
+    printf 'options=%s\n' "$2" >"$captured"
+    echo '{"source_ref":"containers-storage:localhost/raw-img:stable"}'
+  }
+  export GITHUB_OUTPUT="$gh"
+  build_variant_ci '{"variant":"stable","image_desc":"Customized Bazzite image with Nix mount support"}' '{"rechunk":1}'
+  grep -q '^options={"rechunk":1,"build":"always"}$' "$captured"
+  grep -q '^record={"source_ref"' "$gh"
+}
+
+# Mock the push units so the CI entry point's gates and reporting run without
+# skopeo, cosign, or the registry. mkdir is shimmed: push_variant writes its
+# authfile into a hardcoded /tmp path, which no test should touch.
+push_variant_mocks() {
+  mkdir() { :; }
+  run_with_retry() { :; }
+  push_image_with_tags() {
+    printf 'remote_digest=sha256:abc\nremote_digest_ref=%s@sha256:abc\n' "$3"
+  }
+  sign_and_verify_image() { echo "status=success"; }
+}
+
+@test "push_variant reports the remote digest and signs" {
+  local gh
+  gh="$(mktemp)"
+  push_variant_mocks
+  export GITHUB_ACTOR=actor GITHUB_TOKEN=token SIGNING_SECRET=secret GITHUB_OUTPUT="$gh"
+  push_variant '{"source_ref":"containers-storage:localhost/chunked-img:stable","tags":"stable-44.1,stable","variant":"stable","parent_version":"44.1","image_desc":"Customized Bazzite image with Nix mount support"}' '{"registry":"ghcr.io/owner","repo":"repo","date":"2026-10-16T02:44:40Z"}'
+  grep -q '^remote_digest=sha256:abc$' "$gh"
+  grep -q '^status=success$' "$gh"
+}
+
+@test "push_variant fails naming the missing registry and repo" {
+  local err
+  err="$(mktemp)"
+  push_variant_mocks
+  push_variant '{"source_ref":"x","tags":"t"}' '{}' 2>"$err" || true
+  grep -q 'registry and repo are required push fields' "$err"
 }

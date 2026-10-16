@@ -29,13 +29,17 @@ from changelog import (
     PATTERN_PKGREL_CHANGED,
     PATTERN_PKGREL,
     load_variants,
+    registry_prefix,
 )
 
 
 # Compute IMAGES from the actual variants.json (only enabled variants)
 # This ensures tests always use the single source of truth
-_VARIANTS = load_variants()
-IMAGES = [f"bazzite-nix{v.get('suffix', '')}" for v in _VARIANTS]
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+VARIANTS_CONFIG = os.path.join(REPO_ROOT, ".github", "variants.json")
+PACKAGE = "bazzite-nix"
+_VARIANTS = load_variants(VARIANTS_CONFIG)
+IMAGES = [f"{PACKAGE}{v.get('suffix', '')}" for v in _VARIANTS]
 
 
 # =============================================================================
@@ -208,7 +212,7 @@ class TestGetImages:
         ],
     )
     def test_image_categorization(self, variants, image, expected_base, expected_de):
-        results = {img: (base, de) for img, base, de in get_images([variants])}
+        results = {img: (base, de) for img, base, de in get_images([variants], PACKAGE)}
         base, de = results[image]
         assert base == expected_base, (
             f"Image '{image}' should have base '{expected_base}', got '{base}'"
@@ -217,16 +221,15 @@ class TestGetImages:
             f"Image '{image}' should have de '{expected_de}', got '{de}'"
         )
 
-    def test_uses_variants_json_by_default(self):
-        """get_images() with no args should use variants.json (disabled variants filtered)."""
-        results = list(get_images())
-        expected = list(get_images(_VARIANTS))
-        assert len(results) == len(expected), (
-            f"get_images() should yield {len(expected)} images from variants.json, got {len(results)}"
+    def test_requires_variants_and_package(self):
+        """get_images takes the variants and the package name; nothing is defaulted."""
+        results = list(get_images(_VARIANTS, PACKAGE))
+        assert len(results) == len(_VARIANTS), (
+            f"get_images should yield {len(_VARIANTS)} images, got {len(results)}"
         )
 
     def test_yields_correct_tuple_structure(self):
-        for img, base, de in get_images(_VARIANTS):
+        for img, base, de in get_images(_VARIANTS, PACKAGE):
             assert isinstance(img, str), "Image name should be string"
             assert isinstance(base, str), "Base should be string"
             assert isinstance(de, str), "DE should be string"
@@ -234,6 +237,50 @@ class TestGetImages:
                 f"Base should be 'desktop' or 'deck', got '{base}'"
             )
             assert de in ("kde", "gnome"), f"DE should be 'kde' or 'gnome', got '{de}'"
+
+
+# =============================================================================
+# Tests for load_variants
+# =============================================================================
+
+
+class TestRegistryPrefix:
+    """The registry comes from IMAGE_PREFIX; nothing is guessed when it is absent."""
+
+    def test_raises_when_unset(self):
+        os.environ.pop("IMAGE_PREFIX", None)
+        with pytest.raises(ValueError):
+            registry_prefix()
+
+    def test_raises_when_not_registry_slash_package(self):
+        os.environ["IMAGE_PREFIX"] = "ghcr.io"
+        with pytest.raises(ValueError):
+            registry_prefix()
+
+    def test_derives_registry_from_image_prefix(self):
+        os.environ["IMAGE_PREFIX"] = "ghcr.io/some-owner/some-package"
+        assert registry_prefix() == "docker://ghcr.io/some-owner/"
+
+
+class TestLoadVariants:
+    """The config path is required; nothing is invented when it is missing."""
+
+    def test_rejects_missing_config_path(self):
+        with pytest.raises(ValueError):
+            load_variants("")
+
+    def test_raises_for_nonexistent_file(self):
+        with pytest.raises(FileNotFoundError):
+            load_variants("no-such-variants.json")
+
+    def test_filters_disabled_variants(self):
+        enabled = {v["name"] for v in load_variants(VARIANTS_CONFIG)}
+        with open(VARIANTS_CONFIG) as f:
+            configured = json.load(f)["variants"]
+        disabled = {v["name"] for v in configured if v.get("disabled")}
+        assert enabled.isdisjoint(disabled), (
+            f"disabled variants {disabled} must not be loaded"
+        )
 
 
 # =============================================================================
@@ -615,12 +662,21 @@ class TestGetTags:
         with pytest.raises(AssertionError, match="No current and previous tags found"):
             get_tags("stable", manifests)
 
-    def test_assertion_when_fewer_than_three_valid_tags(self):
-        """Should raise AssertionError when fewer than 3 valid tags exist."""
+    def test_returns_previous_and_current_with_exactly_two_tags(self):
+        """Two version tags is a valid first diff: oldest is previous, newest is current."""
         tags = ["stable-1.20240101", "stable-2.20240102"]
         manifests = {img: make_manifest_with_tags(tags) for img in IMAGES}
-        with pytest.raises(AssertionError, match="No current and previous tags found"):
-            get_tags("stable", manifests)
+        prev, curr = get_tags("stable", manifests)
+        assert prev == "stable-1.20240101"
+        assert curr == "stable-2.20240102"
+
+    def test_no_previous_for_a_variants_first_release(self):
+        """One version tag means nothing to diff: previous is None, current is that tag."""
+        tags = ["unstable-45.20261015.6"]
+        manifests = {img: make_manifest_with_tags(tags) for img in IMAGES}
+        prev, curr = get_tags("unstable", manifests)
+        assert prev is None
+        assert curr == "unstable-45.20261015.6"
 
 
 # =============================================================================
@@ -646,7 +702,7 @@ class TestGetPackageGroups:
     @pytest.fixture
     def multi_image_names(self, multi_image_variants):
         """Image names derived from multi_image_variants."""
-        return [f"bazzite-nix{v.get('suffix', '')}" for v in multi_image_variants]
+        return [f"{PACKAGE}{v.get('suffix', '')}" for v in multi_image_variants]
 
     def test_finds_packages_common_to_all_images(
         self, multi_image_variants, multi_image_names
@@ -656,7 +712,7 @@ class TestGetPackageGroups:
             img: make_manifest_with_packages({**common_pkg, f"{img}-pkg": "2.0"})
             for img in multi_image_names
         }
-        common, others = get_package_groups({}, manifests, multi_image_variants)
+        common, others = get_package_groups({}, manifests, multi_image_variants, PACKAGE)
         assert "common-pkg" in common
 
     def test_excludes_packages_missing_from_any_image(
@@ -668,7 +724,7 @@ class TestGetPackageGroups:
         )
         for img in multi_image_names[1:]:
             manifests[img] = make_manifest_with_packages({})
-        common, others = get_package_groups({}, manifests, multi_image_variants)
+        common, others = get_package_groups({}, manifests, multi_image_variants, PACKAGE)
         assert "only-in-bazzite" not in common
 
     @pytest.mark.parametrize(
@@ -689,7 +745,7 @@ class TestGetPackageGroups:
             img: make_manifest_with_packages(category_pkg if filter_fn(img) else {})
             for img in multi_image_names
         }
-        common, others = get_package_groups({}, manifests, multi_image_variants)
+        common, others = get_package_groups({}, manifests, multi_image_variants, PACKAGE)
         assert f"{category}-only-pkg" in others[category]
 
     def test_common_packages_not_in_other_categories(
@@ -701,7 +757,7 @@ class TestGetPackageGroups:
             img: make_manifest_with_packages({**common_pkg, f"{img}-specific": "2.0"})
             for img in multi_image_names
         }
-        common, others = get_package_groups({}, manifests, multi_image_variants)
+        common, others = get_package_groups({}, manifests, multi_image_variants, PACKAGE)
         assert "truly-common" in common
         for category_pkgs in others.values():
             assert "truly-common" not in category_pkgs
@@ -713,12 +769,12 @@ class TestGetPackageGroups:
             )
             for img in multi_image_names
         }
-        common, others = get_package_groups({}, manifests, multi_image_variants)
+        common, others = get_package_groups({}, manifests, multi_image_variants, PACKAGE)
         assert common == ["a-pkg", "m-pkg", "z-pkg"]
 
     def test_handles_empty_package_sets(self, multi_image_variants, multi_image_names):
         manifests = {img: make_manifest_with_packages({}) for img in multi_image_names}
-        common, others = get_package_groups({}, manifests, multi_image_variants)
+        common, others = get_package_groups({}, manifests, multi_image_variants, PACKAGE)
         assert common == []
         assert all(v == [] for v in others.values())
 
