@@ -3,6 +3,9 @@
 # nix installer enablement
 mkdir -p /nix
 
+# carry-over upstream's dnf config
+dnf5 config-manager setopt keepcache=0
+
 # disable Wants/After 'systemd-udev-settle' override for sddm.service
 SDDM_OVERRIDE="/usr/lib/systemd/system/sddm.service.d"
 mkdir -p "${SDDM_OVERRIDE}" &&
