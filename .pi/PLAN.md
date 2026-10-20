@@ -179,6 +179,31 @@ Expected delta: **−150..−200 lines.**
 
 ---
 
+### Q1 — `check-variants` red on an upstream build published before it is tagged (done 2026-10-20)
+
+Not a shrink: a correctness slice found by running the workflow, kept here because it
+rewrites a `DESIGN.md §6` mandate.
+
+- [x] `resolve_upstream_tag` answers 2 for an exhaustive two-family miss, 1 for a probe
+      upstream refused (rate limit) or a walk cut short at `UPSTREAM_BUILD_WALK`;
+      `resolve_variant` propagates the code; the `check-variants.sh` loop `warn`s and skips.
+
+Facts (probed live, not recalled): run at 2026-10-20T23:08Z, `ghcr.io/ublue-os/bazzite:testing`
+labelled `testing-45.20261020.1`; `/commits/testing-45.20261020.1` was 404 there and 200 by
+23:28Z; `/commits/45.20261020.1` is 422 (a testing build is only ever named with the branch
+prefix); `bazzite:stable` labelled `44.20261012.1` and tagged **bare** (200), `stable-44.20261012.1`
+422. So the two naming families were already handled — both were probed and both missed, and
+the day's first counter (`.1`) leaves nothing lower to walk. Red stays red on its own merits:
+a rate-limited probe and a budget-cut search answer nothing.
+
+Delta: **+17 code lines** (registry +12, tags +4, `check-variants.sh` +1), +66 test lines,
+`check-variants.bats` 34 → 36, live check job exits 0 with `testing`/`unstable` prefixed and
+`stable` bare-version. Docs in the same commit: `§6` decision 10 rewritten (its "nothing
+resolving is an error" mandate now splits exhaustive-vs-cut-short), decision 14's rc-2
+clause widened to the two causes, `§7` counts 51 → 60 and 34 → 36.
+
+---
+
 ## Phase 4 — close-out
 
 - [ ] `DESIGN.md` stays current **per green commit**: §6 holds 13 decisions across 95 lines

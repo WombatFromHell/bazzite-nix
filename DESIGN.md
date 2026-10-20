@@ -252,10 +252,20 @@ Enabled variants: `stable`, `testing`, `unstable`. Disabled: `nvidia-open`,
     and `bazzite:stable` is labelled `44.20261012.1`, which upstream tags bare, while its
     testing and unstable builds carry a branch prefix. So the label version is probed against
     both name families (`{branch}-{version}`, then `{version}`), each walked down its build
-    counter up to `UPSTREAM_BUILD_WALK` names, and nothing resolving is an error rather than
-    a guessed comparison. Paging the `/tags` list was rejected on the same evidence: unstable
-    pushes 40+ tags a day, so 500 tags never reached the stable branch. Cost: one probe per
-    variant, up to ten only during a tag race.
+    counter up to `UPSTREAM_BUILD_WALK` names. What the search did not find is split by how
+    far it walked: probed 2026-10-20, `bazzite:testing` was labelled `testing-45.20261020.1`
+    minutes after upstream pushed that build, `/commits/testing-45.20261020.1` answered 404
+    (200 twenty minutes later), and the bare `45.20261020.1` answers 422 because a testing
+    build is only ever named with the branch prefix — so counter `.1` has no lower name to
+    try, every name in both families was probed, and the honest answer is that upstream
+    published before tagging: return 2, skip that variant, never borrow a previous day's
+    version (the label we would carry, `org.opencontainers.image.upstream-version` of
+    decision 12, would then name a release this image is not cut from). A search cut short
+    at `UPSTREAM_BUILD_WALK` names, or a probe upstream refused with a rate limit, means
+    nothing was answered: return 1, the check job fails. Paging the `/tags` list stays
+    rejected on the same evidence: unstable pushes 40+ tags a day, so 500 tags never reached
+    the stable branch. Cost: one probe per variant, two for an untagged day-first build,
+    up to ten only when the walk runs out of budget.
 
 11. `verify-upstream` compares versions, not tag names. Our published tags always
     carry the branch prefix (`{variant}-{version}`), upstream names its stable line
@@ -287,9 +297,11 @@ Enabled variants: `stable`, `testing`, `unstable`. Disabled: `nvidia-open`,
     once and the check job cannot drift from the Justfile on which release a variant
     is cut from. The driver keeps only what it owns: which variants to consider (the
     override list, `disabled`), whether a build is needed (`check_build_needed`), and
-    the artifact record. `resolve_variant` returns 2 for "no free version tag within
-    the bump walk", which the check job answers by skipping that variant — one busy
-    variant must not fail the whole check — while other callers fail outright. The
+    the artifact record. `resolve_variant` returns 2 for "this variant has no version to
+    build against right now" — every tag within `COLLISION_BUMP_WALK` bumps is taken, or
+    upstream has not tagged the labelled build yet (decision 10) — which the check job
+    answers by skipping that variant with a `::warning::`, since one busy variant must not
+    fail the whole check, while other callers fail outright. The
     guard that a base-image label must name a release version (`VERSIONED_TAG_PATTERN`,
     so a moving label like `latest` names nothing) lives in the resolver, not per driver.
     Cost: the check job sources `build-helpers.bash` for `image_ref`, the one spelling
@@ -323,8 +335,8 @@ matrix fields.
 
 | Suite                          | Tests        | Exercises                                                            |
 | ------------------------------ | ------------ | -------------------------------------------------------------------- |
-| `scripts/just-helpers.bats`    | 51           | resolve (upstream probe stubbed, stdout is one record), cleanup package identity, aggregate, release selection, pipeline and entrypoint mocks |
-| `scripts/check-variants.bats`  | 34           | the two check libraries, upstream identity probes, bump-walk budget, and `check-variants.sh` driven end to end over PATH stubs, against `resolve_variant` for the same fixture |
+| `scripts/just-helpers.bats`    | 60           | resolve (upstream probe stubbed, stdout is one record), cleanup package identity, aggregate, release selection, pipeline and entrypoint mocks |
+| `scripts/check-variants.bats`  | 36           | the two check libraries, upstream identity probes (both naming families, the untagged-build skip, the walk budget), and `check-variants.sh` driven end to end over PATH stubs, against `resolve_variant` for the same fixture |
 | `scripts/release-preview.bats` | 4            | `release-preview.py`                                                 |
 | `tests/build-helpers.bats`     | 9            | `build-helpers.bash`                                                 |
 | `scripts/push-helpers.bats`    | 6            | digest from push, one tag call, retry plumbing                       |

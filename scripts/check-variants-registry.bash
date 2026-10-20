@@ -214,12 +214,15 @@ upstream_repo() {
 # own label; upstream names that release either "{branch}-{version}" (its
 # testing and unstable builds) or a bare "{version}" (its stable build), tried
 # in that order, and each family is walked down its build counter, because
-# upstream publishes container builds a few counters before tagging them. No
-# name in any family resolves is an error rather than a guess.
+# upstream publishes container builds a few counters before tagging them.
+# Every name probed and missed means that build is not tagged yet, so the
+# answer is 2 and a caller may skip the variant; a search cut short by the
+# walk budget, or a probe upstream refused, means we do not know, which is 1.
 # Usage: resolve_upstream_tag <upstream_repo> <branch> <version>
-# Prints: "<git tag name> <version> <family>" on success, where <version> is the
-# one upstream actually named
-# Returns: 1 when the lookup fails or upstream has no tag for that version
+# Prints: "<git tag name> <version> <family>" on success, where <version> is
+# the one upstream actually named
+# Returns: 1 a probe was refused or the walk budget cut the search short; 2
+# every name in both families was probed and none names that build
 resolve_upstream_tag() {
   local upstream="${1:?upstream repo required}"
   local branch="${2:?branch required}"
@@ -229,11 +232,11 @@ resolve_upstream_tag() {
     headers+=(-H "Authorization: Bearer ${GH_TOKEN}")
   fi
 
-  local family tag json head_sha candidate
+  local family tag json head_sha candidate msg
   local -a candidates=()
-  for family in prefixed bare-version; do
-    mapfile -t candidates < <(upstream_version_candidates "$version")
+  mapfile -t candidates < <(upstream_version_candidates "$version")
 
+  for family in prefixed bare-version; do
     for candidate in "${candidates[@]}"; do
       if [[ "$family" == "prefixed" ]]; then
         tag="${branch}-${candidate}"
@@ -249,12 +252,21 @@ resolve_upstream_tag() {
         return 0
       fi
 
-      echo "  upstream has no tag ${tag}: $(jq -r '.message // "no such ref"' <<<"$json")" >&2
+      msg=$(jq -r '.message // "no such ref"' <<<"$json")
+      if [[ "$msg" == *"rate limit"* ]]; then
+        echo "  upstream refused the probe for ${tag}: ${msg}" >&2
+        return 1
+      fi
+      echo "  upstream has no tag ${tag}: ${msg}" >&2
     done
   done
 
-  fail "No upstream git tag for version ${version} of branch ${branch} in ${upstream}"
-  return 1
+  if ((${#candidates[@]} >= UPSTREAM_BUILD_WALK)); then
+    fail "No upstream git tag for version ${version} of branch ${branch} in ${upstream}: stopped after ${UPSTREAM_BUILD_WALK} build counters"
+    return 1
+  fi
+  warn "No upstream git tag names build ${version} of branch ${branch} in ${upstream}; upstream published that build before tagging it"
+  return 2
 }
 
 # Versions upstream might have named, newest first: the labelled version and the

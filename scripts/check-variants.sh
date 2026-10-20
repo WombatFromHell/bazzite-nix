@@ -132,12 +132,13 @@ for ((i = 0; i < variant_count; i++)); do
   # Identity, canonical tag and the tag list all come from resolve_variant, the
   # one driver the Justfile uses: the record it prints IS this variant's identity,
   # so the upstream-identity rule lives in exactly one place (DESIGN.md decision 10).
-  # rc 2 is "no free version tag within the bump walk" - that variant is skipped,
-  # because one busy variant must not fail the whole check.
+  # rc 2 is "this variant has no version to build against right now": every tag
+  # within the collision bump walk is taken, or upstream published the labelled
+  # build before tagging it. Either way one variant must not fail the whole check.
   record="" rc=0
   record=$(resolve_variant "$variant" "$VARIANTS_CONFIG" "$REPO" "$FORCE_BUILD" "$REGISTRY") || rc=$?
   if [[ "$rc" -eq 2 ]]; then
-    fail "Variant $variant: no free version tag to name a build; skipping"
+    warn "Variant $variant: no version to build against; skipping"
     echo "::endgroup::"
     continue
   elif [[ "$rc" -ne 0 ]]; then

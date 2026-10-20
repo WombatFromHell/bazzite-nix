@@ -160,8 +160,10 @@ generate_tags() {
 # force_build (4th arg, default "0"): enable version-collision handling like CI.
 # registry (5th arg, default derived from GITHUB_REPOSITORY_OWNER / repo_organization).
 # Returns: 0 a record was printed; 1 the variant cannot be identified (unknown/disabled
-# name, no upstream tag names it, base label is not a release version); 2 no free version
-# tag within COLLISION_BUMP_WALK bumps — a caller may skip that variant and keep going.
+# name, base label is not a release version, the upstream search could not complete);
+# 2 it has no version to build against right now — upstream probed every name and none
+# names the labelled build (published before tagging), or no free tag within
+# COLLISION_BUMP_WALK bumps — so a caller may skip it and keep going.
 resolve_variant() {
   local variant_or_spec="${1:?variant_or_spec required}"
   local variants_config="${2:-.github/variants.json}"
@@ -169,7 +171,7 @@ resolve_variant() {
   local force_build="${4:-0}"
   local registry="${5:-}"
   local spec row base_image build_script suffix image_name_resolved tag canonical
-  local latest tags_json tags_csv collision_detected bump
+  local latest tags_json tags_csv collision_detected bump upstream_rc
   local base_label base_version upstream_tag upstream_version tag_family identity
 
   spec="$variant_or_spec"
@@ -231,10 +233,12 @@ resolve_variant() {
     echo "ERROR: base image $base_image is labelled $base_label, which is not a release version" >&2
     return 1
   fi
-  if ! identity=$(resolve_upstream_tag "$(upstream_repo "$base_image")" "$spec" "$base_version"); then
-    echo "ERROR: no upstream git tag names $base_version of branch $spec in $(upstream_repo "$base_image")" >&2
-    return 1
-  fi
+  identity=$(resolve_upstream_tag "$(upstream_repo "$base_image")" "$spec" "$base_version") || {
+    upstream_rc=$?
+    [[ $upstream_rc -eq 1 ]] &&
+      echo "ERROR: the upstream search for $base_version of branch $spec in $(upstream_repo "$base_image") could not complete" >&2
+    return "$upstream_rc"
+  }
   read -r upstream_tag upstream_version tag_family <<<"$identity"
   canonical="$upstream_version"
   echo "::notice::Upstream identity for $spec: git tag $upstream_tag (family $tag_family)" >&2

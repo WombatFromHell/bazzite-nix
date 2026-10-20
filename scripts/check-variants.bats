@@ -230,7 +230,7 @@ EOF
   [ "$out" = "44.20261012.1 44.20261012.1 bare-version" ]
 }
 
-@test "resolve_upstream_tag fails when upstream names neither form" {
+@test "resolve_upstream_tag answers 1, not 2, when the walk budget cut the search short" {
   cat >"$STUB_DIR/curl" <<'EOF'
 #!/usr/bin/env bash
 echo '{"message":"Not Found"}'
@@ -240,6 +240,24 @@ EOF
   run resolve_upstream_tag "ublue-os/bazzite" "unstable" "45.20261019.7"
   [ "$status" -eq 1 ]
   [[ "$output" == *"No upstream git tag for version 45.20261019.7 of branch unstable"* ]]
+}
+
+@test "the day's first build is published before upstream tags it, in either family" {
+  # Shape probed live 2026-10-20: ghcr.io/ublue-os/bazzite:testing is labelled
+  # testing-45.20261020.1, /commits/testing-45.20261020.1 answered 404 minutes
+  # after that build was pushed, and the bare 45.20261020.1 never exists (a
+  # testing build is only ever named with the branch prefix), so the same-day
+  # walk has nothing lower than counter .1 to try.
+  cat >"$STUB_DIR/curl" <<'EOF'
+#!/usr/bin/env bash
+echo '{"message":"Not Found"}'
+EOF
+  chmod +x "$STUB_DIR/curl"
+
+  run resolve_upstream_tag "ublue-os/bazzite" "testing" "45.20261020.1"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"upstream has no tag testing-45.20261020.1"* ]]
+  [[ "$output" == *"upstream has no tag 45.20261020.1"* ]]
 }
 
 @test "resolve_upstream_tag names the upstream answer for each name it probed" {
@@ -505,5 +523,53 @@ EOF
   [ "$status" -eq 0 ]
   [[ "$output" == *"already exist"* ]]
   [ "$(jq 'length' "$dir/artifacts/variants_results.json")" = "0" ]
+}
+
+@test "the check job survives upstream publishing a build before tagging it" {
+  # Both variants are the ones that were failing in the check job on 2026-10-20:
+  # testing is labelled testing-45.20261020.1 and untagged when its day's first
+  # build is pushed, stable is labelled 44.20261012.1 and tagged bare.
+  local dir
+  dir="$(mktemp -d)"
+  cat >"$dir/variants.json" <<'EOF'
+{"variants": [
+  {"name": "testing", "base_image": "ghcr.io/ublue-os/bazzite:testing"},
+  {"name": "stable", "base_image": "ghcr.io/ublue-os/bazzite:stable"}
+]}
+EOF
+  cat >"$STUB_DIR/skopeo" <<'EOF'
+#!/usr/bin/env bash
+[[ "${1:-}" != "inspect" ]] && exit 0
+ref="${2:-}"; ref="${ref#docker://}"
+case "$ref" in
+  ghcr.io/ublue-os/bazzite:testing)
+    printf '{"Digest":"sha256:bb","Labels":{"org.opencontainers.image.version":"testing-45.20261020.1"}}\n'
+    exit 0 ;;
+  ghcr.io/ublue-os/bazzite:stable)
+    printf '{"Digest":"sha256:aa","Labels":{"org.opencontainers.image.version":"44.20261012.1"}}\n'
+    exit 0 ;;
+esac
+exit 1
+EOF
+  cat >"$STUB_DIR/curl" <<'EOF'
+#!/usr/bin/env bash
+url=""
+for a in "$@"; do [[ "$a" == */commits/* ]] && url="${a##*/commits/}"; done
+case "${url:-}" in
+  44.20261012.1) echo '{"sha":"ffffffffffffffffffffffffffffffffffffffff"}' ;;
+  *) echo '{"message":"Not Found"}' ;;
+esac
+EOF
+  chmod +x "$STUB_DIR/skopeo" "$STUB_DIR/curl"
+
+  run ci_run "$dir"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"::warning::"* ]]
+  [ "$(jq 'length' "$dir/artifacts/variants_results.json")" = "1" ]
+  [ "$(jq -r '.[0].variant' "$dir/artifacts/variants_results.json")" = "stable" ]
+  [ "$(jq -r '.[0].upstream_tag' "$dir/artifacts/variants_results.json")" = "44.20261012.1" ]
+
+  run resolve_variant "testing" "$dir/variants.json" "repo" "false" "ghcr.io/test"
+  [ "$status" -eq 2 ]
 }
 
