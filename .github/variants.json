@@ -19,17 +19,22 @@
         "cleanup": "boolean (optional, default: true)"
       }
     ],
-    "_output": "Fields computed by check-variants.sh for each variant needing a build:",
+    "_output": "The resolve_variant record plus needs_build; aggregate_variants deletes needs_build before these reach build.yml:",
     "output_fields": {
       "variant": "string - the variant name",
       "base_image": "string - the base image reference",
       "build_script": "string - the build script to use",
-      "suffix": "string - the suffix (may be empty)",
-      "parent_version": "string - version label from upstream base image",
-      "digest": "string - SHA256 digest of upstream base image (without sha256: prefix)",
+      "suffix": "string - the name suffix (may be empty)",
+      "parent_version": "string - the version upstream's resolved git tag names",
+      "upstream_tag": "string - the upstream git tag naming parent_version",
+      "upstream_version": "string - parent_version as upstream spells it in that tag",
+      "tag_family": "string - which naming family resolved (prefixed or bare-version)",
       "canonical_tag": "string - computed canonical version tag (with collision handling)",
+      "collision_detected": "boolean - the version tag was taken, so it was bumped within the bump walk",
+      "latest": "boolean - this variant also publishes the 'latest' alias",
+      "target_image": "string - the local image reference the build works against",
+      "tag": "string - the branch name the tags are built from (the variant name)",
       "tags": "string - comma-separated list of tags to apply",
-      "prev_ref": "string - full image ref of previous build for rechunk (may be empty)",
       "needs_build": "boolean - whether this variant needs rebuilding"
     }
   },

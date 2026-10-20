@@ -145,24 +145,26 @@ stub_upstream_probe() {
   }
 }
 
-@test "resolve_variant outputs correct variable assignments" {
+@test "resolve_variant returns one record" {
   local test_dir
   test_dir="$(setup_variant_json)"
 
   stub_upstream_probe
 
-  # Mock skopeo to return a version label
+  # Mock skopeo to return a version label (upstream spells it {major}.{date}.{build})
   skopeo() {
-    echo '{"Labels":{"org.opencontainers.image.version":"1.0.0"}}'
+    echo '{"Labels":{"org.opencontainers.image.version":"44.20261012.1"}}'
   }
   export -f skopeo
 
   local output
   output=$(resolve_variant "testing" "$test_dir/variants.json" "bazzite-nix")
-  [[ "$output" == *'TARGET_IMAGE="localhost/bazzite-nix"'* ]]
-  [[ "$output" == *'VARIANT_NAME="testing"'* ]]
-  [[ "$output" == *'BASE_IMAGE="ghcr.io/ublue-os/bazzite:stable"'* ]]
-  [[ "$output" == *'PARENT_VERSION="1.0.0"'* ]]
+  jq -e . >/dev/null <<<"$output"
+  [[ "$(jq -r .target_image <<<"$output")" == "localhost/bazzite-nix" ]]
+  [[ "$(jq -r .variant <<<"$output")" == "testing" ]]
+  [[ "$(jq -r .base_image <<<"$output")" == "ghcr.io/ublue-os/bazzite:stable" ]]
+  [[ "$(jq -r .parent_version <<<"$output")" == "44.20261012.1" ]]
+  [[ "$(jq -r .collision_detected <<<"$output")" == "false" ]]
 }
 
 @test "resolve_variant bumps canonical on version collision (force_build)" {
@@ -171,21 +173,22 @@ stub_upstream_probe() {
 
   stub_upstream_probe
 
-  # Mock skopeo: testing-1.0.1 is free, everything else exists
+  # Mock skopeo: the bumped tag is free, everything else exists
   skopeo() {
     case "$*" in
-    *"testing-1.0.1"*) return 1 ;;
-    *) echo '{"Labels":{"org.opencontainers.image.version":"1.0.0"}}' ;;
+    *"testing-44.20261012.2"*) return 1 ;;
+    *) echo '{"Labels":{"org.opencontainers.image.version":"44.20261012.1"}}' ;;
     esac
   }
   export -f skopeo
 
   local output
   output=$(resolve_variant "testing" "$test_dir/variants.json" "bazzite-nix" "1" "ghcr.io/test-owner")
-  [[ "$output" == *'CANONICAL_TAG="1.0.1"'* ]]
-  [[ "$output" == *'COLLISION_DETECTED="true"'* ]]
+  jq -e . >/dev/null <<<"$output"
+  [[ "$(jq -r .canonical_tag <<<"$output")" == "44.20261012.2" ]]
+  [[ "$(jq -r .collision_detected <<<"$output")" == "true" ]]
   # The collision bump moves the tag name, not the upstream version the labels carry.
-  [[ "$output" == *'PARENT_VERSION="1.0.0"'* ]]
+  [[ "$(jq -r .parent_version <<<"$output")" == "44.20261012.1" ]]
 }
 
 @test "resolve_variant drops {sha256} tags (digest is resolved at push time, not from upstream)" {
@@ -209,13 +212,14 @@ EOF
 
   # Mock skopeo: upstream has a digest — resolve_variant must NOT use it for tags
   skopeo() {
-    echo '{"Labels":{"org.opencontainers.image.version":"1.0.0"},"Digest":"sha256:fbd9a04deadbeef"}'
+    echo '{"Labels":{"org.opencontainers.image.version":"44.20261012.1"},"Digest":"sha256:fbd9a04deadbeef"}'
   }
   export -f skopeo
 
   local output
   output=$(resolve_variant "stable" "$test_dir/variants.json" "bazzite-nix")
-  [[ "$output" == *'TAGS="1.0.0,stable"'* ]]
+  jq -e . >/dev/null <<<"$output"
+  [[ "$(jq -r .tags <<<"$output")" == "44.20261012.1,stable" ]]
   run ! [[ "$output" == *"fbd9a04deadbeef"* ]]
 }
 
@@ -231,30 +235,32 @@ EOF
 
   local output
   output=$(resolve_variant "ghcr.io/ublue-os/bazzite:testing" "$test_dir/variants.json" "bazzite-nix")
-  [[ "$output" == *'BASE_IMAGE="ghcr.io/ublue-os/bazzite:testing"'* ]]
-  [[ "$output" == *'TAG="testing"'* ]]
+  jq -e . >/dev/null <<<"$output"
+  [[ "$(jq -r .base_image <<<"$output")" == "ghcr.io/ublue-os/bazzite:testing" ]]
+  [[ "$(jq -r .tag <<<"$output")" == "testing" ]]
   # A spec has no upstream git probe: its parent version is the base image label.
-  [[ "$output" == *'PARENT_VERSION="2.0.0"'* ]]
-  # No registry collision check either, but the var must still be defined: the
-  # record composer reads it under `set -u`.
-  [[ "$output" == *'COLLISION_DETECTED="false"'* ]]
+  [[ "$(jq -r .parent_version <<<"$output")" == "2.0.0" ]]
+  # No registry collision check either, but the field must still be present:
+  # every reader of the record reads it unguarded.
+  [[ "$(jq -r .collision_detected <<<"$output")" == "false" ]]
+  [[ "$(jq -r .upstream_tag <<<"$output")" == "" ]]
 }
 
-@test "resolve_variant stdout is only assignments, so eval cannot break" {
+@test "resolve_variant stdout is one record line, so no caller evals it" {
   local test_dir
   test_dir="$(setup_variant_json)"
 
   stub_upstream_probe
 
   skopeo() {
-    echo '{"Labels":{"org.opencontainers.image.version":"1.0.0"}}'
+    echo '{"Labels":{"org.opencontainers.image.version":"44.20261012.1"}}'
   }
   export -f skopeo
 
-  local output bad
+  local output
   output=$(resolve_variant "testing" "$test_dir/variants.json" "bazzite-nix")
-  bad=$(printf '%s\n' "$output" | grep -vE '^[A-Z_]+=".*"$' || true)
-  [[ -z "$bad" ]]
+  [[ "$(wc -l <<<"$output")" -eq 1 ]]
+  jq -e . >/dev/null <<<"$output"
 }
 
 # ── build_bib ───────────────────────────────────────────────────────────────────────
@@ -389,19 +395,14 @@ EOF
 # ── print_build_summary / echo_build_assignments ────────────────────────────
 
 @test "print_build_summary and echo_build_assignments emit the build refs" {
-  local out
-  out=$(VARIANT_NAME=stable CANONICAL_TAG=1.0.0 TAGS=stable KERNEL_VERSION=6.6.0 \
-    MANIFEST_PACKAGES=42 SOURCE_REF=containers-storage:localhost/chunked-img:stable \
-    FULL_BUILD_DIGEST=sha256:abc BUILD_DIGEST=abc \
-    print_build_summary "Test complete" 2>&1)
+  local out record
+  record='{"variant":"stable","canonical_tag":"1.0.0","tags":"stable","kernel_version":"6.6.0","manifest_packages":"42","source_ref":"containers-storage:localhost/chunked-img:stable","full_build_digest":"sha256:abc","build_digest":"abc"}'
+  out=$(print_build_summary "Test complete" "$record" 2>&1)
   [[ "$out" == *"=== Test complete ==="* ]]
   [[ "$out" == *"Variant      : stable"* ]]
   [[ "$out" == *"Short digest : abc"* ]]
 
-  out=$(VARIANT_NAME=stable CANONICAL_TAG=1.0.0 TAGS=stable KERNEL_VERSION=6.6.0 \
-    MANIFEST_PACKAGES=42 SOURCE_REF=containers-storage:localhost/chunked-img:stable \
-    FULL_BUILD_DIGEST=sha256:abc BUILD_DIGEST=abc \
-    echo_build_assignments)
+  out=$(echo_build_assignments "$record")
   [[ "$out" == *"KERNEL_VERSION=6.6.0"* ]]
   [[ "$out" == *"BUILD_DIGEST=abc"* ]]
 }
@@ -501,7 +502,7 @@ build_core_record='{"variant":"stable","version_label":"44.1","repo_owner":"owne
 run_variant_mocks() {
   local calls="$1"
   resolve_variant() {
-    echo "VARIANT_NAME=stable"
+    echo '{"variant":"stable"}'
   }
   buildah() { return 0; } # pretend every working image exists
   preview_tags() { :; }
@@ -510,7 +511,6 @@ run_variant_mocks() {
     echo "OPTIONS=$2" >>"$calls"
     echo '{"source_ref":"containers-storage:localhost/raw-img:stable"}'
   }
-  apply_build_record() { :; }
   print_build_summary() { :; }
   echo_build_assignments() { :; }
 }
@@ -733,4 +733,134 @@ push_variant_mocks() {
   push_variant_mocks
   push_variant '{"source_ref":"x","tags":"t"}' '{}' 2>"$err" || true
   grep -q 'registry and repo are required push fields' "$err"
+}
+
+# ── cleanup_packages ────────────────────────────────────────────────────────
+
+cleanup_variant_json() {
+  local test_dir
+  test_dir="$(mktemp -d)"
+  cat >"$test_dir/variants.json" <<'EOF'
+{
+  "variants": [
+    { "name": "stable", "base_image": "ghcr.io/ublue-os/bazzite:stable" },
+    { "name": "testing", "base_image": "ghcr.io/ublue-os/bazzite:testing", "suffix": "-testing" },
+    { "name": "gpu", "base_image": "ghcr.io/ublue-os/bazzite:stable", "suffix": "-gpu", "cleanup": false },
+    { "name": "deck", "base_image": "ghcr.io/ublue-os/bazzite:stable", "suffix": "-deck", "disabled": true }
+  ]
+}
+EOF
+  echo "$test_dir"
+}
+
+@test "cleanup_packages takes the default set from config policy" {
+  local test_dir
+  test_dir="$(cleanup_variant_json)"
+  run cleanup_packages "owner/Bazzite-NIX" "$test_dir/variants.json"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf 'bazzite-nix\nbazzite-nix-testing')" ]
+}
+
+@test "cleanup_packages honours a named package even when config opts it out" {
+  local test_dir
+  test_dir="$(cleanup_variant_json)"
+  run cleanup_packages "owner/Bazzite-NIX" "$test_dir/variants.json" " bazzite-nix-GPU ,bazzite-nix-deck "
+  [ "$status" -eq 0 ]
+  [ "$output" = "$(printf 'bazzite-nix-deck\nbazzite-nix-gpu')" ]
+}
+
+@test "cleanup_packages prints nothing for a filter that matches no package" {
+  local test_dir
+  test_dir="$(cleanup_variant_json)"
+  run cleanup_packages "owner/Bazzite-NIX" "$test_dir/variants.json" "nothing"
+  [ "$status" -eq 0 ]
+  [ "$output" = "" ]
+}
+
+@test "cleanup addresses only packages the variant records name" {
+  local test_dir
+  test_dir="$(cleanup_variant_json)"
+  local expected
+  expected="$(jq -r --arg base bazzite-nix '
+      [ .variants[] | select(.disabled != true and .cleanup != false) | ($base + (.suffix // "")) ] | unique | .[]
+    ' "$test_dir/variants.json")"
+  [[ "$(cleanup_packages "owner/Bazzite-NIX" "$test_dir/variants.json")" == "$expected" ]]
+}
+
+# ── Justfile entrypoints: one dispatcher, every recipe one call ─────────────
+# The dispatcher is what makes the Justfile's recipe bodies single lines (DESIGN.md §3:
+# "entrypoint files are small on purpose"). Asserted over the real Justfile so a recipe
+# cannot quietly regain a per-recipe preamble or a shell block.
+
+@test "dispatcher runs the named helper with its arguments" {
+  run "${BATS_TEST_DIRNAME}/just-helpers.sh" disk_file_name qcow2
+  [ "$status" -eq 0 ]
+  [ "$output" = "disk.qcow2" ]
+}
+
+@test "dispatcher fails naming an entrypoint that does not exist" {
+  run -127 "${BATS_TEST_DIRNAME}/just-helpers.sh" no_such_entrypoint_zz
+  [[ "$output" == *"no_such_entrypoint_zz"* ]]
+}
+
+@test "no Justfile recipe carries a bash preamble and the file stays fmt-clean" {
+  local justfile="${BATS_TEST_DIRNAME}/../Justfile"
+  [[ "$(grep -c '#!/usr/bin/env bash' "$justfile")" -eq 0 ]]
+  ! grep -q 'source "{{ just_helpers }}"' "$justfile"
+  run just --unstable --fmt --check -f "$justfile"
+  [ "$status" -eq 0 ]
+}
+
+@test "helper recipes delegate to the dispatcher, they do not inline shell" {
+  local justfile="${BATS_TEST_DIRNAME}/../Justfile"
+  for recipe in lint format clean clean-vm check-variants list-variants build rootful-load; do
+    run just --justfile "$justfile" --dry-run "$recipe"
+    [[ "$output" == *"just-helpers.sh"* ]]
+  done
+}
+
+@test "entry_variant sends each mode to run_variant and rejects the rest" {
+  local called
+  called="$(mktemp)"
+  run_variant() { printf '%s\n' "$1" >>"$called"; }
+  entry_variant rechunk testing image_name=bazzite-nix
+  entry_variant relabel testing image_name=bazzite-nix
+  entry_variant pipeline testing image_name=bazzite-nix
+  run entry_variant bogus testing
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"mode must be"* ]]
+  run cat "$called"
+  [ "$output" = "$(printf 'rechunk\nrelabel\npipeline')" ]
+}
+
+@test "rootful_load resolves the variant and streams it into rootful storage" {
+  local got
+  got="$(mktemp)"
+  resolve_variant() { printf '%s\n' "stable" >&2; echo '{"variant":"stable","tag":"t"}'; }
+  podman() {
+    printf '%s\n' "$*" >>"$got"
+    [ "$1" = "load" ] || printf 'payload\n'
+  }
+  sudo() { podman "${@:2}"; }
+  pv() { cat; }
+  rootful_load testing cfg.json bazzite-nix
+  [ "$(cat "$got")" = "$(printf 'save localhost/chunked-img:stable\nload')" ]
+}
+
+@test "the OCI layout root is a real path, never a template" {
+  local root
+  root="$(bash -c "source '$BATS_TEST_DIRNAME/just-helpers.bash' && oci_output_root")"
+  [[ "$root" == *"/oci" ]]
+  [[ "$root" != *"{{"* ]]
+}
+
+@test "recipe parameter defaults never interpolate (they are literals)" {
+  local justfile="${BATS_TEST_DIRNAME}/../Justfile"
+  ! grep -qE '[$][a-z_]+="[^"]*\{\{' "$justfile"
+}
+
+@test "entry_vm_build rejects a type that has no disk format" {
+  run entry_vm_build iso testing
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"VM type must be qcow2 or raw"* ]]
 }

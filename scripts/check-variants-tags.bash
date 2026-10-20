@@ -91,7 +91,7 @@ compute_canonical_tag() {
     echo "::notice::${next_check_tag} also exists, checking next..." >&2
     ((next_num++))
     if ((next_num - probe_start >= COLLISION_BUMP_WALK)); then
-      echo "::error::${COLLISION_BUMP_WALK} bumped tags after ${search_base} already exist; stopping the bump walk" >&2
+      fail "${COLLISION_BUMP_WALK} bumped tags after ${search_base} already exist; stopping the bump walk"
       return 1
     fi
   done
@@ -152,10 +152,16 @@ generate_tags() {
 }
 
 # ── Variant resolution ──────────────────────────────────────────────────────
-# Resolve a variant name from variants.json into shell variable assignments
-# Usage: eval "$(resolve_variant "testing" ".github/variants.json" "bazzite-nix" "1" "ghcr.io/owner")"
+# Resolve a variant name or an explicit image:tag spec into one JSON record.
+# Usage: resolve_variant <variant_or_spec> [variants_config] [image_name] [force_build] [registry]
+# Record: {variant, tag, target_image, base_image, build_script, suffix, latest,
+#          canonical_tag, parent_version, upstream_tag, upstream_version, tag_family,
+#          collision_detected, tags}  — a superset of the CI matrix entry shape.
 # force_build (4th arg, default "0"): enable version-collision handling like CI.
 # registry (5th arg, default derived from GITHUB_REPOSITORY_OWNER / repo_organization).
+# Returns: 0 a record was printed; 1 the variant cannot be identified (unknown/disabled
+# name, no upstream tag names it, base label is not a release version); 2 no free version
+# tag within COLLISION_BUMP_WALK bumps — a caller may skip that variant and keep going.
 resolve_variant() {
   local variant_or_spec="${1:?variant_or_spec required}"
   local variants_config="${2:-.github/variants.json}"
@@ -187,16 +193,13 @@ resolve_variant() {
     canonical="$(get_parent_version "$spec")" || canonical="$tag"
     # No variants.json entry to source a tags template from — single-tag fallback
     tags_csv="$tag"
-    echo "TARGET_IMAGE=\"$(image_ref "$image_name")\""
-    echo "TAG=\"$tag\""
-    echo "BASE_IMAGE=\"$spec\""
-    echo "BUILD_SCRIPT=\"$build_script\""
-    echo "VARIANT_NAME=\"$tag\""
-    echo "CANONICAL_TAG=\"$canonical\""
-    echo "PARENT_VERSION=\"$canonical\""
-    echo "UPSTREAM_TAG=\"\""
-    echo "COLLISION_DETECTED=\"false\""
-    echo "TAGS=\"$tags_csv\""
+    jq -cn --arg variant "$tag" --arg tag "$tag" --arg target_image "$(image_ref "$image_name")" \
+      --arg base_image "$spec" --arg build_script "$build_script" --arg canonical_tag "$canonical" \
+      --arg parent_version "$canonical" --arg tags "$tags_csv" \
+      '{variant: $variant, tag: $tag, target_image: $target_image, base_image: $base_image,
+       build_script: $build_script, suffix: "", latest: false, canonical_tag: $canonical_tag,
+       parent_version: $parent_version, upstream_tag: "", upstream_version: $parent_version,
+       tag_family: "", collision_detected: false, tags: $tags}'
     return 0
   fi
 
@@ -222,6 +225,12 @@ resolve_variant() {
   # forms, and the tag that resolves names the release we are cutting from.
   base_label="$(get_parent_version "$base_image")" || base_label="$tag"
   base_version="$(version_of_tag "$base_label" "$spec")"
+  # A version label that is not a release version (`latest`, a moving tag) names no
+  # release, so it is an error rather than something to probe upstream against.
+  if [[ ! "$base_version" =~ $VERSIONED_TAG_PATTERN ]]; then
+    echo "ERROR: base image $base_image is labelled $base_label, which is not a release version" >&2
+    return 1
+  fi
   if ! identity=$(resolve_upstream_tag "$(upstream_repo "$base_image")" "$spec" "$base_version"); then
     echo "ERROR: no upstream git tag names $base_version of branch $spec in $(upstream_repo "$base_image")" >&2
     return 1
@@ -245,14 +254,14 @@ resolve_variant() {
     if [[ -n "$owner" ]]; then
       registry_prefix="$(registry_url "$owner")/${image_name_resolved}"
     else
-      echo "::warning::force_build collision handling needs GITHUB_REPOSITORY_OWNER (or a registry arg); skipping collision check" >&2
+      warn "force_build collision handling needs GITHUB_REPOSITORY_OWNER (or a registry arg); skipping collision check"
     fi
   fi
 
   if [[ -n "$registry_prefix" ]]; then
     bump=$(compute_canonical_tag "$canonical" "$registry_prefix" "$force_build" "$spec") || {
       echo "ERROR: no free version tag within $COLLISION_BUMP_WALK bumps of $canonical in $registry_prefix" >&2
-      return 1
+      return 2
     }
     read -r canonical collision_detected <<<"$bump"
   elif [[ "$canonical" =~ ^[a-zA-Z]+-([0-9].*)$ ]]; then
@@ -267,14 +276,14 @@ resolve_variant() {
   # image's digest (mirrors check-variants.sh).
   tags_csv=$(generate_tags "$spec" "$canonical" "$latest" "$tags_json")
 
-  echo "TARGET_IMAGE=\"$(image_ref "$image_name_resolved")\""
-  echo "TAG=\"${spec}\""
-  echo "BASE_IMAGE=\"${base_image}\""
-  echo "BUILD_SCRIPT=\"${build_script}\""
-  echo "VARIANT_NAME=\"${spec}\""
-  echo "CANONICAL_TAG=\"$canonical\""
-  echo "PARENT_VERSION=\"$upstream_version\""
-  echo "UPSTREAM_TAG=\"$upstream_tag\""
-  echo "COLLISION_DETECTED=\"$collision_detected\""
-  echo "TAGS=\"$tags_csv\""
+  jq -cn --arg variant "$spec" --arg tag "$spec" --arg target_image "$(image_ref "$image_name_resolved")" \
+    --arg base_image "$base_image" --arg build_script "$build_script" --arg suffix "$suffix" \
+    --arg canonical_tag "$canonical" --arg parent_version "$upstream_version" \
+    --arg upstream_tag "$upstream_tag" --arg upstream_version "$upstream_version" \
+    --arg tag_family "$tag_family" --arg tags "$tags_csv" --arg latest "$latest" \
+    --arg collision_detected "$collision_detected" \
+    '{variant: $variant, tag: $tag, target_image: $target_image, base_image: $base_image,
+     build_script: $build_script, suffix: $suffix, latest: ($latest == "true"), canonical_tag: $canonical_tag,
+     parent_version: $parent_version, upstream_tag: $upstream_tag, upstream_version: $upstream_version,
+     tag_family: $tag_family, collision_detected: ($collision_detected == "true"), tags: $tags}'
 }

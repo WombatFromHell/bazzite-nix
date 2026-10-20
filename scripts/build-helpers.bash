@@ -4,9 +4,21 @@
 
 set -euo pipefail
 
+# shellcheck source=scripts/log-helpers.bash
+source "$(dirname "${BASH_SOURCE[0]}")/log-helpers.bash"
+
 # Home for one run's OCI layouts and VM images. The Justfile's cache_dir points
 # at the same place; this is the only default, and every reader is a plain read.
 export CACHE_DIR="${CACHE_DIR:-$HOME/.cache/bazzite-nix}"
+
+# Base dir for one variant's OCI layout: the pipeline writes <dir>/<variant>/chunked, and
+# clean/VM readers look in the same place. Override OCI_OUTPUT_DIR to relocate a run.
+oci_output_root() { echo "${OCI_OUTPUT_DIR:-${CACHE_DIR}/oci}"; }
+
+# Variant selector for a caller that named none: the Justfile exports DEFAULT_TAG, so a
+# bare `just build`/`just rechunk` keeps meaning the same variant. The literal here is
+# only the fallback for sourcing helpers outside the Justfile.
+default_variant() { echo "${DEFAULT_TAG:-testing}"; }
 
 # Fixed build epoch. finalize.sh clamps /usr /etc /opt mtimes to 1970-01-01, so every
 # step that writes an image manifest uses this same epoch: reruns of one input then keep
@@ -96,24 +108,24 @@ extract_image_info() {
   local output kernel_version manifest
   output=$(podman run --rm "$image_ref" \
     sh -c 'cat /usr/share/ublue-os/kernel-version; echo; cat /usr/share/ublue-os/manifest.json') || {
-    echo "::error::Failed to read image metadata from image"
+    fail "Failed to read image metadata from image"
     exit 1
   }
   kernel_version=${output%%$'\n'*}
   manifest=${output#*$'\n'}
   if [ -z "$kernel_version" ]; then
-    echo "::error::/usr/share/ublue-os/kernel-version is empty in image"
+    fail "/usr/share/ublue-os/kernel-version is empty in image"
     exit 1
   fi
 
   # Validate the manifest contains a valid {"packages": {...}} object
   local packages_count
   packages_count=$(echo "$manifest" | jq -r '.packages | if type == "object" then length else empty end' 2>/dev/null) || {
-    echo "::error::/usr/share/ublue-os/manifest.json does not contain a valid {\"packages\": {...}} object"
+    fail "/usr/share/ublue-os/manifest.json does not contain a valid {\"packages\": {...}} object"
     exit 1
   }
   if [ -z "$packages_count" ] || [ "$packages_count" -eq 0 ]; then
-    echo "::error::/usr/share/ublue-os/manifest.json contains no packages (count=${packages_count})"
+    fail "/usr/share/ublue-os/manifest.json contains no packages (count=${packages_count})"
     exit 1
   fi
 
@@ -146,7 +158,7 @@ assemble_labels() {
   # Compact to single line so it survives label file write/read correctly
   local manifest
   manifest=$(jq -c '.' "$manifest_file") || {
-    echo "::error::Failed to parse manifest file: $manifest_file"
+    fail "Failed to parse manifest file: $manifest_file"
     exit 1
   }
 
@@ -221,7 +233,7 @@ relabel_image() {
 # mirrors relabel_image's). VM builds consume the layout directly.
 rechunk_image() {
   local tags_csv="${1:-latest}" labels_file="${2:-}" variant="${3:-latest}"
-  local oci_base_dir="${4:-${OCI_OUTPUT_DIR:-${CACHE_DIR}/oci}}"
+  local oci_base_dir="${4:-$(oci_output_root)}"
   local tags=()
   IFS=',' read -ra tags <<<"$tags_csv"
   local layout_dir chunkah_config chunkah_image chunkah_ref chunked
@@ -287,7 +299,7 @@ rechunk_image() {
 
     chunked=$(podman pull "oci:${layout_dir}")
     if [[ -z "$chunked" ]]; then
-      echo "::error::Failed to load rechunked OCI layout from ${layout_dir}" >&2
+      fail "Failed to load rechunked OCI layout from ${layout_dir}"
       exit 1
     fi
     podman tag "${chunked}" "$(image_ref chunked-img)"
@@ -315,11 +327,11 @@ extract_final_ref() {
 
   local full_digest
   full_digest=$(image_digest "$(image_ref "$image_name" "$tag")") || {
-    echo "::error::Expected containers-storage image ${source_ref} not found after rechunk"
+    fail "Expected containers-storage image ${source_ref} not found after rechunk"
     exit 1
   }
   if [ -z "$full_digest" ]; then
-    echo "::error::Could not determine image digest from ${source_ref}"
+    fail "Could not determine image digest from ${source_ref}"
     exit 1
   fi
 

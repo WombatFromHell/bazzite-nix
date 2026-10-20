@@ -28,13 +28,21 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/check-variants-registry.bash"
+# shellcheck disable=SC1090
+# source the GHA log directives (fail/warn) used by every part
+source "${SCRIPT_DIR}/log-helpers.bash"
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/check-variants-tags.bash"
+# resolve_variant spells a local image reference with build-helpers' image_ref,
+# the one spelling of that ref; nothing here builds, it only keeps the spelling
+# honest in the record.
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/build-helpers.bash"
 
 # Validate required environment variables
 for var in REGISTRY REPO FORCE_BUILD ARTIFACTS_DIR; do
   if [[ -z "${!var+x}" ]]; then
-    echo "::error::${var} environment variable must be set"
+    fail "${var} environment variable must be set"
     exit 1
   fi
 done
@@ -45,7 +53,7 @@ VARIANTS_CONFIG="${VARIANTS_CONFIG:-.github/variants.json}"
 # Start the run in a clean artifact directory, so no file from a previous run
 # can be read as this run's result.
 if [[ "$ARTIFACTS_DIR" == "." || "$ARTIFACTS_DIR" == ".." || "$ARTIFACTS_DIR" == "/" ]]; then
-  echo "::error::ARTIFACTS_DIR must be a dedicated directory, not . .. or /"
+  fail "ARTIFACTS_DIR must be a dedicated directory, not . .. or /"
   exit 1
 fi
 rm -rf -- "$ARTIFACTS_DIR"
@@ -53,7 +61,7 @@ mkdir -p "$ARTIFACTS_DIR"
 
 # Validate variants config file exists
 if [[ ! -f "$VARIANTS_CONFIG" ]]; then
-  echo "::error::Variants config file not found: $VARIANTS_CONFIG"
+  fail "Variants config file not found: $VARIANTS_CONFIG"
   exit 1
 fi
 
@@ -71,16 +79,19 @@ if [[ -n "${VARIANTS_OVERRIDE:-}" ]]; then
   override_active=true
   echo "::notice::Variants override active: ${VARIANTS_OVERRIDE}"
 
+  # Trim the list once, so "stable, testing" means the same as "stable,testing".
+  for idx in "${!override_variants[@]}"; do
+    override_variants[idx]="${override_variants[idx]//[[:space:]]/}"
+  done
+
   # Validate each override variant exists in config
   for requested_variant in "${override_variants[@]}"; do
-    # Trim whitespace
-    requested_variant=$(echo "$requested_variant" | xargs)
     if [[ -z "$requested_variant" ]]; then
       continue
     fi
     if ! variant_record "$requested_variant" "$VARIANTS_CONFIG" >/dev/null 2>&1; then
       AVAILABLE=$(variant_names "$VARIANTS_CONFIG" | paste -sd ', ' -)
-      echo "::error::Variant '$requested_variant' not found in $VARIANTS_CONFIG. Available: $AVAILABLE"
+      fail "Variant '$requested_variant' not found in $VARIANTS_CONFIG. Available: $AVAILABLE"
       exit 1
     fi
   done
@@ -96,37 +107,21 @@ echo "[]" >"$results_file"
 variant_count=$(jq '.variants | length' "$VARIANTS_CONFIG")
 
 for ((i = 0; i < variant_count; i++)); do
-  # Read variant from JSON config
   variant=$(jq -r ".variants[$i].name" "$VARIANTS_CONFIG")
-  base_image=$(jq -r ".variants[$i].base_image" "$VARIANTS_CONFIG")
-  build_script=$(jq -r ".variants[$i].build_script // empty" "$VARIANTS_CONFIG")
-  suffix=$(jq -r ".variants[$i].suffix // empty" "$VARIANTS_CONFIG")
-  latest=$(jq -r ".variants[$i].latest // false" "$VARIANTS_CONFIG")
-  tags_json=$(jq -c ".variants[$i].tags // empty" "$VARIANTS_CONFIG")
   disabled=$(jq -r ".variants[$i].disabled // false" "$VARIANTS_CONFIG")
 
-  # Default to build.sh if build_script is empty
-  build_script="${build_script:-build.sh}"
-
-  # Check if this variant is in the override list (if override is active)
+  # Override selection: only listed variants are considered, and a listed variant
+  # is checked even when config disables it.
   in_override=false
   if [[ "$override_active" == "true" ]]; then
-    for requested in "${override_variants[@]}"; do
-      requested=$(echo "$requested" | xargs)
-      if [[ "$variant" == "$requested" ]]; then
-        in_override=true
-        break
-      fi
-    done
-
-    # If override is active but this variant is not in the list, skip it
+    if [[ " ${override_variants[*]} " == *" $variant "* ]]; then
+      in_override=true
+    fi
     if [[ "$in_override" == "false" ]]; then
       echo "::notice::Variant $variant: not in override list, skipping"
       continue
     fi
   fi
-
-  # Skip disabled variants unless they're explicitly in the override list
   if [[ "$disabled" == "true" && "$in_override" == "false" ]]; then
     echo "::notice::Variant $variant: disabled in config, skipping"
     continue
@@ -134,68 +129,26 @@ for ((i = 0; i < variant_count; i++)); do
 
   echo "::group::Checking variant: $variant"
 
-  # Upstream identity for a variant: the configured base image's own label gives
-  # the version it now holds, and upstream's git tag of that version names the
-  # release whose commits the notes describe. The tag is probed by exact name
-  # ("{branch}-{version}", then a bare "{version}") rather than found by paging
-  # the tag list, because upstream pushes 40+ tags a day and an older branch is
-  # never inside a page window (DESIGN.md section 2).
-  upstream="$(upstream_repo "$base_image")"
-
-  inspect_json=$(inspect_image_with_retry "$base_image") || {
-    echo "::error::Failed to inspect base image after retries: $base_image"
-    echo "::endgroup::"
-    exit 1
-  }
-
-  if ! metadata=$(extract_image_metadata "$inspect_json"); then
-    echo "::error::Failed to extract metadata from base image $base_image"
-    echo "::endgroup::"
-    exit 1
-  fi
-
-  label_version=$(echo "$metadata" | awk '{print $1}')
-  base_version=$(version_of_tag "$label_version" "$variant")
-  if [[ ! "$base_version" =~ $VERSIONED_TAG_PATTERN ]]; then
-    echo "::error::Base image $base_image is labelled $label_version, which is not a release version"
-    echo "::endgroup::"
-    exit 1
-  fi
-
-  upstream_identity=$(resolve_upstream_tag "$upstream" "$variant" "$base_version") || {
-    echo "::error::No upstream git tag names version $base_version of variant $variant in $upstream"
-    echo "::endgroup::"
-    exit 1
-  }
-  read -r upstream_tag upstream_version tag_family <<<"$upstream_identity"
-  if [[ -z "$upstream_tag" || -z "$upstream_version" || -z "$tag_family" ]]; then
-    echo "::error::Upstream identity for variant $variant is incomplete: $upstream_identity"
-    echo "::endgroup::"
-    exit 1
-  fi
-
-  parent_version="$upstream_version"
-  echo "::notice::Upstream identity for $variant: git tag $upstream_tag (version $parent_version, family $tag_family)"
-  echo "Resolved parent_version from upstream git tag: $parent_version"
-
-  # Standardized image reference components
-  # shellcheck disable=SC2153
-  output_image="${REPO}${suffix}"
-  prefix="${REGISTRY}/${output_image}"
-
-  # Compute canonical tag, passing the variant name as branch for accurate collision checks.
-  canonical_bump=$(compute_canonical_tag "$parent_version" "$prefix" "$FORCE_BUILD" "$variant") || {
-    echo "::error::Variant $variant: no free version tag to name a build; skipping"
+  # Identity, canonical tag and the tag list all come from resolve_variant, the
+  # one driver the Justfile uses: the record it prints IS this variant's identity,
+  # so the upstream-identity rule lives in exactly one place (DESIGN.md decision 10).
+  # rc 2 is "no free version tag within the bump walk" - that variant is skipped,
+  # because one busy variant must not fail the whole check.
+  record="" rc=0
+  record=$(resolve_variant "$variant" "$VARIANTS_CONFIG" "$REPO" "$FORCE_BUILD" "$REGISTRY") || rc=$?
+  if [[ "$rc" -eq 2 ]]; then
+    fail "Variant $variant: no free version tag to name a build; skipping"
     echo "::endgroup::"
     continue
-  }
-  read -r canonical collision_detected <<<"$canonical_bump"
+  elif [[ "$rc" -ne 0 ]]; then
+    fail "Variant $variant could not be resolved; check job failed"
+    echo "::endgroup::"
+    exit 1
+  fi
 
-  # Generate tags (no digest — {sha256} tags are resolved at push time from the
-  # built image's digest, not the upstream base image's)
-  tags=$(generate_tags "$variant" "$canonical" "$latest" "$tags_json")
+  IFS=$'\037' read -r suffix parent_version < <(jq -r '[.suffix, .parent_version] | join("\u001f")' <<<"$record")
+  prefix="${REGISTRY}/${REPO}${suffix}"
 
-  # Check if build is needed
   check_output=$(check_build_needed "$prefix" "$variant" "$parent_version" "$FORCE_BUILD") || {
     echo "::endgroup::"
     continue
@@ -203,33 +156,7 @@ for ((i = 0; i < variant_count; i++)); do
   eval "$check_output"
 
   echo "::notice::Variant $variant needs building: ${REASON}"
-
-  # Build result JSON
-  result=$(jq -n \
-    --arg variant "$variant" \
-    --arg base_image "$base_image" \
-    --arg build_script "$build_script" \
-    --arg suffix "$suffix" \
-    --arg parent_version "$parent_version" \
-    --arg canonical_tag "$canonical" \
-    --arg upstream_tag "$upstream_tag" \
-    --arg tags "$tags" \
-    --arg collision_detected "$collision_detected" \
-    '{
-        variant: $variant,
-        base_image: $base_image,
-        build_script: $build_script,
-        suffix: $suffix,
-        parent_version: $parent_version,
-        canonical_tag: $canonical_tag,
-        upstream_tag: $upstream_tag,
-        tags: $tags,
-        collision_detected: ($collision_detected == "true"),
-        needs_build: true
-    }')
-
-  # Collect result
-  results+=("$result")
+  results+=("$(jq -c '. + {needs_build: true}' <<<"$record")")
 
   echo "::endgroup::"
 done

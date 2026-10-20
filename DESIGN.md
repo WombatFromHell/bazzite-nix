@@ -121,14 +121,14 @@ sources the two check parts (`:46`, `:48`), build, push, then the five
 | File                           | Functions                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `check-variants-registry.bash` | `registry_url:19` owner -> `ghcr.io/<owner>`; `registry_owner:26` CI owner or Justfile default; `package_repo:34` lowercase repo name; `variant_record:45` the one variant lookup, fails listing enabled names; `variant_names:59`; `enabled_variant_names:63`; `read_registry_json:75` the one retry loop; `inspect_image_with_retry:99`; `image_exists:108`; `get_parent_version:118`; `version_of_tag:133`; `find_latest_versioned_tag:150`; `upstream_repo:181`; `resolve_upstream_tag:199` upstream identity by exact-name probe; `upstream_version_candidates:239` build-counter walk; `version_check:261`; `check_build_needed:286` |
-| `check-variants-tags.bash`     | `extract_image_metadata:9`; `compute_canonical_tag:32` version-collision handling; `tag_needs_digest:96`; `generate_tags:106` `{canonical} {branch} {major} {sha256}`; `resolve_variant:150`                                                                                                                                                                                                                              |
+| `check-variants-tags.bash`     | `extract_image_metadata:9`; `compute_canonical_tag:32` version-collision handling; `tag_needs_digest:96`; `generate_tags:106` `{canonical} {branch} {major} {sha256}`; `resolve_variant:164`                                                                                                                                                                                                                              |
 | `build-helpers.bash`           | `CACHE_DIR:9`; `image_ref:19` the one spelling of a local ref; `image_digest:26`; `image_tag:32`; `sudo_cache:39`; `build_image:49`; `build_image_or_skip:67`; `extract_image_info:89`; `assemble_labels:136`; `relabel_image:174`; `rechunk_image:218`; `extract_final_ref:306`                                                                                                                                          |
 | `push-helpers.bash`            | `is_transient_error:10`; `run_with_retry:23`; `push_image_with_tags:79`; `sign_and_verify_image:147`; `push_variant:218`; `release_variant:278`                                                                                                                                                                                                                                                                          |
-| `just-helpers-build.bash`      | `run_build:14`; `print_build_summary:27`; `echo_build_assignments:42`; `resolved_variant_record_json:53` the CI matrix producer; `apply_build_record:84`; `_step:92`; `run_fields:100` the run-fields record; `build_variant_pipeline:117` the one sequence; `run_variant:249` rechunk/relabel/pipeline modes (thin `run_rechunk:338`, `run_relabel:342`, `run_pipeline:346`); `build_variant_ci:359`; `build_all_variants:376`    |
+| `just-helpers-build.bash`      | `run_build:14`; `print_build_summary:29`; `echo_build_assignments:50`; `resolved_variant_record_json:61`; `_step:71`; `run_fields:79`; `build_variant_pipeline:97` the one sequence; `run_variant:228` rechunk/relabel/pipeline modes (thin `run_rechunk:314`, `run_relabel:318`, `run_pipeline:322`); `build_variant_ci:335`; `build_all_variants:352`    |
 | `just-helpers-variants.bash`   | `preview_tags:8`; `check_variants:53`; `aggregate_variants:84`; `generate_step_summary:123`; `pushed_variants:175`; `resolve_release_variants:193`; `release_matrix_json:212`; `release_preview:229`                                                                                                                                                                                                                      |
 | `just-helpers-clean.bash`      | `clean_artifacts:7`; `remove_images_and_prune:21`; `clean_oci_layout:57`; `clean_vm_cache:66`                                                                                                                                                                                                                                                                                                                             |
 | `just-helpers-tooling.bash`    | `check_just_files:9`; `fix_just_files:21`; `lint_scripts:33`; `format_scripts:41`; `list_available_variants:50`                                                                                                                                                                                                                                                                                                           |
-| `just-helpers-vm.bash`         | `disk_file_name:10`; `ensure_vm_images:21`; `_build_bib:30`; `build_bib:104`; `variant_chunked_layout:151`; `export_and_build_bib:163`; `vm_record_json:181`; `build_vm_image:197`; `run_vm:244`; `run_variant_vm:348`                                                                                                                                                                                                    |
+| `just-helpers-vm.bash`         | `disk_file_name:10`; `ensure_vm_images:21`; `_build_bib:30`; `build_bib:104`; `variant_chunked_layout:151`; `export_and_build_bib:163`; `build_vm_image:186`; `run_vm:233`; `run_variant_vm:337`                                                                                                                                                                                                    |
 
 Reachability: `clean`, `tooling`, and `vm` appear in no workflow. `just build`,
 `just pipeline`, `just rechunk`, `just relabel`, `just build-all`, and
@@ -142,7 +142,7 @@ Reachability: `clean`, `tooling`, and `vm` appear in no workflow. `just build`,
 | 2   | `$ARTIFACTS_DIR/variants_results.json`                                      | `check-variants.sh:92`                                                                                                                                                                                            | `aggregate_variants:88`, `build_all_variants:536`                                                    |
 | 3   | `$ARTIFACTS_DIR/<variant>/{manifest.json,labels.txt}`                       | `build_variant_pipeline:149-150`                                                                                                                                                                                  | `assemble_labels`, `rechunk_image`, `relabel_image`                                                  |
 | 4   | `$ARTIFACTS_DIR/<variant>/{output.env,changelog.md}`                        | `changelog.py` through `push-helpers.bash:317`                                                                                                                                                                      | `release_variant` (`source output.env`)                                                              |
-| 5   | `GITHUB_OUTPUT` keys                                                        | refs step (`registry`, `repo`, `date`); `aggregate_variants` (`variants_to_build`, `any_builds_needed`); `build_variant_ci` (`record`); `push_variant` (push and sign output); `release_variant` (`title`, `tag`) | only the first three are read: job outputs, and `build.yml:133` reads `record` to feed the Push step |
+| 5   | `GITHUB_OUTPUT` keys                                                        | refs step (`registry`, `repo`, `date`); `aggregate_variants` (`variants_to_build`, `any_builds_needed`); `cleanup_packages` (`packages`); `build_variant_ci` (`record`); `push_variant` (push and sign output); `release_variant` (`title`, `tag`) | only the first three are read: job outputs, and `build.yml:133` reads `record` to feed the Push step |
 | 6   | `GITHUB_STEP_SUMMARY` markdown                                              | `generate_step_summary`, `preview_tags`, `sign_and_verify_image`                                                                                                                                                  | the rendered run page                                                                                |
 | 7   | env into `check-variants.sh`                                                | `build.yml:65-72`, or `check_variants:53` locally                                                                                                                                                                 | the script                                                                                           |
 | 8   | env into `changelog.py`                                                     | `release_variant` exports `IMAGE_PREFIX` (`<registry>/<package>`) and `GITHUB_REPOSITORY`                                                                                                                         | `registry_prefix()` `changelog.py:14`                                                                |
@@ -154,9 +154,19 @@ Reachability: `clean`, `tooling`, and `vm` appear in no workflow. `just build`,
 variants.json entry   {name, base_image, suffix?, latest?, disabled?, cleanup?,
                        tags?, tags_default?, build_script?}   default build_script: build.sh
 variant_record()      adds {variant: .name, disabled: (.disabled // false)}
-CI matrix entry       {variant, base_image, build_script, suffix, parent_version,
-                       canonical_tag, upstream_tag, tags, collision_detected}
-                      (needs_build is emitted then deleted by aggregate_variants)
+resolve_variant     prints exactly one record line to stdout:
+                    {variant, tag, target_image, suffix, base_image, build_script,
+                     latest, canonical_tag, parent_version, upstream_tag,
+                     upstream_version, tag_family, tags,
+                     collision_detected}   (variant == tag for an explicit image:tag spec)
+resolved_variant_record_json adds {repo_owner, repo_name, image_desc,
+                    version_label: .parent_version // .canonical_tag}
+vm record             is the resolve_variant record; no wrapper
+CI matrix entry       the resolve_variant record plus needs_build, which aggregate_variants
+                      deletes, so the entry is that record verbatim: build.yml reads
+                      variant (and the whole record at build.yml:133); the rest — tag,
+                      tag_family, upstream_version, latest, target_image — travel with
+                      it                                                     (decision 14)
 build.yml adds        {date, image_desc, repo_owner, repo_name,
                        version_label: .parent_version}          build.yml:110-117
 pipeline requires     variant, version_label, repo_owner, repo_name
@@ -184,7 +194,11 @@ Enabled variants: `stable`, `testing`, `unstable`. Disabled: `nvidia-open`,
 2. CI and local are separate entrypoints over one core. Each entrypoint sets the
    mode at its own boundary; no core function reads `GITHUB_OUTPUT` to decide
    what it is. The old lowercase/uppercase dual convention is gone: the extractors
-   print one shape, uppercase assignments for `eval`.
+   print one shape, uppercase assignments for `eval`. Nothing resolves through
+   `eval` any more: `resolve_variant` prints one record line, an entrypoint turns
+   the few fields it needs into shell names with one `IFS` read, and the record
+   itself is what the printers (`print_build_summary`, `echo_build_assignments`) and
+   the pipeline consume. Cost paid: two `jq` reads per build instead of one `eval`.
 3. The push path owns the registry writes; skopeo reads the registry and podman
    reads local storage; the cleanup action
    deletes. `podman push` already hashed the manifest it uploaded, so the digest is
@@ -220,14 +234,17 @@ Enabled variants: `stable`, `testing`, `unstable`. Disabled: `nvidia-open`,
 7. The two release jobs keep their own setup steps. What is shared is the
    selection: `release_matrix_json` prints the matrix, each step is three lines.
    A shared-workflow file or a custom action would add a file and an indirection
-   layer to save six YAML lines.
+   layer to save six YAML lines. `generate_release.yml` stays a separate file for
+   the same reason: it is the manual entrypoint (dispatch with hand-written notes),
+   the scheduled release is `build.yml`'s gated job, and folding one into the other
+   would trade two readable triggers for a condition on `github.event_name`.
 8. The build step belongs to the pipeline. Options carry `build`: `always`
    (CI), `skip` (default, local), `none` (relabel/rechunk entrypoints that reuse
    an existing image). Before this, the difference lived in which caller you read.
 9. Every entrypoint names the record. `push_variant`, `release_variant`,
    `build_vm_image`, `run_variant_vm` take `<record_json> [options_json]`; the
-   Justfile composes the record with `variant_record` or `vm_record_json` plus one
-   `jq`. Cost accepted: `just push` and `just release` take quoted JSON.
+   Justfile composes the record with `resolve_variant` (whose record is the VM
+   record) plus one `jq`. Cost accepted: `just push` and `just release` take quoted JSON.
 
 10. Upstream identity comes from upstream's git tags, not from the base image's
     version label. The label moves ahead of the tag: probed 2026-10-19, `bazzite:testing`
@@ -264,6 +281,39 @@ Enabled variants: `stable`, `testing`, `unstable`. Disabled: `nvidia-open`,
     release is addressed, and `version_sort_key:174` orders names by their number runs,
     so build `.10` follows `.9` instead of sorting before `.6`.
 
+14. One resolution driver. `check-variants.sh` asks `resolve_variant` for a variant's
+    identity — label version, upstream probe families, canonical tag, collision bump,
+    tag list — instead of walking them itself, so the rule in decision 10 is written
+    once and the check job cannot drift from the Justfile on which release a variant
+    is cut from. The driver keeps only what it owns: which variants to consider (the
+    override list, `disabled`), whether a build is needed (`check_build_needed`), and
+    the artifact record. `resolve_variant` returns 2 for "no free version tag within
+    the bump walk", which the check job answers by skipping that variant — one busy
+    variant must not fail the whole check — while other callers fail outright. The
+    guard that a base-image label must name a release version (`VERSIONED_TAG_PATTERN`,
+    so a moving label like `latest` names nothing) lives in the resolver, not per driver.
+    Cost: the check job sources `build-helpers.bash` for `image_ref`, the one spelling
+    of a local image reference, keeping the record's `target_image` honest there.
+
+15. The cleanup job asks the helpers for package names. `cleanup_packages` derives the
+    GHCR package names to clean — repository name plus variant suffix, lowercased through
+    `package_repo`, the same rule `check-variants.sh` uses — from `.github/variants.json`
+    policy (`disabled`, `cleanup: false`), and filters an explicit comma list. The YAML had
+    re-derived the rule with a second `jq` and a `grep`/`sed` over `/tmp` files, so the
+    cleanup job could address a package the build job never published; it now calls the
+    helper it already sources. Naming a package explicitly overrides `cleanup: false`, which
+    matches how `VARIANTS_OVERRIDE` overrides `disabled`: naming one is an instruction.
+
+16. The log directives have one spelling. `fail` and `warn` in `scripts/log-helpers.bash` emit
+    `::error::` / `::warning::` on stderr and flatten newlines, so 33 call sites cannot drift and
+    upstream text cannot silently stop being a directive. This is **not** a size win (measured +41
+    lines); it is a drift win, kept because a misspelled directive renders as prose — the same
+    silent-failure class `DESIGN.md §8` keeps open. The boundary is deliberate: `::group::`,
+    `::endgroup::`, `::notice::` and `::debug::` stay spelled where they are used, because they
+    are log scaffolding (open/close, progress), not problem reporting, and helper-izing them buys
+    no anti-drift. Diagnostics belong on stderr, so the moved sites changed stream; no test
+    expectation changed because the suites capture combined output.
+
 Removed since the previous map, with no caller left: `sudo_refresh`,
 `find_prev_ref`, `collect_successful_builds`, `recent_successful_builds`,
 `build_variant_core`, `skopeo_copy_with_retry`, and the `digest` / `prev_ref`
@@ -273,14 +323,15 @@ matrix fields.
 
 | Suite                          | Tests        | Exercises                                                            |
 | ------------------------------ | ------------ | -------------------------------------------------------------------- |
-| `scripts/just-helpers.bats`    | 47           | resolve (upstream probe stubbed, stdout stays eval-safe), aggregate, release selection, pipeline and entrypoint mocks |
-| `scripts/check-variants.bats`  | 31           | the two check libraries, upstream identity probes, bump-walk budget    |
+| `scripts/just-helpers.bats`    | 51           | resolve (upstream probe stubbed, stdout is one record), cleanup package identity, aggregate, release selection, pipeline and entrypoint mocks |
+| `scripts/check-variants.bats`  | 34           | the two check libraries, upstream identity probes, bump-walk budget, and `check-variants.sh` driven end to end over PATH stubs, against `resolve_variant` for the same fixture |
 | `scripts/release-preview.bats` | 4            | `release-preview.py`                                                 |
 | `tests/build-helpers.bats`     | 9            | `build-helpers.bash`                                                 |
 | `scripts/push-helpers.bats`    | 6            | digest from push, one tag call, retry plumbing                       |
+| `tests/log-helpers.bats`       | 4            | one spelling for the `::error::` / `::warning::` directives, newline-flattened, and the grep invariant that no driver spells one |
 | `tests/test_changelog.py`      | 196 (pytest) | `changelog.py`, including a forced tag pair naming one release window |
 
-`just test` (`Justfile:82`) runs all six.
+`just test` (`Justfile:82`) runs all six suites and the pytest file.
 
 ## 8. Open
 

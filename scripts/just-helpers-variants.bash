@@ -16,17 +16,17 @@ preview_tags() {
   local registry
   registry="$(registry_url "$repo_organization")"
 
-  # shellcheck disable=SC2034
-  local spec TAG VARIANT_NAME CANONICAL_TAG TAGS TARGET_IMAGE
-  local suffix rows=()
+  local spec variant canonical_tag tags target_image suffix record
+  local rows=()
   for spec in "${specs[@]}"; do
-    eval "$(resolve_variant "$spec" "$variants_config" "$image_name")"
-    suffix="${TARGET_IMAGE#localhost/"${image_name}"}"
-    rows+=("| \`${VARIANT_NAME}\` | \`${registry}/${image_name}${suffix}\` | \`${TAGS}\` |")
+    record=$(resolve_variant "$spec" "$variants_config" "$image_name")
+    IFS=$'\037' read -r variant canonical_tag tags target_image < <(jq -r '[.variant, .canonical_tag, .tags, .target_image] | join("\u001f")' <<<"$record")
+    suffix="${target_image#localhost/"${image_name}"}"
+    rows+=("| \`${variant}\` | \`${registry}/${image_name}${suffix}\` | \`${tags}\` |")
     if [[ -z "${GITHUB_STEP_SUMMARY:-}" ]]; then
-      echo "== Tags that would be generated for '${VARIANT_NAME}' =="
-      echo "Canonical tag: ${CANONICAL_TAG}"
-      echo "Alias tags    : ${TAGS}"
+      echo "== Tags that would be generated for '${variant}' =="
+      echo "Canonical tag: ${canonical_tag}"
+      echo "Alias tags    : ${tags}"
       echo ""
     fi
   done
@@ -88,14 +88,14 @@ aggregate_variants() {
   local results_file="$ARTIFACTS_DIR/variants_results.json"
 
   if [[ ! -f "$results_file" ]]; then
-    echo "::error::Variant results file not found - run check-variants first" >&2
+    fail "Variant results file not found - run check-variants first"
     return 1
   fi
 
   local results
   results=$(cat "$results_file")
   if ! echo "$results" | jq empty 2>/dev/null; then
-    echo "::error::Invalid JSON in results file - check job may have produced corrupt output" >&2
+    fail "Invalid JSON in results file - check job may have produced corrupt output"
     return 1
   fi
 
@@ -202,7 +202,7 @@ resolve_release_variants() {
   requested=$(echo "$variants_csv" | tr ',' '\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | grep -v '^$' | sort -u)
   missing=$(comm -23 <(printf '%s\n' "$requested") <(printf '%s\n' "$built"))
   if [[ -n "$missing" ]]; then
-    echo "::warning::Skipping variant(s) never pushed to the registry: $(echo "$missing" | paste -sd ',' -)" >&2
+    warn "Skipping variant(s) never pushed to the registry: $(echo "$missing" | paste -sd ',' -)"
   fi
   comm -12 <(printf '%s\n' "$requested") <(printf '%s\n' "$built")
 }
@@ -252,4 +252,77 @@ release_preview() {
     fi
     python3 scripts/release-preview.py "$candidate" "${prev_args[@]}"
   done
+}
+
+# ── just entrypoints (release, changelog demo) ────────────────────────────
+
+# The release job addresses a variant by name; the record is what release_variant wants,
+# so the entrypoint is where the name becomes a record. Only the choices the caller made
+# travel in the options record — release_variant already defaults every other field
+# (DESIGN.md §6 decision 9: every entrypoint names the record).
+# Usage: entry_release <variant> [handwritten] [variants_config] [allow_disabled]
+entry_release() {
+  local variant="${1:?variant required}"
+  local handwritten="${2:-}"
+  local variants_config="${3:-${VARIANTS_CONFIG:-.github/variants.json}}"
+  local allow_disabled="${4:-false}"
+  local record options
+  record=$(variant_record "$variant" "$variants_config")
+  options=$(jq -cn --arg handwritten "$handwritten" --arg variants_config "$variants_config" --arg allow_disabled "$allow_disabled" '{handwritten: $handwritten, variants_config: $variants_config, allow_disabled: $allow_disabled}')
+  release_variant "$record" "$options"
+}
+
+# Demo one release window locally: two published tags from one release branch become the
+# changelog body and the TITLE/TAG the real generator writes (under the demo artifact
+# directory). Needs ghcr auth for skopeo: podman login ghcr.io.
+# Usage: entry_demo_changelog <variant> <prev-tag> <curr-tag> [variants_config]
+entry_demo_changelog() {
+  local variant="${1:?variant required}"
+  local prev_tag="${2:?prev-tag required}"
+  local curr_tag="${3:?curr-tag required}"
+  local variants_config="${4:-${VARIANTS_CONFIG:-.github/variants.json}}"
+  local artifact_dir="${ARTIFACTS_DIR:?ARTIFACTS_DIR required}/demo"
+  mkdir -p "$artifact_dir"
+  local image_prefix
+  image_prefix="$(registry_url "${GITHUB_REPOSITORY_OWNER:?repo owner required}")/${IMAGE_NAME:?image_name required}"
+  export IMAGE_PREFIX="$image_prefix"
+  python3 scripts/changelog.py "$variant" \
+    "$artifact_dir/${variant}-output.env" "$artifact_dir/${variant}-changelog.md" \
+    --package "$IMAGE_NAME" --variants-config "$variants_config" --pair "$prev_tag" "$curr_tag"
+}
+
+# ── cleanup package names ───────────────────────────────────────────────────
+
+# The package names the GHCR cleanup action addresses. A package is the repository
+# name plus the variant's suffix, lowercased (GHCR's namespace rule, the same one
+# check-variants.sh applies through package_repo), so the cleanup job can never
+# address a name the build job did not publish. Config policy (disabled, cleanup:
+# false) picks the default set; naming packages explicitly overrides the policy,
+# because naming one is an instruction to clean it. A filter that matches nothing
+# prints nothing and is a caller's warning, not a failure.
+# Usage: cleanup_packages <repo> [variants_config] [filter]
+#   repo            owner/name or bare name; normalized by package_repo
+#   filter          comma-separated package names (whitespace-insensitive)
+# Prints: one package name per line, sorted-unique
+cleanup_packages() {
+  local repo="${1:?repo required}"
+  local variants_config="${2:-.github/variants.json}"
+  local filter="${3:-}"
+
+  local base
+  base="$(package_repo "$repo")"
+
+  jq -r --arg base "$base" --arg filter "$filter" '
+    def to_pkg: ($base + (.suffix // "")) | ascii_downcase;
+    ($filter | split(",") | map(gsub("^[[:space:]]+|[[:space:]]+$"; ""))
+      | map(ascii_downcase) | map(select(. != "")) | unique) as $want
+    | if $filter == "" then
+        [ .variants[] | select(.disabled != true and .cleanup != false) | to_pkg ] | unique
+      elif $want == [] then
+        []
+      else
+        [ .variants[] | to_pkg | . as $p | select($want | index($p)) ] | unique
+      end
+    | .[]
+  ' "$variants_config"
 }

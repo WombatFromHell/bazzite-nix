@@ -4,91 +4,68 @@
 # The release description every build labels with, unless a caller overrides it.
 DEFAULT_IMAGE_DESC="Customized Bazzite image with Nix mount support and other sugar"
 
-# The five fields a build adds to its variant record: lowercase in the record,
-# uppercase in the shell. One list feeds the reader and the writer.
+# The five fields a build adds to its variant record; echo_build_assignments
+# prints them (plus the variant) upper-case for the two just entry points.
 BUILD_FIELDS=(kernel_version manifest_packages source_ref full_build_digest build_digest)
 
 # ── Build pipeline functions ────────────────────────────────────────────────
 
 # Build a container image (stages to localhost/raw-img)
 run_build() {
-  local variant_or_spec="${1:?variant_or_spec required}"
+  local variant_or_spec="${1:-$(default_variant)}"
   local variants_config="${2:-.github/variants.json}"
   local image_name="${3:?image_name required}"
   local base_image_override="${4:-}"
   local force_rebuild="${5:-0}"
-  local TARGET_IMAGE TAG BASE_IMAGE BUILD_SCRIPT VARIANT_NAME CANONICAL_TAG TAGS PARENT_VERSION
-  eval "$(resolve_variant "$variant_or_spec" "$variants_config" "$image_name" "$force_rebuild")"
-  [[ -n "$base_image_override" ]] && BASE_IMAGE="$base_image_override"
-  build_image_or_skip "$BASE_IMAGE" "$BUILD_SCRIPT" "$CANONICAL_TAG" "$VARIANT_NAME" "$force_rebuild"
+  local record base_image build_script canonical_tag variant
+
+  record=$(resolve_variant "$variant_or_spec" "$variants_config" "$image_name" "$force_rebuild") || return 1
+  [[ -n "$base_image_override" ]] && record=$(jq -c --arg bi "$base_image_override" '.base_image = $bi' <<<"$record")
+  IFS=$'\037' read -r base_image build_script canonical_tag variant < <(jq -r '[.base_image, .build_script, .canonical_tag, .variant] | join("\u001f")' <<<"$record")
+  build_image_or_skip "$base_image" "$build_script" "$canonical_tag" "$variant" "$force_rebuild"
 }
 
-# Human-readable build summary (reads the eval-assignment vars set by the caller)
+# Human-readable build summary (reads the record the build returned)
 print_build_summary() {
   local title="${1:?title required}"
-  echo ""
-  echo "=== ${title} ===" >&2
-  echo "  Variant      : $VARIANT_NAME" >&2
-  echo "  Version      : $CANONICAL_TAG" >&2
-  echo "  Tags         : $TAGS" >&2
-  echo "  Kernel       : $KERNEL_VERSION" >&2
-  echo "  Manifest pkgs: $MANIFEST_PACKAGES" >&2
-  echo "  Source ref   : $SOURCE_REF" >&2
-  echo "  Full digest  : $FULL_BUILD_DIGEST" >&2
-  echo "  Short digest : $BUILD_DIGEST" >&2
+  local record_json="${2:?record_json required}"
+  {
+    echo ""
+    echo "=== ${title} ==="
+    jq -r '
+      "  Variant      : \(.variant // "")",
+      "  Version      : \(.canonical_tag // "")",
+      "  Tags         : \(.tags // "")",
+      "  Kernel       : \(.kernel_version // "")",
+      "  Manifest pkgs: \(.manifest_packages // "")",
+      "  Source ref   : \(.source_ref // "")",
+      "  Full digest  : \(.full_build_digest // "")",
+      "  Short digest : \(.build_digest // "")"
+    ' <<<"$record_json"
+  } >&2
 }
 
 # Eval-able build refs (the stdout contract of run_rechunk / run_relabel)
+# Usage: echo_build_assignments <record_json>
 echo_build_assignments() {
-  local field name
-  echo "VARIANT_NAME=${VARIANT_NAME}"
-  for field in "${BUILD_FIELDS[@]}"; do
-    name="${field^^}"
-    echo "$name=${!name}"
-  done
-}
-
-# Compose the pipeline record from the assignments resolve_variant exported.
-# Usage: resolved_variant_record_json <repo_owner> <repo_name> [image_desc]
-resolved_variant_record_json() {
-  local repo_owner="${1:?repo_owner required}"
-  local repo_name="${2:?repo_name required}"
-  local image_desc="${3:-$DEFAULT_IMAGE_DESC}"
-  jq -cn \
-    --arg variant "$VARIANT_NAME" \
-    --arg base_image "$BASE_IMAGE" \
-    --arg build_script "$BUILD_SCRIPT" \
-    --arg canonical_tag "$CANONICAL_TAG" \
-    --arg version_label "$PARENT_VERSION" \
-    --arg upstream_tag "${UPSTREAM_TAG:-}" \
-    --arg tags "$TAGS" \
-    --arg collision_detected "$COLLISION_DETECTED" \
-    --arg repo_owner "$repo_owner" \
-    --arg repo_name "$repo_name" \
-    --arg image_desc "$image_desc" \
-    '{
-      variant: $variant,
-      base_image: $base_image,
-      build_script: $build_script,
-      canonical_tag: $canonical_tag,
-      version_label: $version_label,
-      upstream_tag: $upstream_tag,
-      tags: $tags,
-      collision_detected: ($collision_detected == "true"),
-      repo_owner: $repo_owner,
-      repo_name: $repo_name,
-      image_desc: $image_desc
-    }'
-}
-
-# Load a returned record's build fields into the vars print_build_summary reads.
-# Usage: apply_build_record <record_json>
-apply_build_record() {
   local record_json="${1:?record_json required}"
-  local field
-  for field in "${BUILD_FIELDS[@]}"; do
-    printf -v "${field^^}" '%s' "$(jq -r --arg f "$field" '.[$f] // ""' <<<"$record_json")"
+  local field name
+  for field in variant "${BUILD_FIELDS[@]}"; do
+    name="${field^^}"
+    echo "$name=$(jq -r --arg f "$field" '.[$f] // ""' <<<"$record_json")"
   done
+}
+
+# Compose the record the pipeline reads, from the resolver's record plus the
+# repo identity. Usage: resolved_variant_record_json <record_json> <repo_owner> <repo_name> [image_desc]
+resolved_variant_record_json() {
+  local record_json="${1:?record_json required}"
+  local repo_owner="${2:?repo_owner required}"
+  local repo_name="${3:?repo_name required}"
+  local image_desc="${4:-$DEFAULT_IMAGE_DESC}"
+  jq -c --arg repo_owner "$repo_owner" --arg repo_name "$repo_name" --arg image_desc "$image_desc" \
+    '. + {repo_owner: $repo_owner, repo_name: $repo_name, image_desc: $image_desc,
+          version_label: (.parent_version // .canonical_tag)}' <<<"$record_json"
 }
 
 _step() {
@@ -152,8 +129,6 @@ build_variant_pipeline() {
   mkdir -p "$ARTIFACTS_DIR/$variant"
   local manifest_file="$ARTIFACTS_DIR/$variant/manifest.json"
   local labels_file="$ARTIFACTS_DIR/$variant/labels.txt"
-  local VARIANT_NAME="$variant"
-  local KERNEL_VERSION="" MANIFEST_PACKAGES="" SOURCE_REF="" FULL_BUILD_DIGEST="" BUILD_DIGEST=""
   local anchor_tag revision
   local _step_n=0
 
@@ -270,17 +245,15 @@ run_variant() {
   fi
   [[ -n "$image_desc" ]] || image_desc="$DEFAULT_IMAGE_DESC"
 
-  # shellcheck disable=SC2034
-  local TARGET_IMAGE="" TAG="" BASE_IMAGE="" BUILD_SCRIPT="" VARIANT_NAME="" CANONICAL_TAG="" TAGS="" PARENT_VERSION=""
-  local KERNEL_VERSION="" MANIFEST_PACKAGES="" SOURCE_REF="" FULL_BUILD_DIGEST="" BUILD_DIGEST=""
-  local anchor_tag options_json record_json built
+  local record anchor_tag options_json record_json built variant
 
-  eval "$(resolve_variant "$variant_or_spec" "$variants_config" "$image_name" "$force_rebuild")"
-  [[ -n "$base_image_override" ]] && BASE_IMAGE="$base_image_override"
+  record=$(resolve_variant "$variant_or_spec" "$variants_config" "$image_name" "$force_rebuild") || return 1
+  [[ -n "$base_image_override" ]] && record=$(jq -c --arg bi "$base_image_override" '.base_image = $bi' <<<"$record")
+  variant=$(jq -r .variant <<<"$record")
 
   # Anchor on the variant name so different variant pipelines never clobber
   # each other's working images (raw-img:<variant> / chunked-img:<variant>).
-  anchor_tag="$VARIANT_NAME"
+  anchor_tag="$variant"
 
   if [[ "$mode" == "rechunk" ]] && ! buildah images --format '{{.Name}}' raw-img >/dev/null 2>&1; then
     echo "ERROR: Base image '$(image_ref raw-img)' not found. Run build step first." >&2
@@ -288,12 +261,12 @@ run_variant() {
   fi
 
   if [[ "$mode" == "relabel" && -z "$image_name_ref" ]]; then
-    if buildah images --format '{{.Name}}:{{.Tag}}' "$(image_ref chunked-img "$VARIANT_NAME")" >/dev/null 2>&1; then
+    if buildah images --format '{{.Name}}:{{.Tag}}' "$(image_ref chunked-img "$variant")" >/dev/null 2>&1; then
       image_name_ref="chunked-img"
-    elif buildah images --format '{{.Name}}:{{.Tag}}' "$(image_ref raw-img "$VARIANT_NAME")" >/dev/null 2>&1; then
+    elif buildah images --format '{{.Name}}:{{.Tag}}' "$(image_ref raw-img "$variant")" >/dev/null 2>&1; then
       image_name_ref="raw-img"
     else
-      echo "ERROR: neither $(image_ref chunked-img "$VARIANT_NAME") nor $(image_ref raw-img "$VARIANT_NAME") exists; run 'just pipeline' first" >&2
+      echo "ERROR: neither $(image_ref chunked-img "$variant") nor $(image_ref raw-img "$variant") exists; run 'just pipeline' first" >&2
       return 1
     fi
   fi
@@ -323,32 +296,60 @@ run_variant() {
     ;;
   esac
 
-  record_json=$(resolved_variant_record_json "$repo_organization" "$image_name" "$image_desc")
+  record_json=$(resolved_variant_record_json "$record" "$repo_organization" "$image_name" "$image_desc")
   built=$(build_variant_pipeline "$record_json" "$options_json") || return $?
-  apply_build_record "$built"
 
   if [[ "$quiet" != "1" ]]; then
-    print_build_summary "${mode^} complete"
+    print_build_summary "${mode^} complete" "$built"
   fi
   if [[ "$mode" != "pipeline" ]]; then
-    echo_build_assignments
+    echo_build_assignments "$built"
   fi
 }
 
-# The three just-recipe entry points differ only in mode.
-# Usage: run_rechunk <variant_or_spec> [run_fields_json]
-# Usage: run_relabel <variant_or_spec> [run_fields_json]
-# Usage: run_pipeline <variant_or_spec> [run_fields_json]
-run_rechunk() {
-  run_variant rechunk "$@"
+# One local entrypoint for the three modes: the recipe names the mode and the variant,
+# the run identity comes from the environment the Justfile exports, and a recipe may
+# override any run field with a key=value pair (later pairs win, so per-call choices
+# stay on the command line). rechunk/relabel keep the eval-able stdout contract
+# (DESIGN.md §6 decision 2); pipeline prints the tag preview and the summary instead,
+# so its output is never eval'd.
+# Usage: entry_variant [rechunk|relabel|pipeline] [variant_or_spec] [key=value...]
+entry_variant() {
+  local mode="${1:?mode required}"
+  local variant_or_spec="${2:-$(default_variant)}"
+
+  local fields
+  fields=$(run_fields \
+    "variants_config=${VARIANTS_CONFIG:-.github/variants.json}" \
+    "image_name=${IMAGE_NAME-}" \
+    "image_desc=${IMAGE_DESC-}" \
+    "repo_organization=${GITHUB_REPOSITORY_OWNER-}" \
+    "${@:3}")
+
+  case "$mode" in
+  rechunk | relabel)
+    eval "$(run_variant "$mode" "$variant_or_spec" "$fields")"
+    ;;
+  pipeline)
+    run_variant pipeline "$variant_or_spec" "$fields"
+    ;;
+  *)
+    echo "ERROR: mode must be rechunk, relabel, or pipeline" >&2
+    return 1
+    ;;
+  esac
 }
 
-run_relabel() {
-  run_variant relabel "$@"
-}
-
-run_pipeline() {
-  run_variant pipeline "$@"
+# Move the chunked image from rootless to rootful podman storage, so rootful
+# `sudo bootc switch` can use it. Requires an existing chunked-img for the variant.
+# Usage: rootful_load <variant_or_spec> [variants_config] [image_name]
+rootful_load() {
+  local variant_or_spec="${1:-$(default_variant)}"
+  local variants_config="${2:-${VARIANTS_CONFIG:-.github/variants.json}}"
+  local image_name="${3:-${IMAGE_NAME:?image_name required}}"
+  local variant
+  variant=$(resolve_variant "$variant_or_spec" "$variants_config" "$image_name" | jq -r .variant)
+  podman save "localhost/chunked-img:${variant}" | pv | sudo podman load
 }
 
 # ── CI parity (mirrors the old build-reusable / push-reusable / release-reusable actions) ──
@@ -385,7 +386,7 @@ build_all_variants() {
 
   results_file="$ARTIFACTS_DIR/variants_results.json"
   if [[ ! -f "$results_file" ]]; then
-    echo "::error::No variant check results found. Run check-variants first." >&2
+    fail "No variant check results found. Run check-variants first."
     return 1
   fi
 

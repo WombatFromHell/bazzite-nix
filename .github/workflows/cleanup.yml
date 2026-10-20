@@ -30,25 +30,13 @@ jobs:
       - name: Build package matrix
         id: variants
         run: |
+          source scripts/just-helpers.bash
           FILTER="${{ inputs.package_filter }}"
-          BASE="${GITHUB_REPOSITORY#*/}"
-          if [ -n "$FILTER" ]; then
-            jq -r --arg base "$BASE" \
-              '[.variants[] | ($base + (.suffix // "")) | ascii_downcase] | unique[]' \
-              .github/variants.json > /tmp/all_packages.txt
-            grep -Fxf <(echo "$FILTER" | tr ',' '\n' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//') \
-              /tmp/all_packages.txt > /tmp/packages.txt 2>/dev/null || touch /tmp/packages.txt
-            [ -s /tmp/packages.txt ] || echo "::warning::package-filter '${FILTER}' matched no packages"
-          else
-            jq -r --arg base "$BASE" \
-              '[.variants[] | select(.disabled != true) | select(.cleanup != false) | ($base + (.suffix // "")) | ascii_downcase] | unique[]' \
-              .github/variants.json > /tmp/packages.txt
-          fi
-
+          packages="$(cleanup_packages "$GITHUB_REPOSITORY" .github/variants.json "$FILTER")"
+          [ -n "$packages" ] || echo "::warning::package-filter '${FILTER}' matched no packages"
           echo "Packages to process:"
-          cat /tmp/packages.txt
-
-          echo "packages=$(jq -Rnc '[inputs]' < /tmp/packages.txt)" >> "$GITHUB_OUTPUT"
+          echo "$packages"
+          echo "packages=$(jq -Rnc '[inputs | select(length > 0)]' <<<"$packages")" >> "$GITHUB_OUTPUT"
 
   cleanup-images:
     needs: [prepare]

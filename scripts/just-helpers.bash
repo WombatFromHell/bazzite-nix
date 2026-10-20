@@ -37,13 +37,16 @@ readonly JUST_HELPERS_PUSH="scripts/push-helpers.bash"
 # because clean_artifacts removes it.
 ARTIFACTS_DIR="${ARTIFACTS_DIR:-.artifacts}"
 if [[ "$ARTIFACTS_DIR" == "." || "$ARTIFACTS_DIR" == ".." || "$ARTIFACTS_DIR" == "/" ]]; then
-  echo "::error::ARTIFACTS_DIR must be a dedicated directory, not . .. or /"
+  fail "ARTIFACTS_DIR must be a dedicated directory, not . .. or /"
   exit 1
 fi
 export ARTIFACTS_DIR
 
 # shellcheck disable=SC1090
 source "${_parts_dir}/check-variants-registry.bash"
+# shellcheck disable=SC1090
+# source the GHA log directives (fail/warn) used by every part
+source "${_parts_dir}/log-helpers.bash"
 # shellcheck disable=SC1090
 source "${_parts_dir}/check-variants-tags.bash"
 # shellcheck disable=SC1090

@@ -87,7 +87,7 @@ read_registry_json() {
     [[ "$attempt" -lt "$MAX_RETRIES" ]] && sleep "$RETRY_DELAY"
   done
 
-  echo "::error::Failed to ${label} after ${MAX_RETRIES} attempts" >&2
+  fail "Failed to ${label} after ${MAX_RETRIES} attempts"
   return 1
 }
 
@@ -253,7 +253,7 @@ resolve_upstream_tag() {
     done
   done
 
-  echo "::error::No upstream git tag for version ${version} of branch ${branch} in ${upstream}" >&2
+  fail "No upstream git tag for version ${version} of branch ${branch} in ${upstream}"
   return 1
 }
 

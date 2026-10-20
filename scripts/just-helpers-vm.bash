@@ -175,20 +175,9 @@ export_and_build_bib() {
   build_bib "$(image_ref chunked-img "$tag")" "$tag" "$type" "$config" "$output_dir" "$bib_image"
 }
 
-# Resolve a variant name or image:tag spec into the record the VM entrypoints
-# consume.
-# Usage: vm_record_json <variant_or_spec> [variants_config] [image_name]
-vm_record_json() {
-  local variant_or_spec="${1:?variant_or_spec required}"
-  local variants_config="${2:-${VARIANTS_CONFIG:-.github/variants.json}}"
-  local image_name="${3:?image_name required}"
-  # shellcheck disable=SC2034
-  local TARGET_IMAGE TAG BASE_IMAGE BUILD_SCRIPT VARIANT_NAME CANONICAL_TAG TAGS
-  eval "$(resolve_variant "$variant_or_spec" "$variants_config" "$image_name")"
-  jq -cn --arg variant "$VARIANT_NAME" --arg tag "$TAG" --arg target_image "$TARGET_IMAGE" \
-    --arg base_image "$BASE_IMAGE" --arg build_script "$BUILD_SCRIPT" --arg canonical_tag "$CANONICAL_TAG" \
-    '{variant: $variant, tag: $tag, target_image: $target_image, base_image: $base_image, build_script: $build_script, canonical_tag: $canonical_tag}'
-}
+# The VM record IS the resolver record: build_vm_image and run_variant_vm read
+# variant, tag, target_image, base_image, build_script and canonical_tag, every one
+# of which resolve_variant already prints, so there is no wrapper here.
 
 # Build VM image (shared helper for build-qcow2 and build-raw)
 # Usage: build_vm_image <record_json> [options_json]
@@ -236,6 +225,27 @@ build_vm_image() {
   # (cheap: same-storage ref, no copy)
   podman tag "$(image_ref raw-img)" "${target_image}:${tag}" 2>/dev/null || true
   export_and_build_bib "$(image_ref raw-img)" "${tag}" "$type" "image.toml" "$output_dir" "$bib_image"
+}
+
+# just entry: resolve the variant, then hand the per-call choices to build_vm_image.
+# Image identity, cache dir and the BIB image come from the environment the Justfile
+# exports, so the options record carries only what the caller chose (the helper already
+# defaults the rest). The type is validated here because a wrong one would otherwise
+# invent a disk name through disk_file_name's catch-all.
+# Usage: entry_vm_build <qcow2|raw> <variant_or_spec> [output_dir] [force_rebuild]
+entry_vm_build() {
+  local type="${1:?type required}"
+  local variant_or_spec="${2:-$(default_variant)}"
+  local output_dir="${3:-}"
+  local force_rebuild="${4:-0}"
+  if [[ "$type" != @(qcow2 | raw) ]]; then
+    fail "VM type must be qcow2 or raw"
+    return 1
+  fi
+  local record options
+  record=$(resolve_variant "$variant_or_spec" "${VARIANTS_CONFIG:-.github/variants.json}" "${IMAGE_NAME:?image_name required}")
+  options=$(jq -cn --arg type "$type" --arg output_dir "$output_dir" --arg force_rebuild "$force_rebuild" '{type: $type, output_dir: $output_dir, force_rebuild: $force_rebuild}')
+  build_vm_image "$record" "$options"
 }
 
 # ── VM execution ────────────────────────────────────────────────────────────
@@ -339,8 +349,6 @@ run_vm() {
 # ── VM build/run wrapper functions ──────────────────────────────────────────
 
 # Run a VM for a variant (resolves variant, then launches QEMU)
-# Usage: run_variant_vm <type> <variant_or_spec> [variants_config] <image_name>
-#                          [output_dir] [force_pull] [clean] [cache_dir] [bib_image]
 # Usage: run_variant_vm <record_json> [options_json]
 # Record fields: variant, tag, target_image
 # Options: {"type":..,"output_dir":..,"force_pull":0|1,"clean":0|1,
@@ -361,4 +369,23 @@ run_variant_vm() {
 
   run_vm "$target_image" "$tag" "$type" "image.toml" "$output_dir" \
     "$force_pull" "$clean" "$cache_dir" "$bib_image" "$variant"
+}
+
+# just entry: resolve the variant, then hand the per-call choices to run_variant_vm
+# (same rules as entry_vm_build: identity from the environment, options from the call).
+# Usage: entry_vm_run <qcow2|raw> <variant_or_spec> [output_dir] [force_pull] [clean]
+entry_vm_run() {
+  local type="${1:?type required}"
+  local variant_or_spec="${2:-$(default_variant)}"
+  local output_dir="${3:-}"
+  local force_pull="${4:-0}"
+  local clean="${5:-0}"
+  if [[ "$type" != @(qcow2 | raw) ]]; then
+    fail "VM type must be qcow2 or raw"
+    return 1
+  fi
+  local record options
+  record=$(resolve_variant "$variant_or_spec" "${VARIANTS_CONFIG:-.github/variants.json}" "${IMAGE_NAME:?image_name required}")
+  options=$(jq -cn --arg type "$type" --arg output_dir "$output_dir" --arg force_pull "$force_pull" --arg clean "$clean" '{type: $type, output_dir: $output_dir, force_pull: $force_pull, clean: $clean}')
+  run_variant_vm "$record" "$options"
 }

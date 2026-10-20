@@ -5,6 +5,9 @@
 
 set -euo pipefail
 
+# shellcheck source=scripts/log-helpers.bash
+source "$(dirname "${BASH_SOURCE[0]}")/log-helpers.bash"
+
 # ── error classification ────────────────────────────────────────────────────
 
 is_transient_error() {
@@ -56,15 +59,15 @@ run_with_retry() {
 
     if is_transient_error "$output"; then
       if [[ "$attempt" -ge "$MAX_ATTEMPTS" ]]; then
-        echo "::error::All ${MAX_ATTEMPTS} attempts failed for: ${label}" >&2
+        fail "All ${MAX_ATTEMPTS} attempts failed for: ${label}"
         return 1
       fi
       local delay=$((RETRY_DELAY * attempt))
-      echo "::warning::Transient error on attempt ${attempt}. Retrying in ${delay}s…" >&2
+      warn "Transient error on attempt ${attempt}. Retrying in ${delay}s…"
       sleep "$delay"
     else
-      echo "::error::Permanent error — not retrying: ${label}" >&2
-      echo "::error::Output: ${output}" >&2
+      fail "Permanent error — not retrying: ${label}"
+      fail "Output: ${output}"
       return 1
     fi
   done
@@ -101,7 +104,7 @@ push_image_with_tags() {
   rm -f "$digestfile"
   [[ -z "$remote_digest" ]] &&
     {
-      echo "::error::podman push returned empty digest" >&2
+      fail "podman push returned empty digest"
       return 1
     }
 
@@ -152,7 +155,7 @@ sign_and_verify_image() {
     jq -r '[.digest_ref, (.cosign_pub // "cosign.pub"), .authfile, (.variant // ""), (.tags // ""), (.date // ""), (.parent_version // ""), (.base_img // "")] | join("\u001f")' <<<"$record_json"
   )
   if [[ -z "$digest_ref" || -z "$authfile" ]]; then
-    echo "::error::digest_ref and authfile are required sign fields" >&2
+    fail "digest_ref and authfile are required sign fields"
     return 1
   fi
 
@@ -224,14 +227,14 @@ push_variant() {
   IFS=$'\037' read -r source_ref tags_csv suffix < <(jq -r '[.source_ref, .tags, (.suffix // "")] | join("\u001f")' <<<"$record_json")
   IFS=$'\037' read -r registry repo date cosign_pub < <(jq -r '[(.registry // ""), (.repo // ""), (.date // ""), (.cosign_pub // "cosign.pub")] | join("\u001f")' <<<"$options_json")
   if [[ -z "$registry" || -z "$repo" ]]; then
-    echo "::error::registry and repo are required push fields" >&2
+    fail "registry and repo are required push fields"
     return 1
   fi
 
   : "${GITHUB_ACTOR:?GITHUB_ACTOR required}"
   : "${GITHUB_TOKEN:?GITHUB_TOKEN required}"
   if [[ -z "${SIGNING_SECRET:-}" ]]; then
-    echo "::error::SIGNING_SECRET required for cosign signing" >&2
+    fail "SIGNING_SECRET required for cosign signing"
     return 1
   fi
 
@@ -282,7 +285,7 @@ release_variant() {
   local variant disabled
   IFS=$'\037' read -r variant disabled < <(jq -r '[.variant, (.disabled // false)] | join("\u001f")' <<<"$record_json")
   if [[ -z "$variant" ]]; then
-    echo "::error::record has no variant field" >&2
+    fail "record has no variant field"
     return 1
   fi
 
@@ -296,7 +299,7 @@ release_variant() {
   repo="${repo:-$(package_repo)}"
 
   if [[ "$allow_disabled" != "true" && "$disabled" == "true" ]]; then
-    echo "::error::Variant '${variant}' is disabled in variants.json" >&2
+    fail "Variant '${variant}' is disabled in variants.json"
     return 1
   fi
 

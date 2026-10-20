@@ -55,7 +55,7 @@ remove_images_and_prune() {
 
 # Clean the OCI layout base dir (per-variant layouts live underneath it)
 clean_oci_layout() {
-  local oci_output_dir="${1:?oci_output_dir required}"
+  local oci_output_dir="${1:-$(oci_output_root)}"
   if [[ -d "$oci_output_dir" ]]; then
     echo "  Removing OCI layout dir: $oci_output_dir"
     rm -rf "$oci_output_dir"

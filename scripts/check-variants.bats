@@ -13,6 +13,8 @@ setup() {
   load 'check-variants-tags'
   # check-variants-registry.bash — skopeo primitives (+ retry globals)
   load 'check-variants-registry'
+  # GHA log directives the parts call (fail / warn)
+  load 'log-helpers'
 
   # Stub skopeo: `inspect` exits 0 iff the tag is listed in $FAKE_REGISTRY_TAGS
   STUB_DIR="$(mktemp -d)"
@@ -398,3 +400,110 @@ EOF
   [ "$status" -eq 1 ]
   [ "$output" = "" ]
 }
+
+# ── the CI driver, end to end ───────────────────────────────────────────────
+# check-variants.sh is a subprocess, so these tests stub the binaries it shells
+# out to (not the lib functions) and drive it and resolve_variant over the same
+# canned answers: one identity rule, whichever driver reads it.
+
+ci_fixture() {
+  local dir
+  dir="$(mktemp -d)"
+  cat >"$dir/variants.json" <<'EOF'
+{"variants": [{"name": "stable", "base_image": "ghcr.io/ublue-os/bazzite:stable"}]}
+EOF
+  cat >"$STUB_DIR/skopeo" <<'EOF'
+#!/usr/bin/env bash
+[[ "${1:-}" != "inspect" ]] && exit 0
+ref="${2:-}"; ref="${ref#docker://}"
+if [[ "$ref" == "ghcr.io/ublue-os/bazzite:stable" ]]; then
+    printf '{"Digest":"sha256:aa","Labels":{"org.opencontainers.image.version":"44.20261012.1"}}\n'
+    exit 0
+fi
+ref="${ref##*:}"
+case " ${FAKE_REGISTRY_TAGS:-} " in
+  *" $ref "*) exit 0 ;;
+esac
+exit 1
+EOF
+  cat >"$STUB_DIR/curl" <<'EOF'
+#!/usr/bin/env bash
+url=""
+for a in "$@"; do [[ "$a" == */commits/* ]] && url="${a##*/commits/}"; done
+case "${url:-}" in
+  44.20261012.1) echo '{"sha":"ffffffffffffffffffffffffffffffffffffffff"}' ;;
+  *) echo '{"message":"Not Found"}' ;;
+esac
+EOF
+  chmod +x "$STUB_DIR/skopeo" "$STUB_DIR/curl"
+  echo "$dir"
+}
+
+ci_run() {
+  local dir="$1" force="${2:-false}"
+  REGISTRY=ghcr.io/test REPO=repo ARTIFACTS_DIR="$dir/artifacts" FORCE_BUILD="$force" \
+    VARIANTS_CONFIG="$dir/variants.json" DATE="2026-01-01T00:00:00Z" IMAGE_DESC="d" \
+    bash scripts/check-variants.sh
+}
+
+@test "the check job and the resolver name the same identity for one variant" {
+  local dir driver resolver field
+  dir="$(ci_fixture)"
+  ci_run "$dir" >/dev/null 2>&1
+
+  driver="$(jq -c '.[0]' "$dir/artifacts/variants_results.json")"
+  resolver="$(resolve_variant "stable" "$dir/variants.json" "repo" "false" "ghcr.io/test")"
+
+  [ "$(jq -r '.needs_build' <<<"$driver")" = "true" ]
+  for field in variant base_image build_script suffix parent_version canonical_tag upstream_tag tags collision_detected; do
+    [[ "$(jq -r ".$field" <<<"$driver")" == "$(jq -r ".$field" <<<"$resolver")" ]]
+  done
+}
+
+@test "a base image labelled latest is not a release version, in either driver" {
+  local dir
+  dir="$(ci_fixture)"
+  cat >"$STUB_DIR/skopeo" <<'EOF'
+#!/usr/bin/env bash
+[[ "${1:-}" != "inspect" ]] && exit 0
+ref="${2:-}"; ref="${ref#docker://}"
+if [[ "$ref" == "ghcr.io/ublue-os/bazzite:stable" ]]; then
+    printf '{"Digest":"sha256:aa","Labels":{"org.opencontainers.image.version":"latest"}}\n'
+    exit 0
+fi
+exit 1
+EOF
+  chmod +x "$STUB_DIR/skopeo"
+  # upstream really does keep a moving tag named `latest`, so a label that reads
+  # `latest` would resolve to a tag if anything trusted the label as a version.
+  cat >"$STUB_DIR/curl" <<'EOF'
+#!/usr/bin/env bash
+url=""
+for a in "$@"; do [[ "$a" == */commits/* ]] && url="${a##*/commits/}"; done
+case "$url" in
+  stable-latest) echo '{"sha":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"}' ;;
+  *) echo '{"message":"Not Found"}' ;;
+esac
+EOF
+  chmod +x "$STUB_DIR/curl"
+
+  run ci_run "$dir"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *'::error::'* ]]
+  [ "$(jq -c '.[0] // "no record"' "$dir/artifacts/variants_results.json")" = '"no record"' ]
+
+  run resolve_variant "stable" "$dir/variants.json" "repo" "false" "ghcr.io/test"
+  [ "$status" -eq 1 ]
+}
+
+@test "an exhausted bump walk skips that variant, the check still succeeds" {
+  local dir out
+  dir="$(ci_fixture)"
+  export FAKE_REGISTRY_TAGS="stable-44.20261012.1 stable-44.20261012.2 stable-44.20261012.3 stable-44.20261012.4 stable-44.20261012.5 stable-44.20261012.6"
+
+  run ci_run "$dir" true
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"already exist"* ]]
+  [ "$(jq 'length' "$dir/artifacts/variants_results.json")" = "0" ]
+}
+
