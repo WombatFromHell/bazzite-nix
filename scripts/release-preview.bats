@@ -1,7 +1,8 @@
 #!/usr/bin/env bats
 bats_require_minimum_version 1.5.0
 # release-preview.bats — Smoke test for scripts/release-preview.py using a
-# mocked skopeo, so it runs without a local image or registry access.
+# mocked skopeo (registry) and podman (local storage), so it runs without a
+# local image or registry access.
 #
 # Run with: bats scripts/release-preview.bats
 
@@ -15,27 +16,29 @@ exec "$@"
 EOF
     chmod +x "$FAKE_BIN/sudo"
 
-    # skopeo: return a manifest carrying the ostree.rechunk.info label.
-    # docker:// refs get a "previous" manifest so diffs can be tested.
+    # skopeo: the registry manifest, for the "previous" ref the tool diffs against.
     cat >"$FAKE_BIN/skopeo" <<'EOF'
 #!/usr/bin/env bash
-if [[ "$*" == *"docker://"* ]]; then
 cat <<'JSON'
 {"Name": "ghcr.io/example/bazzite-nix:latest",
  "Labels": {"ostree.rechunk.info": "{\"packages\":{\"kernel\":\"6.19.7-400.fc44\",\"mesa-filesystem\":\"26.0.3-2.fc44\",\"plasma-desktop\":\"6.4.1-1.fc44\",\"terra-gamescope\":\"1.2.3-1.fc44\",\"python3-rpm\":\"1.0.0-1.fc44\"}}",
             "org.opencontainers.image.version": "testing-44.20260818.1"},
  "Digest": "sha256:prev"}
 JSON
-else
-cat <<'JSON'
-{"Name": "localhost/chunked-img",
- "Labels": {"ostree.rechunk.info": "{\"packages\":{\"kernel\":\"6.19.8-400.fc44\",\"mesa-filesystem\":\"26.0.3-2.fc44\",\"plasma-desktop\":\"6.4.1-1.fc44\",\"terra-gamescope\":\"1.2.3-1.fc44\",\"python3-rpm\":\"1.0.1-1.fc44\"}}",
-            "org.opencontainers.image.version": "44.20260820.1"},
- "Digest": "sha256:abc"}
-JSON
-fi
 EOF
     chmod +x "$FAKE_BIN/skopeo"
+
+    # podman: the local image manifest, printed as the JSON array podman writes.
+    cat >"$FAKE_BIN/podman" <<'EOF'
+#!/usr/bin/env bash
+cat <<'JSON'
+[{"Name": "localhost/chunked-img",
+ "Labels": {"ostree.rechunk.info": "{\"packages\":{\"kernel\":\"6.19.8-400.fc44\",\"mesa-filesystem\":\"26.0.3-2.fc44\",\"plasma-desktop\":\"6.4.1-1.fc44\",\"terra-gamescope\":\"1.2.3-1.fc44\",\"python3-rpm\":\"1.0.1-1.fc44\"}}",
+            "org.opencontainers.image.version": "44.20260820.1"},
+ "Digest": "sha256:abc"}]
+JSON
+EOF
+    chmod +x "$FAKE_BIN/podman"
 
     # curl: record the compare URL, never hit the network.
     cat >"$FAKE_BIN/curl" <<'EOF'

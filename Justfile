@@ -80,7 +80,7 @@ format:
 # Run the bats test suite (all test files)
 [group('Utility')]
 test:
-    bats scripts/just-helpers.bats tests/build-helpers.bats scripts/check-variants.bats scripts/release-preview.bats
+    bats scripts/just-helpers.bats tests/build-helpers.bats scripts/check-variants.bats scripts/release-preview.bats scripts/push-helpers.bats
     python3 -m pytest tests/test_changelog.py
 
 # ── Build commands (sources scripts/build-helpers.bash) ─────────────────────
@@ -112,7 +112,11 @@ rebuild $variant_or_spec="{{ default_tag }}" $base_image_override="":
 rechunk $variant_or_spec="{{ default_tag }}":
     #!/usr/bin/env bash
     source "{{ just_helpers }}"
-    RUN_FIELDS=$(jq -cn --arg variants_config "{{ variants_config }}" --arg image_name "{{ image_name }}" --arg image_desc "{{ image_desc }}" --arg repo_organization "{{ repo_organization }}" '{variants_config: $variants_config, image_name: $image_name, image_desc: $image_desc, repo_organization: $repo_organization}')
+    RUN_FIELDS=$(run_fields \
+      variants_config="{{ variants_config }}" \
+      image_name="{{ image_name }}" \
+      image_desc="{{ image_desc }}" \
+      repo_organization="{{ repo_organization }}")
     eval "$(run_rechunk "{{ variant_or_spec }}" "$RUN_FIELDS")"
     just rootful-load "{{ variant_or_spec }}"
 
@@ -133,7 +137,11 @@ rootful-load $variant_or_spec="{{ default_tag }}":
 relabel $variant_or_spec="{{ default_tag }}":
     #!/usr/bin/env bash
     source "{{ just_helpers }}"
-    RUN_FIELDS=$(jq -cn --arg variants_config "{{ variants_config }}" --arg image_name "{{ image_name }}" --arg image_desc "{{ image_desc }}" --arg repo_organization "{{ repo_organization }}" '{variants_config: $variants_config, image_name: $image_name, image_desc: $image_desc, repo_organization: $repo_organization}')
+    RUN_FIELDS=$(run_fields \
+      variants_config="{{ variants_config }}" \
+      image_name="{{ image_name }}" \
+      image_desc="{{ image_desc }}" \
+      repo_organization="{{ repo_organization }}")
     eval "$(run_relabel "{{ variant_or_spec }}" "$RUN_FIELDS")"
 
 # ── Full pipeline (mirrors the GitHub Actions workflow) ─────────────────────
@@ -146,7 +154,14 @@ relabel $variant_or_spec="{{ default_tag }}":
 pipeline $variant_or_spec="{{ default_tag }}" $base_image_override="" $force_rebuild="0" $rechunk="0":
     #!/usr/bin/env bash
     source "{{ just_helpers }}"
-    RUN_FIELDS=$(jq -cn --arg variants_config "{{ variants_config }}" --arg image_name "{{ image_name }}" --arg image_desc "{{ image_desc }}" --arg repo_organization "{{ repo_organization }}" --arg base_image_override "{{ base_image_override }}" --arg force_rebuild "{{ force_rebuild }}" --arg rechunk "{{ rechunk }}" '{variants_config: $variants_config, image_name: $image_name, image_desc: $image_desc, repo_organization: $repo_organization, base_image_override: $base_image_override, force_rebuild: $force_rebuild, rechunk: $rechunk}')
+    RUN_FIELDS=$(run_fields \
+      variants_config="{{ variants_config }}" \
+      image_name="{{ image_name }}" \
+      image_desc="{{ image_desc }}" \
+      repo_organization="{{ repo_organization }}" \
+      base_image_override="{{ base_image_override }}" \
+      force_rebuild="{{ force_rebuild }}" \
+      rechunk="{{ rechunk }}")
     run_pipeline "{{ variant_or_spec }}" "$RUN_FIELDS"
 
 # Pipeline with rechunking enabled (just pipeline <variant> "" "" 1)

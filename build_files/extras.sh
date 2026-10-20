@@ -2,6 +2,51 @@
 
 OVERRIDES_ROOT="/ctx/overrides"
 
+# Chunking: chunkah groups files into layers out of components, and two component
+# repos are active at once - the rpm database and the user.component xattr
+# (upstream bazzite tags its trees the same way in build_files/finalize). Only
+# files we install get tagged: tagging a shared directory such as /usr/bin would
+# claim the RPM-owned content next to ours.
+# Three buckets, split by what the file is for, not by where it lands:
+#   beryl-utils  the /usr/bin helpers, products of the beryl-utils repo (.sh, .py, .pyz)
+#   session      the session stack: portal configs, session launchers, uwsm env, user
+#                units, niri and qt6ct config, gamescope env, service overrides, and our
+#                own gamescope-session-plus shim in /usr/bin
+#   extras       the ujust recipes
+# One interval per component: chunkah errors out if two files of a component
+# disagree, so the interval lives in this map and every install names a component.
+declare -A COMPONENT_INTERVAL=(
+  ["beryl-utils"]=weekly
+  ["session"]=weekly
+  ["extras"]=weekly
+)
+
+# install_tag <component> <mode> <dest> [src...]
+# Install, then mark every installed path with that component.
+# A dest ending in / is a directory, one installed file per src basename.
+install_tag() {
+  local component=$1 mode=$2 dest=$3
+  shift 3
+  local interval="${COMPONENT_INTERVAL[$component]:-}"
+  local installed=() src path
+  if [[ -z "$interval" ]]; then
+    echo "install_tag: no interval for component $component" >&2
+    return 1
+  fi
+  if [[ "$dest" == */ ]]; then
+    for src in "$@"; do
+      installed+=("$dest${src##*/}")
+    done
+  else
+    installed+=("$dest")
+  fi
+  install -Z -D -m "$mode" "$@" "$dest"
+  for path in "${installed[@]}"; do
+    setfattr -n user.component -v "$component" "$path"
+    setfattr -n user.update-interval -v "$interval" "$path"
+  done
+}
+
 # Retry dnf5, clearing the metadata cache between attempts. Mirror metadata
 # checksum mismatches (repomd.xml out of sync) are transient; the cache clean
 # forces a fresh fetch that resolves to a synced mirror. Fails hard if the
@@ -76,39 +121,37 @@ dnf5 -y copr enable avengemedia/dms-git &&
     xdg-desktop-portal-gnome qt6ct-kde ghostty swayidle
 
 # use our niri-portals.conf override customized for KDE
-install -Z -b -m 0644 \
-  "$OVERRIDES_ROOT"/usr/share/xdg-desktop-portal/niri-portals.conf \
-  /usr/share/xdg-desktop-portal/niri-portals.conf
+install_tag session 0644 \
+  /usr/share/xdg-desktop-portal/niri-portals.conf \
+  "$OVERRIDES_ROOT"/usr/share/xdg-desktop-portal/niri-portals.conf
 # include our helpers referenced by niri
-install -Z -m 0755 \
+install_tag beryl-utils 0755 /usr/bin/ \
   "$OVERRIDES_ROOT"/usr/bin/chromium-flags.sh \
   "$OVERRIDES_ROOT"/usr/bin/spawn-browser.sh \
-  "$OVERRIDES_ROOT"/usr/bin/hyprpicker.sh \
-  /usr/bin/
+  "$OVERRIDES_ROOT"/usr/bin/hyprpicker.sh
 # ensure we install a uwsm session variant for niri
-install -Z -D -m 0644 \
-  "$OVERRIDES_ROOT"/usr/share/wayland-sessions/niri-uwsm.desktop \
-  /usr/share/wayland-sessions/
-install -Z -D -m 0644 \
-  "$OVERRIDES_ROOT"/usr/share/uwsm/env-niri \
-  /usr/share/uwsm/env-niri
+install_tag session 0644 \
+  /usr/share/wayland-sessions/niri-uwsm.desktop \
+  "$OVERRIDES_ROOT"/usr/share/wayland-sessions/niri-uwsm.desktop
+install_tag session 0644 \
+  /usr/share/uwsm/env-niri \
+  "$OVERRIDES_ROOT"/usr/share/uwsm/env-niri
 # ship some critical Niri (UWSM) support services as user defaults
-install -Z -D -m 0644 \
-  "$OVERRIDES_ROOT"/usr/lib/systemd/user/*.service \
-  /usr/lib/systemd/user/
+install_tag session 0644 /usr/lib/systemd/user/ \
+  "$OVERRIDES_ROOT"/usr/lib/systemd/user/*.service
 systemctl --global enable \
   dms-uwsm.service \
   kwallet-pam-init-uwsm.service \
   polkit-kde-agent-uwsm.service
 systemctl --global disable dms.service fumon.service
 # use our niri config override as well
-install -Z -D -m 0644 \
-  "$OVERRIDES_ROOT"/usr/share/factory/etc/niri/config.kdl \
-  /usr/share/factory/etc/niri/config.kdl
+install_tag session 0644 \
+  /usr/share/factory/etc/niri/config.kdl \
+  "$OVERRIDES_ROOT"/usr/share/factory/etc/niri/config.kdl
 # use our qt6ct override customized for the default Bazzite KDE theme
-install -Z -D -m 0644 \
-  "$OVERRIDES_ROOT"/usr/share/factory/etc/xdg/qt6ct/qt6ct.conf \
-  /usr/share/factory/etc/xdg/qt6ct/qt6ct.conf
+install_tag session 0644 \
+  /usr/share/factory/etc/xdg/qt6ct/qt6ct.conf \
+  "$OVERRIDES_ROOT"/usr/share/factory/etc/xdg/qt6ct/qt6ct.conf
 
 # use a workaround to avoid the "white dialog" problem in xwaylandvideobridge
 XWVB_GLOBAL_TGT="/usr/share/applications/org.kde.xwaylandvideobridge.desktop"
@@ -120,47 +163,44 @@ sed -i '/^OnlyShowIn=/d' "$XWVB_XDG_TGT" && echo "OnlyShowIn=KDE;GNOME;" | tee -
 cat "$OVERRIDES_ROOT"/usr/share/ublue-os/justfile.fragment \
   >>/usr/share/ublue-os/justfile
 # include some helpers (and .just files for ease of use)
-install -Z -m 0755 \
+install_tag beryl-utils 0755 /usr/bin/ \
   "$OVERRIDES_ROOT"/usr/bin/distrobox-installer.sh \
   "$OVERRIDES_ROOT"/usr/bin/distrobox-browser.sh \
   "$OVERRIDES_ROOT"/usr/bin/install-brave.sh \
   "$OVERRIDES_ROOT"/usr/bin/install-handbrake.sh \
   "$OVERRIDES_ROOT"/usr/bin/install-libvirt.sh \
-  "$OVERRIDES_ROOT"/usr/bin/install-neovim.sh \
-  /usr/bin/
-install -Z -m 0644 \
+  "$OVERRIDES_ROOT"/usr/bin/install-neovim.sh
+install_tag extras 0644 /usr/share/ublue-os/just/ \
   "$OVERRIDES_ROOT"/usr/share/ublue-os/just/92-bazzite-verify.just \
   "$OVERRIDES_ROOT"/usr/share/ublue-os/just/93-bazzite-nix-brave.just \
   "$OVERRIDES_ROOT"/usr/share/ublue-os/just/93-bazzite-nix-handbrake.just \
   "$OVERRIDES_ROOT"/usr/share/ublue-os/just/93-bazzite-nix-libvirt.just \
-  "$OVERRIDES_ROOT"/usr/share/ublue-os/just/93-bazzite-nix-neovim.just \
-  /usr/share/ublue-os/just/
+  "$OVERRIDES_ROOT"/usr/share/ublue-os/just/93-bazzite-nix-neovim.just
 
 # include useful helpers
-install -Z -m 0755 \
+install_tag beryl-utils 0755 /usr/bin/ \
   "$OVERRIDES_ROOT"/usr/bin/urh.pyz \
   "$OVERRIDES_ROOT"/usr/bin/nscb.pyz \
   "$OVERRIDES_ROOT"/usr/bin/niri-hdr.py \
   "$OVERRIDES_ROOT"/usr/bin/gamemode.pyz \
-  "$OVERRIDES_ROOT"/usr/bin/protonfetcher.pyz \
-  /usr/bin/
+  "$OVERRIDES_ROOT"/usr/bin/protonfetcher.pyz
 
 #
 # gamescope-session-steam enablement
 #
 # include our global-default 'gamescope-session' env vars
-install -Z -D -m 0644 \
-  "$OVERRIDES_ROOT"/usr/lib/environment.d/99-gamescope-session.conf \
-  /usr/lib/environment.d/99-gamescope-session.conf
+install_tag session 0644 \
+  /usr/lib/environment.d/99-gamescope-session.conf \
+  "$OVERRIDES_ROOT"/usr/lib/environment.d/99-gamescope-session.conf
 #
 # install an override for 'bluetoothd' for advanced Bluetooth panel enablement
-install -Z -D -m 0644 \
-  "$OVERRIDES_ROOT"/usr/lib/systemd/system/bluetooth.service.d/override.conf \
-  /usr/lib/systemd/system/bluetooth.service.d/override.conf
+install_tag session 0644 \
+  /usr/lib/systemd/system/bluetooth.service.d/override.conf \
+  "$OVERRIDES_ROOT"/usr/lib/systemd/system/bluetooth.service.d/override.conf
 #
 # ensure exiting the gamescope-session doesn't prevent Niri (UWSM) from starting up
 #
 # catch some leftovers the packaged 'gamescope-session-plus' leaves behind
-install -Z -D -m 0755 \
-  "$OVERRIDES_ROOT"/usr/bin/gamescope-session-plus \
-  /usr/bin/gamescope-session-plus
+install_tag session 0755 \
+  /usr/bin/gamescope-session-plus \
+  "$OVERRIDES_ROOT"/usr/bin/gamescope-session-plus

@@ -28,7 +28,7 @@ _parts_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Path to shared build helpers (used by build functions)
 readonly JUST_HELPERS_BUILD="scripts/build-helpers.bash"
 
-# Path to push/sign helpers (skopeo retry, cosign)
+# Path to push/sign helpers (podman + oras retry, cosign)
 readonly JUST_HELPERS_PUSH="scripts/push-helpers.bash"
 
 # Single home for one run's artifacts: variant check results, and per-variant

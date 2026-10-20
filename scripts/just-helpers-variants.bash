@@ -240,7 +240,7 @@ release_preview() {
   fi | while read -r v; do
     local candidate
     for candidate in "$(image_ref chunked-img "$v")" "$(image_tag chunked-img)"; do
-      label=$(skopeo inspect "containers-storage:${candidate}" 2>/dev/null | jq -r '.Labels["ostree.rechunk.info"] // empty' 2>/dev/null || true)
+      label=$(podman inspect "$candidate" 2>/dev/null | jq -r '.[0].Labels["ostree.rechunk.info"] // empty' 2>/dev/null || true)
       if [[ -n "$label" ]]; then
         break
       fi

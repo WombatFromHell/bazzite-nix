@@ -29,7 +29,7 @@ build.yml   cleanup.yml   generate_release.yml          Justfile (30 recipes)
    check-variants-registry.bash   registry probes, package identity
    check-variants-tags.bash       tag math, variant resolution
    build-helpers.bash             buildah stage
-   push-helpers.bash              skopeo push, cosign sign
+   push-helpers.bash              podman push, oras tag, cosign sign
    just-helpers-build.bash        the one pipeline, CI entrypoints
    just-helpers-variants.bash     aggregation, release selection
    just-helpers-{clean,tooling,vm}.bash   local only, unreachable from CI
@@ -53,16 +53,16 @@ Four facts hold the layers together.
 
 | File                   | Triggers                                                                                | Job chain                                                                                                   |
 | ---------------------- | --------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| `build.yml`            | cron `42 18 29,14 * *`; dispatch `force_build`, `generate_release`, `variants_override` | `check_and_aggregate` -> `build_push` (matrix) -> `collect_release_variants` -> `generate_release` (matrix) |
-| `cleanup.yml`          | cron `42 22 2,16 * *`; dispatch `dry_run`, `package_filter`                             | `prepare` -> `cleanup-images` (matrix)                                                                      |
+| `build.yml`            | cron `0 0 * * 0`;      dispatch `force_build`, `generate_release`, `variants_override` | `check_and_aggregate` -> `build_push` (matrix) -> `collect_release_variants` -> `generate_release` (matrix) |
+| `cleanup.yml`          | cron `0 0 * * 0`;      dispatch `dry_run`, `package_filter`                             | `prepare` -> `cleanup-images` (matrix)                                                                      |
 | `generate_release.yml` | dispatch `variants`, `handwritten`                                                      | `resolve-variants` -> `generate-release` (matrix)                                                           |
 
 | Job                        | Calls                                                                                                                                                                        |
 | -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `check_and_aggregate`      | `registry_url` `build.yml:55`, `package_repo` `:56`; `bash scripts/check-variants.sh` `:72`; `aggregate_variants` `:73`; `preview_tags` `:81` (gated on `any_builds_needed`) |
-| `build_push`               | `just ci-pipeline "$RECORD" '{"rechunk":1}'` `:117`; cosign-installer `:120`; `just push "$RECORD" "$OPTIONS"` `:135`                                                        |
-| `collect_release_variants` | `release_matrix_json <built csv> <config>` `:152`                                                                                                                            |
-| `generate_release`         | `just release <variant> "" <config> true` `:189`                                                                                                                             |
+| `build_push`               | `just ci-pipeline "$RECORD" '{"rechunk":1}'` `:117`; cosign-installer `:120`; oras `:123`; `just push "$RECORD" "$OPTIONS"` `:140`                                                        |
+| `collect_release_variants` | `release_matrix_json <built csv> <config>` `:157`                                                                                                                            |
+| `generate_release`         | `just release <variant> "" <config> true` `:195`                                                                                                                             |
 | `prepare`                  | inline `jq` over `variants.json`, `BASE="${GITHUB_REPOSITORY#*/}"`, staged through `/tmp/all_packages.txt` and `/tmp/packages.txt` `cleanup.yml:31-51`                       |
 | `cleanup-images`           | `dataaxiom/ghcr-cleanup-action@v1` `cleanup.yml:71`                                                                                                                          |
 | `resolve-variants`         | `release_matrix_json <csv> <config>` `generate_release.yml:35`                                                                                                               |
@@ -77,20 +77,21 @@ Gates and permissions:
   `generate_release` takes `contents: write` only.
 - `cleanup.yml` `DRY_RUN` is a GitHub expression, not a shell value: scheduled
   runs delete, manual runs honour `dry_run`.
-- Cleanup policy: `older-than: 60 days`, `keep-n-tagged: 24`,
+- Cleanup policy: `older-than: 3 months`, `keep-n-tagged: 78`,
   `delete-untagged/partial/orphaned: true`.
-- Both release jobs share a concurrency group name
-  (`generate-release-<variant>-<ref>`), so a scheduled build and a manual
-  dispatch can race on the same release.
+- Both release jobs use the same concurrency group (`generate-release-<variant>`,
+  no `<ref>`: `github.ref` is empty on scheduled runs, so a ref-suffixed group
+  split the scheduled and manual runs apart). They wait for each other
+  (`cancel-in-progress: false`) instead of racing on the same release.
 
 ### 2.2 Justfile (30 recipes)
 
 | Group           | Recipe:line -> function                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Just            | `check:24` check_just_files; `fix:31` fix_just_files                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| Utility         | `default:19` just --list; `clean:38` clean_oci_layout + remove_images_and_prune; `cleaner:46` clean_artifacts + remove_images_and_prune; `clean-vm:59` clean_vm_cache; `lint:66` lint_scripts; `format:74` format_scripts; `test:82` bats + pytest; `list-variants:225` list_available_variants                                                                                                                                                                                        |
-| Build container | `build:95` run_build; `rebuild:104` build 1; `rechunk:112` run_rechunk; `rootful-load:123` resolve_variant + podman save/load; `relabel:133` run_relabel; `pipeline:146` run_pipeline; `pipeline-rechunk:155` pipeline 1; `build-all:166` check_variants + build_all_variants; `release-preview:183` release_preview; `ci-pipeline:195` build_variant_ci; `push:204` push_variant; `release:214` release_variant; `check-variants:235` check_variants; `tags-preview:243` preview_tags |
-| VM              | `build-qcow2:253` build_vm_image; `build-raw:264` build_vm_image; `rebuild-qcow2:273` build-qcow2 1; `rebuild-raw:278` build-raw 1; `run-vm-qcow2:285` run_variant_vm; `run-vm-raw:296` run_variant_vm                                                                                                                                                                                                                                                                                 |
+| Utility         | `default:19` just --list; `clean:38` clean_oci_layout + remove_images_and_prune; `cleaner:46` clean_artifacts + remove_images_and_prune; `clean-vm:59` clean_vm_cache; `lint:66` lint_scripts; `format:74` format_scripts; `test:82` bats + pytest; `list-variants:240` list_available_variants                                                                                                                                                                                        |
+| Build container | `build:95` run_build; `rebuild:104` build 1; `rechunk:112` run_rechunk; `rootful-load:127` resolve_variant + podman save/load; `relabel:137` run_variant relabel; `pipeline:154` run_variant pipeline; `pipeline-rechunk:170` run_variant pipeline 1; `build-all:181` check_variants + build_all_variants; `release-preview:198` release_preview; `ci-pipeline:210` build_variant_ci; `push:219` push_variant; `release:229` release_variant; `check-variants:250` check_variants; `tags-preview:258` preview_tags |
+| VM              | `build-qcow2:268` build_vm_image; `build-raw:279` build_vm_image; `rebuild-qcow2:288` build-qcow2 1; `rebuild-raw:293` build-raw 1; `run-vm-qcow2:300` run_variant_vm; `run-vm-raw:311` run_variant_vm                                                                                                                                                                                                                                                                                    |                                                                                                                                                                                                                                                                                 |
 
 Shell flags are set once at `Justfile:2`. 24 of the 30 recipes carry the
 `#!/usr/bin/env bash` + `source "{{ just_helpers }}"` preamble; the other 6
@@ -107,7 +108,7 @@ variant name; the Justfile turns it into a record with `variant_record`.
 | ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `scripts/check-variants.sh`         | env in: `REGISTRY`, `REPO`, `FORCE_BUILD`, `IMAGE_DESC`, `DATE`, `VARIANTS_CONFIG`, `VARIANTS_OVERRIDE`, `ARTIFACTS_DIR`. Out: `$ARTIFACTS_DIR/variants_results.json`. Clears that directory first (`:51`). Emits `::` log directives                      |
 | `scripts/changelog.py`              | `target output changelog --package --variants-config [--pretty --workdir --handwritten]`; `--package` and `--variants-config` required (`:557`, `:562`); reads `IMAGE_PREFIX` for the registry half (`:15`); a variant whose newest version tag is its only one gets a first-release body with no diff tables; writes the two files where the caller pointed |
-| `scripts/release-preview.py`        | `image_ref [--prev]`; inspects a local `containers-storage:` image, no registry access                                                                                                                                                                     |
+| `scripts/release-preview.py`        | `image_ref [--prev]`; reads a local image with podman, a registry ref with skopeo                                                                                                                                                                          |
 | `*.bats`, `tests/test_changelog.py` | run by `just test`                                                                                                                                                                                                                                         |
 
 ## 3. Function map
@@ -119,11 +120,11 @@ sources the two check parts (`:46`, `:48`), build, push, then the five
 
 | File                           | Functions                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `check-variants-registry.bash` | `registry_url:11` owner -> `ghcr.io/<owner>`; `registry_owner:18` CI owner or Justfile default; `package_repo:26` lowercase repo name; `variant_record:37` the one variant lookup, fails listing enabled names; `variant_names:51`; `enabled_variant_names:55`; `inspect_image_with_retry:64`; `image_exists:88`; `get_parent_version:98`; `find_latest_versioned_tag:115`; `version_check:144`; `check_build_needed:168` |
+| `check-variants-registry.bash` | `registry_url:11` owner -> `ghcr.io/<owner>`; `registry_owner:18` CI owner or Justfile default; `package_repo:26` lowercase repo name; `variant_record:37` the one variant lookup, fails listing enabled names; `variant_names:51`; `enabled_variant_names:55`; `read_registry_json:67` the one retry loop; `inspect_image_with_retry:91`; `image_exists:100`; `get_parent_version:110`; `find_latest_versioned_tag:127`; `version_check:157`; `check_build_needed:181` |
 | `check-variants-tags.bash`     | `extract_image_metadata:9`; `compute_canonical_tag:32` version-collision handling; `tag_needs_digest:96`; `generate_tags:106` `{canonical} {branch} {major} {sha256}`; `resolve_variant:150`                                                                                                                                                                                                                              |
-| `build-helpers.bash`           | `CACHE_DIR:9`; `image_ref:14` the one spelling of a local ref; `image_digest:26`; `image_tag:32`; `sudo_cache:39`; `build_image:49`; `build_image_or_skip:69`; `extract_image_info:94`; `assemble_labels:141`; `relabel_image:186`; `rechunk_image:238`; `extract_final_ref:324`                                                                                                                                          |
-| `push-helpers.bash`            | `is_transient_error:10`; `run_with_retry:26`; `push_image_with_tags:104`; `sign_and_verify_image:174`                                                                                                                                                                                                                                                                                                                     |
-| `just-helpers-build.bash`      | `run_build:14`; `print_build_summary:27`; `echo_build_assignments:42`; `resolved_variant_record_json:53` the CI matrix producer; `apply_build_record:84`; `_step:92`; `build_variant_pipeline:110` the one sequence; `run_rechunk:231`; `run_relabel:277`; `run_pipeline:330`; `build_variant_ci:374`; `push_variant:397`; `release_variant:454`; `build_all_variants:530`                                                |
+| `build-helpers.bash`           | `CACHE_DIR:9`; `image_ref:19` the one spelling of a local ref; `image_digest:26`; `image_tag:32`; `sudo_cache:39`; `build_image:49`; `build_image_or_skip:67`; `extract_image_info:89`; `assemble_labels:136`; `relabel_image:174`; `rechunk_image:218`; `extract_final_ref:306`                                                                                                                                          |
+| `push-helpers.bash`            | `is_transient_error:10`; `run_with_retry:23`; `push_image_with_tags:79`; `sign_and_verify_image:147`; `push_variant:218`; `release_variant:278`                                                                                                                                                                                                                                                                          |
+| `just-helpers-build.bash`      | `run_build:14`; `print_build_summary:27`; `echo_build_assignments:42`; `resolved_variant_record_json:53` the CI matrix producer; `apply_build_record:84`; `_step:92`; `run_fields:100` the run-fields record; `build_variant_pipeline:117` the one sequence; `run_variant:249` rechunk/relabel/pipeline modes (thin `run_rechunk:338`, `run_relabel:342`, `run_pipeline:346`); `build_variant_ci:359`; `build_all_variants:376`    |
 | `just-helpers-variants.bash`   | `preview_tags:8`; `check_variants:53`; `aggregate_variants:84`; `generate_step_summary:123`; `pushed_variants:175`; `resolve_release_variants:193`; `release_matrix_json:212`; `release_preview:229`                                                                                                                                                                                                                      |
 | `just-helpers-clean.bash`      | `clean_artifacts:7`; `remove_images_and_prune:21`; `clean_oci_layout:57`; `clean_vm_cache:66`                                                                                                                                                                                                                                                                                                                             |
 | `just-helpers-tooling.bash`    | `check_just_files:9`; `fix_just_files:21`; `lint_scripts:33`; `format_scripts:41`; `list_available_variants:50`                                                                                                                                                                                                                                                                                                           |
@@ -139,8 +140,8 @@ Reachability: `clean`, `tooling`, and `vm` appear in no workflow. `just build`,
 | --- | --------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
 | 1   | `.github/variants.json`                                                     | committed config                                                                                                                                                                                                  | every resolver, `cleanup.yml`, `changelog.py`                                                        |
 | 2   | `$ARTIFACTS_DIR/variants_results.json`                                      | `check-variants.sh:92`                                                                                                                                                                                            | `aggregate_variants:88`, `build_all_variants:536`                                                    |
-| 3   | `$ARTIFACTS_DIR/<variant>/{manifest.json,labels.txt}`                       | `build_variant_pipeline:142-143`                                                                                                                                                                                  | `assemble_labels`, `rechunk_image`, `relabel_image`                                                  |
-| 4   | `$ARTIFACTS_DIR/<variant>/{output.env,changelog.md}`                        | `changelog.py` through `release_variant:486`                                                                                                                                                                      | `release_variant` (`source output.env`)                                                              |
+| 3   | `$ARTIFACTS_DIR/<variant>/{manifest.json,labels.txt}`                       | `build_variant_pipeline:149-150`                                                                                                                                                                                  | `assemble_labels`, `rechunk_image`, `relabel_image`                                                  |
+| 4   | `$ARTIFACTS_DIR/<variant>/{output.env,changelog.md}`                        | `changelog.py` through `push-helpers.bash:317`                                                                                                                                                                      | `release_variant` (`source output.env`)                                                              |
 | 5   | `GITHUB_OUTPUT` keys                                                        | refs step (`registry`, `repo`, `date`); `aggregate_variants` (`variants_to_build`, `any_builds_needed`); `build_variant_ci` (`record`); `push_variant` (push and sign output); `release_variant` (`title`, `tag`) | only the first three are read: job outputs, and `build.yml:133` reads `record` to feed the Push step |
 | 6   | `GITHUB_STEP_SUMMARY` markdown                                              | `generate_step_summary`, `preview_tags`, `sign_and_verify_image`                                                                                                                                                  | the rendered run page                                                                                |
 | 7   | env into `check-variants.sh`                                                | `build.yml:65-72`, or `check_variants:53` locally                                                                                                                                                                 | the script                                                                                           |
@@ -184,12 +185,20 @@ Enabled variants: `stable`, `testing`, `unstable`. Disabled: `nvidia-open`,
    mode at its own boundary; no core function reads `GITHUB_OUTPUT` to decide
    what it is. The old lowercase/uppercase dual convention is gone: the extractors
    print one shape, uppercase assignments for `eval`.
-3. skopeo reads the registry; the cleanup action deletes. The GitHub packages API
+3. The push path owns the registry writes; skopeo reads the registry and podman
+   reads local storage; the cleanup action
+   deletes. `podman push` already hashed the manifest it uploaded, so the digest is
+   read back with `--digestfile` (`push-helpers.bash:95`, `:100`) instead of a
+   second registry round trip that another retag could move. The extra tags are
+   manifest re-pointers of that digest ref, applied by one `oras tag` call per push
+   (`push-helpers.bash:128`), which PUTs one manifest per tag without re-uploading
+   blobs; `oras manifest fetch` supplies the layer sizes cosign reports
+   (`push-helpers.bash:180`). The GitHub packages API returns versions, not OCI tags,
    returns versions, not OCI tags, and our tags are what the resolvers need
-   (`image_exists:90`, `find_latest_versioned_tag:120` in
+   (`image_exists:100`, `find_latest_versioned_tag:127` in
    `check-variants-registry.bash`; `check-variants-tags.bash:60`, `:83`).
    Deletion must keep referrers intact: cosign signs with
-   `--registry-referrers-mode=legacy` (`push-helpers.bash:196`). `gh` is used
+   `--registry-referrers-mode=legacy` (`push-helpers.bash:165`). `gh` is used
    only for releases, run listing, and job listing.
 4. The pipeline takes the variant record and returns it updated. Adding a
    variant field changes data, not call sites.
@@ -197,8 +206,9 @@ Enabled variants: `stable`, `testing`, `unstable`. Disabled: `nvidia-open`,
    variants that have a `{variant}-{version}` tag; `resolve_release_variants`
    intersects the request. Renaming a job template cannot skip a release.
    Behavior change: the scheduled release means "anything not released yet", not
-   "built in this run". Known weakness: `find_latest_versioned_tag:115` does not
-   retry, so a transient skopeo failure reads as nothing to release.
+   "built in this run". The tag lookup retries `MAX_RETRIES` times; a lookup
+   still failing after that reads as nothing to release
+   (`find_latest_versioned_tag:127`).
 6. The package name is a required argument (`${3:?image_name required}`). The
    only literal in the repository is `Justfile:5`. `cleanup.yml` derives the base
    from the repository name; `changelog.py` takes `--package` and derives the
@@ -232,9 +242,10 @@ matrix fields.
 | `scripts/check-variants.bats`  | 11           | the two check libraries                                              |
 | `scripts/release-preview.bats` | 4            | `release-preview.py`                                                 |
 | `tests/build-helpers.bats`     | 8            | `build-helpers.bash`                                                 |
+| `scripts/push-helpers.bats`    | 5            | digest from push, one tag call, retry plumbing                       |
 | `tests/test_changelog.py`      | 173 (pytest) | `changelog.py`                                                       |
 
-`just test` (`Justfile:82`) runs all five.
+`just test` (`Justfile:82`) runs all six.
 
 ## 8. Open
 
@@ -242,8 +253,8 @@ matrix fields.
    jobs? Inside the repo, only `build.yml:133` reads one (`record`).
 2. `variants_results.json` is still a file on disk, not a return value. The
    location is named once; the handoff shape is not yet owned.
-3. `/tmp` is still used in three places: `cleanup.yml:38-49` staging,
-   `/tmp/skopeo-auth` (`just-helpers-build.bash:417`), and buildah
-   `--prune /tmp/` (`build-helpers.bash:297`).
+3. `/tmp` is still used in three places: `cleanup.yml:38-51` staging,
+   `/tmp/skopeo-auth` (`push-helpers.bash:245`), and buildah
+   `--prune /tmp/` (`build-helpers.bash:279`).
 4. The cache-dir default still carries the package literal
    (`build-helpers.bash:9`, `Justfile:9`).

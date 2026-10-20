@@ -114,3 +114,28 @@ teardown() {
   out=$(compute_canonical_tag "testing-44.20260520.1" "ghcr.io/owner/repo" "true" "testing")
   [ "$out" = "44.20260520.3 true" ]
 }
+
+# ── find_latest_versioned_tag ───────────────────────────────────────────────
+
+@test "a tag listing that fails twice still resolves the newest tag" {
+  printf '0\n' >"$STUB_DIR/attempts"
+  cat >"$STUB_DIR/skopeo" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "list-tags" ]]; then
+    n=$(<"$ATTEMPT_FILE")
+    echo "$((n + 1))" >"$ATTEMPT_FILE"
+    if (( n < 2 )); then exit 1; fi
+    printf '{"Tags":["bazzite-stable-44.20260520","bazzite-stable-44"]}\n'
+    exit 0
+fi
+exit 1
+EOF
+  chmod +x "$STUB_DIR/skopeo"
+  export ATTEMPT_FILE="$STUB_DIR/attempts"
+  RETRY_DELAY=0
+
+  local out
+  out=$(find_latest_versioned_tag "ghcr.io/owner/repo" "bazzite-stable")
+  [ "$out" = "bazzite-stable-44.20260520" ]
+  [ "$(<"$STUB_DIR/attempts")" = "3" ]
+}

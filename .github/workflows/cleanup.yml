@@ -2,7 +2,7 @@ name: Clean Old Images
 
 on:
   schedule:
-    - cron: "42 22 2,16 * *" # Runs at 22:42 UTC on the 2nd and 16th of every month
+    - cron: "0 0 * * 0" # Runs at 00:00 UTC every Sunday
   workflow_dispatch:
     inputs:
       dry_run:
@@ -72,8 +72,8 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           package: ${{ matrix.package }}
-          older-than: 60 days
-          keep-n-tagged: 24
+          older-than: 3 months
+          keep-n-tagged: 78 # 13 weekly runs x 3 variants x 2 images per build
           delete-untagged: true
           delete-partial-images: true
           delete-orphaned-images: true

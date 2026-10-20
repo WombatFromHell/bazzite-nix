@@ -8,17 +8,17 @@ set -euo pipefail
 # at the same place; this is the only default, and every reader is a plain read.
 export CACHE_DIR="${CACHE_DIR:-$HOME/.cache/bazzite-nix}"
 
+# Fixed build epoch. finalize.sh clamps /usr /etc /opt mtimes to 1970-01-01, so every
+# step that writes an image manifest uses this same epoch: reruns of one input then keep
+# the manifest creation time and the layer mtimes still, instead of the wall clock.
+IMAGE_SOURCE_DATE_EPOCH=0
+
 # ── image identity ──────────────────────────────────────────────────────────────────
 # The one spelling of a local image reference: localhost/<name>[:tag].
 # Usage: image_ref <name> [tag]
 image_ref() {
-  local name="${1:?name required}"
-  local tag="${2:-}"
-  if [[ -n "$tag" ]]; then
-    echo "localhost/${name}:${tag}"
-  else
-    echo "localhost/${name}"
-  fi
+  local name="${1:?name required}" tag="${2:-}"
+  echo "localhost/${name}${tag:+:${tag}}"
 }
 
 # The digest of a local image, as podman spells it (sha256:...).
@@ -47,16 +47,14 @@ sudo_cache() {
 # not the bare canonical_tag — canonical_tag is branch-stripped and only correct
 # as a label value, not as the registry tag (that's reserved for stable).
 build_image() {
-  local base_image="$1"
-  local build_script="$2"
-  local canonical_tag="$3"
-  local variant="$4"
-  local containerfile_path="$5"
+  local base_image="$1" build_script="$2" canonical_tag="$3" variant="$4" containerfile_path="$5"
   local raw_tag="${6:-$canonical_tag}"
 
   buildah build \
     --tag raw-img \
     --tag "raw-img:${raw_tag}" \
+    --source-date-epoch "$IMAGE_SOURCE_DATE_EPOCH" \
+    --rewrite-timestamp \
     --build-arg BASE_IMAGE="${base_image}" \
     --build-arg BUILD_SCRIPT="${build_script}" \
     --build-arg CANONICAL_TAG="${canonical_tag}" \
@@ -67,20 +65,17 @@ build_image() {
 # ── build raw-img unless it already exists (or force rebuilds) ──────────────
 # Usage: build_image_or_skip <base_image> <build_script> <canonical_tag> <variant> [force_rebuild]
 build_image_or_skip() {
-  local base_image="$1"
-  local build_script="$2"
-  local canonical_tag="$3"
-  local variant="$4"
+  local base_image="$1" build_script="$2" canonical_tag="$3" variant="$4"
   local force_rebuild="${5:-0}"
 
-  if [[ "$force_rebuild" == "1" ]]; then
-    echo "Force rebuild: removing existing container image..."
-    buildah rmi --force raw-img 2>/dev/null || true
+  if [[ "$force_rebuild" == "1" ]] || ! buildah images --format '{{.Name}}' raw-img >/dev/null 2>&1; then
+    if [[ "$force_rebuild" == "1" ]]; then
+      echo "Force rebuild: removing existing container image..."
+      buildah rmi --force raw-img 2>/dev/null || true
+    fi
     build_image "$base_image" "$build_script" "$canonical_tag" "$variant" "./Containerfile" "$variant"
-  elif buildah images --format '{{.Name}}' raw-img >/dev/null 2>&1; then
-    echo "Container image raw-img already exists, skipping build"
   else
-    build_image "$base_image" "$build_script" "$canonical_tag" "$variant" "./Containerfile" "$variant"
+    echo "Container image raw-img already exists, skipping build"
   fi
 }
 
@@ -139,15 +134,8 @@ extract_image_info() {
 # revision (optional) is the upstream commit SHA, preserved from the base image.
 
 assemble_labels() {
-  local date="$1"
-  local image_desc="$2"
-  local variant="$3"
-  local parent_version="$4"
-  local repo_owner="$5"
-  local repo_name="$6"
-  local kernel_version="$7"
-  local manifest_file="$8"
-  local output_file="$9"
+  local date="$1" image_desc="$2" variant="$3" parent_version="$4" repo_owner="$5"
+  local repo_name="$6" kernel_version="$7" manifest_file="$8" output_file="$9"
   local revision="${10:-}"
 
   # Read manifest from file to avoid shell quoting issues with JSON
@@ -178,25 +166,14 @@ assemble_labels() {
 # ── relabel image ───────────────────────────────────────────────────────────
 # Usage: relabel_image <labels_file> <kernel_version> [image] [anchor_tag]
 # Clears inherited labels, then re-applies new labels and annotations via
-# buildah, in two separate from/config/commit passes. Operates on raw-img
+# buildah in one from/config/commit pass. Operates on raw-img
 # (before rechunking); pass chunked-img to relabel an existing rechunked image.
 # When anchor_tag is given, re-points it (and :latest) at the relabeled image,
 # since buildah commit only updates the bare reference.
 
 relabel_image() {
-  local labels_file="$1"
-  local kernel_version="$2"
-  local image="${3:-raw-img}"
-  local anchor_tag="${4:-}"
+  local labels_file="$1" kernel_version="$2" image="${3:-raw-img}" anchor_tag="${4:-}"
 
-  echo "Relabeling ${image}: clearing inherited labels..." >&2
-  # Clear all inherited labels from base image
-  local container
-  container=$(buildah from "$image")
-  buildah config --label "-" "$container"
-  buildah commit --identity-label=false --rm "$container" "$image" >/dev/null
-
-  # Read new labels from file
   local labels=()
   while IFS= read -r line; do
     [ -n "$line" ] && labels+=("$line")
@@ -208,11 +185,11 @@ relabel_image() {
     "ostree.linux=${kernel_version}"
   )
 
-  echo "Relabeling ${image}: applying ${#labels[@]} labels and annotations..." >&2
-  # Apply labels and annotations via buildah
+  echo "Relabeling ${image}: clearing inherited labels, then applying ${#labels[@]} labels and annotations..." >&2
+  local container
   container=$(buildah from "$image")
+  buildah config --label "-" "$container"
   for line in "${labels[@]}"; do
-    [ -z "$line" ] && continue
     buildah config --label "$line" --annotation "$line" "$container"
   done
   buildah commit --identity-label=false --rm "$container" "$image" >/dev/null
@@ -236,9 +213,7 @@ relabel_image() {
 # chunked-img, and all other tags are applied as aliases after (the tag loop
 # mirrors relabel_image's). VM builds consume the layout directly.
 rechunk_image() {
-  local tags_csv="${1:-latest}"
-  local labels_file="${2:-}"
-  local variant="${3:-latest}"
+  local tags_csv="${1:-latest}" labels_file="${2:-}" variant="${3:-latest}"
   local oci_base_dir="${4:-${OCI_OUTPUT_DIR:-${CACHE_DIR}/oci}}"
   local tags=()
   IFS=',' read -ra tags <<<"$tags_csv"
@@ -283,6 +258,9 @@ rechunk_image() {
   done
 
   echo "Running 'chunkah build' -> ${layout_dir}..." >&2
+  # Chunkah emits one layer per component (rpmdb-owned packages plus our tagged
+  # trees) and packs components together once they exceed this cap, so headroom
+  # is what keeps our extras in layers of their own. containers-storage caps at 500.
   if podman run --rm --pull=never \
     --mount=type=image,src="$(image_ref raw-img)",target=/chunkah \
     --volume "${chunkah_config}:/chunkah-config.json:ro,Z" \
@@ -291,7 +269,8 @@ rechunk_image() {
     build \
     --verbose \
     --compressed \
-    --max-layers 128 \
+    --max-layers 256 \
+    --source-date-epoch "$IMAGE_SOURCE_DATE_EPOCH" \
     --prune /sysroot/ \
     --prune /run/ \
     --prune /tmp/ \

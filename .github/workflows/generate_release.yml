@@ -48,7 +48,7 @@ jobs:
         variant: ${{ fromJSON(needs.resolve-variants.outputs.matrix) }}
       fail-fast: false
     concurrency:
-      group: generate-release-${{ matrix.variant }}-${{ github.ref }}
+      group: generate-release-${{ matrix.variant }} # one queue per variant
       cancel-in-progress: false
     steps:
       - name: Checkout last 500 commits

@@ -48,6 +48,19 @@ setup() {
   grep -q '^build_image ' "$log"
 }
 
+@test "build_image pins buildah timestamps to the fixed epoch" {
+  local log
+  log="$(mktemp)"
+  buildah() {
+    printf 'buildah %s\n' "$*" >>"$LOG"
+  }
+  export -f buildah
+  export LOG="$log"
+
+  build_image "base" "build.sh" "1.0.0" "testing" "Containerfile" "testing-1.0.0"
+  grep -q -- '--source-date-epoch 0 --rewrite-timestamp' "$log"
+}
+
 # ── extract_image_info ──────────────────────────────────────────────────────
 
 @test "extract_image_info reads kernel and manifest in one podman run" {
@@ -85,7 +98,7 @@ EOF
 
 # ── relabel_image ───────────────────────────────────────────────────────────
 
-@test "relabel_image clears labels then re-applies them in separate buildah sessions" {
+@test "relabel_image clears inherited labels then applies them in one buildah session" {
   local labels_file log
   labels_file="$(mktemp)"
   log="$(mktemp)"
@@ -114,18 +127,16 @@ EOF
   [ "$status" -eq 0 ]
   [[ "$output" != *"sha256:deadbeef"* ]]
   # progress echoes go to stderr
-  echo "$output" | grep -q "Relabeling raw-img: clearing inherited labels..."
-  echo "$output" | grep -q "Relabeling raw-img: applying 4 labels and annotations..."
+  echo "$output" | grep -q "Relabeling raw-img: clearing inherited labels, then applying 4 labels and annotations..."
 
-  # Two from/config/commit sequences: wipe first, then apply
-  [ "$(grep -c '^buildah from ' "$log")" -eq 2 ]
-  [ "$(grep -c '^buildah commit ' "$log")" -eq 2 ]
+  # One from/config/commit sequence: wipe inherited labels, then apply ours
+  [ "$(grep -c '^buildah from ' "$log")" -eq 1 ]
+  [ "$(grep -c '^buildah commit ' "$log")" -eq 1 ]
 
-  # First pass wipes all inherited labels
+  # The first config call wipes all inherited labels
   grep -q -- 'buildah config --label - container-123' "$log"
 
-  # Second pass applies each file label plus bootc/ostree labels and
-  # annotations one buildah config call at a time.
+  # Each file label plus bootc/ostree labels and annotations, one config call at a time.
   grep -q -- '--label org.opencontainers.image.version=44 --annotation org.opencontainers.image.version=44' "$log"
   grep -q -- '--label ostree.rechunk.info={"packages":{"kernel":"6.19.8"}} --annotation ostree.rechunk.info={"packages":{"kernel":"6.19.8"}}' "$log"
   grep -q -- '--label ostree.bootc=true --annotation ostree.bootc=true' "$log"
@@ -177,6 +188,8 @@ EOF
   grep -q -- "--volume ${layout_base}:/run/out:Z" "$log"
   grep -q -- '--mount=type=image,src=localhost/raw-img,target=/chunkah' "$log"
   grep -q -- '--prune /sysroot/' "$log"
+  # the manifest creation time and layer mtimes are pinned, matching finalize's clamp
+  grep -q -- '--source-date-epoch 0' "$log"
   # stale OSTree/build labels are dropped
   grep -q -- '--label ostree.commit-' "$log"
   # pulled back from the per-variant layout and tagged as chunked-img, plus the anchor tag

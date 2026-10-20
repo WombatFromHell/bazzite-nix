@@ -56,6 +56,33 @@ enabled_variant_names() {
   jq -r '.variants[] | select(.disabled != true) | .name' "${1:-.github/variants.json}"
 }
 
+# ── registry read with retry ────────────────────────────────────────────────
+# The one attempt loop every skopeo read of the registry uses. A read counts
+# as failed when it exits non-zero or prints something jq cannot parse, so a
+# truncated response is retried instead of reading as "this tag is not there".
+# Usage: read_registry_json <label> <skopeo arguments...>
+# Prints: the command's stdout on success
+# Returns: 0 on success, 1 after MAX_RETRIES attempts
+
+read_registry_json() {
+  local label="$1"
+  shift
+
+  local attempt output
+  for attempt in $(seq 1 "$MAX_RETRIES"); do
+    if output=$("$@" 2>/dev/null) && [[ -n "$output" ]] && echo "$output" | jq empty 2>/dev/null; then
+      printf '%s\n' "$output"
+      return 0
+    fi
+
+    echo "::debug::Attempt ${attempt}/${MAX_RETRIES}: Failed to ${label}" >&2
+    [[ "$attempt" -lt "$MAX_RETRIES" ]] && sleep "$RETRY_DELAY"
+  done
+
+  echo "::error::Failed to ${label} after ${MAX_RETRIES} attempts" >&2
+  return 1
+}
+
 # ── inspect image with retry ────────────────────────────────────────────────
 # Usage: inspect_image_with_retry <image_ref>
 # Outputs: Echoes skopeo inspect JSON on success
@@ -63,22 +90,7 @@ enabled_variant_names() {
 
 inspect_image_with_retry() {
   local image_ref="$1"
-  local attempt inspect_output
-
-  for attempt in $(seq 1 $MAX_RETRIES); do
-    if inspect_output=$(skopeo inspect "docker://${image_ref}" 2>/dev/null); then
-      if [ -n "$inspect_output" ] && echo "$inspect_output" | jq empty 2>/dev/null; then
-        echo "$inspect_output"
-        return 0
-      fi
-    fi
-
-    echo "::debug::Attempt ${attempt}/${MAX_RETRIES}: Failed to inspect ${image_ref}" >&2
-    [ "$attempt" -lt "$MAX_RETRIES" ] && sleep "$RETRY_DELAY"
-  done
-
-  echo "::error::Failed to inspect ${image_ref} after ${MAX_RETRIES} attempts" >&2
-  return 1
+  read_registry_json "inspect ${image_ref}" skopeo inspect "docker://${image_ref}"
 }
 
 # ── image existence check ───────────────────────────────────────────────────
@@ -117,7 +129,8 @@ find_latest_versioned_tag() {
   local base_image_tag="$2"
   local available_tags latest_versioned_tag="" latest_version=""
 
-  available_tags=$(skopeo list-tags "docker://${prefix}" 2>/dev/null | jq -r '.Tags[]' 2>/dev/null) || return 1
+  available_tags=$(read_registry_json "list tags of ${prefix}" skopeo list-tags "docker://${prefix}") || return 1
+  available_tags=$(jq -r '.Tags[]' <<<"$available_tags")
 
   local tag tag_version
   while IFS= read -r tag; do

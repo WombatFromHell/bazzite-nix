@@ -457,6 +457,59 @@ build_core_record='{"variant":"stable","version_label":"44.1","repo_owner":"owne
   [[ "$(jq -r .repo_name <<<"$out")" == "repo" ]]
 }
 
+# ── run_variant (the shared engine behind run_rechunk / run_relabel / run_pipeline) ──
+# run_variant's job is the entry checks plus the options record, so the mocks
+# record what build_variant_pipeline was handed and skip real containers.
+run_variant_mocks() {
+  local calls="$1"
+  resolve_variant() {
+    echo "VARIANT_NAME=stable"
+  }
+  buildah() { return 0; } # pretend every working image exists
+  preview_tags() { :; }
+  resolved_variant_record_json() { echo '{}'; }
+  build_variant_pipeline() {
+    echo "OPTIONS=$2" >>"$calls"
+    echo '{"source_ref":"containers-storage:localhost/raw-img:stable"}'
+  }
+  apply_build_record() { :; }
+  print_build_summary() { :; }
+  echo_build_assignments() { :; }
+}
+
+@test "run_variant hands each mode its own options record" {
+  local calls
+  calls="$(mktemp)"
+  export ARTIFACTS_DIR="$(mktemp -d)"
+  run_variant_mocks "$calls"
+  run_variant rechunk stable '{"image_name":"repo","repo_organization":"owner"}' >/dev/null
+  grep -q 'OPTIONS={"rechunk":1,"force_rebuild":1,"build":"none"}' "$calls"
+  run_variant relabel stable '{"image_name":"repo","repo_organization":"owner","image_name_ref":"chunked-img"}' >/dev/null
+  grep -q 'OPTIONS={"build":"none","rechunk":0,"image_name_ref":"chunked-img","extract_ref":"localhost/chunked-img:stable"}' "$calls"
+  run_variant pipeline stable '{"image_name":"repo","repo_organization":"owner","rechunk":"1"}' >/dev/null
+  grep -q 'OPTIONS={"rechunk":"1","force_rebuild":"1","build":"skip"}' "$calls"
+}
+
+@test "run_variant rejects an unknown mode and a missing working image" {
+  local err
+  err="$(mktemp)"
+  run_variant_mocks "$(mktemp)"
+  run_variant destroy stable '{"image_name":"repo","repo_organization":"owner"}' 2>"$err" || true
+  grep -q 'mode must be rechunk, relabel, or pipeline' "$err"
+  buildah() { return 1; } # no working image exists for this variant
+  run_variant relabel stable '{"image_name":"repo","repo_organization":"owner"}' 2>"$err" || true
+  grep -q 'neither localhost/chunked-img:stable nor localhost/raw-img:stable exists' "$err"
+}
+
+@test "run_fields builds the record the variant entry points read" {
+  local fields
+  fields=$(run_fields image_name=repo image_desc='Customized Bazzite image' repo_organization=owner)
+  [[ "$(jq -r .image_desc <<<"$fields")" == "Customized Bazzite image" ]]
+  [[ "$(jq -r .repo_organization <<<"$fields")" == "owner" ]]
+  [[ "$(jq -r .image_desc <<<"$(run_fields image_desc=a=b)")" == "a=b" ]]
+  [[ "$(run_fields)" == "{}" ]]
+}
+
 # ── pushed_variants ───────────────────────────────────────────────
 
 @test "pushed_variants lists enabled variants that have a versioned tag" {

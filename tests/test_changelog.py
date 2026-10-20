@@ -712,7 +712,9 @@ class TestGetPackageGroups:
             img: make_manifest_with_packages({**common_pkg, f"{img}-pkg": "2.0"})
             for img in multi_image_names
         }
-        common, others = get_package_groups({}, manifests, multi_image_variants, PACKAGE)
+        common, others = get_package_groups(
+            {}, manifests, multi_image_variants, PACKAGE
+        )
         assert "common-pkg" in common
 
     def test_excludes_packages_missing_from_any_image(
@@ -724,7 +726,9 @@ class TestGetPackageGroups:
         )
         for img in multi_image_names[1:]:
             manifests[img] = make_manifest_with_packages({})
-        common, others = get_package_groups({}, manifests, multi_image_variants, PACKAGE)
+        common, others = get_package_groups(
+            {}, manifests, multi_image_variants, PACKAGE
+        )
         assert "only-in-bazzite" not in common
 
     @pytest.mark.parametrize(
@@ -745,7 +749,9 @@ class TestGetPackageGroups:
             img: make_manifest_with_packages(category_pkg if filter_fn(img) else {})
             for img in multi_image_names
         }
-        common, others = get_package_groups({}, manifests, multi_image_variants, PACKAGE)
+        common, others = get_package_groups(
+            {}, manifests, multi_image_variants, PACKAGE
+        )
         assert f"{category}-only-pkg" in others[category]
 
     def test_common_packages_not_in_other_categories(
@@ -757,7 +763,9 @@ class TestGetPackageGroups:
             img: make_manifest_with_packages({**common_pkg, f"{img}-specific": "2.0"})
             for img in multi_image_names
         }
-        common, others = get_package_groups({}, manifests, multi_image_variants, PACKAGE)
+        common, others = get_package_groups(
+            {}, manifests, multi_image_variants, PACKAGE
+        )
         assert "truly-common" in common
         for category_pkgs in others.values():
             assert "truly-common" not in category_pkgs
@@ -769,12 +777,16 @@ class TestGetPackageGroups:
             )
             for img in multi_image_names
         }
-        common, others = get_package_groups({}, manifests, multi_image_variants, PACKAGE)
+        common, others = get_package_groups(
+            {}, manifests, multi_image_variants, PACKAGE
+        )
         assert common == ["a-pkg", "m-pkg", "z-pkg"]
 
     def test_handles_empty_package_sets(self, multi_image_variants, multi_image_names):
         manifests = {img: make_manifest_with_packages({}) for img in multi_image_names}
-        common, others = get_package_groups({}, manifests, multi_image_variants, PACKAGE)
+        common, others = get_package_groups(
+            {}, manifests, multi_image_variants, PACKAGE
+        )
         assert common == []
         assert all(v == [] for v in others.values())
 

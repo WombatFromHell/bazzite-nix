@@ -94,6 +94,13 @@ _step() {
   echo "=== Step ${_step_n}: $1 ===" >&2
 }
 
+# Build the run-fields record the variant entry points read, from key=value
+# pairs, so a just recipe only lists the fields it actually passes.
+# Usage: run_fields [key=value...]
+run_fields() {
+  jq -cn 'reduce ($ARGS.positional[]) as $p ({}; ($p | split("=")) as $parts | . + {($parts[0]): ($parts[1:] | join("="))})' --args "$@"
+}
+
 # The one build sequence: extract info → assemble labels → relabel →
 # [rechunk] → extract final ref. Every caller hands it the variant record, so a
 # new variants.json field needs no change here or at any call site.
@@ -190,7 +197,7 @@ build_variant_pipeline() {
     _step "Assemble image labels"
     # Preserve the base image's revision label (inherited by raw-img) before
     # relabel wipes every label.
-    revision=$(skopeo inspect "containers-storage:$extract_ref" 2>/dev/null | jq -r '.Labels["org.opencontainers.image.revision"] // ""' 2>/dev/null || true)
+    revision=$(podman inspect "$extract_ref" 2>/dev/null | jq -r '.[0].Labels["org.opencontainers.image.revision"] // ""' 2>/dev/null || true)
     assemble_labels \
       "$date" "$image_desc" "$variant" "$version_label" \
       "$repo_owner" "$repo_name" "$KERNEL_VERSION" \
@@ -225,79 +232,58 @@ build_variant_pipeline() {
     <<<"$record_json"
 }
 
-# Relabel and rechunk raw-img to containers-storage with bootc chunking
-# Prints eval-able uppercase assignments (KERNEL_VERSION, MANIFEST_PACKAGES,
-# SOURCE_REF, FULL_BUILD_DIGEST, BUILD_DIGEST); the human summary goes to
-# stderr. Call with: eval "$(run_rechunk ...)"
-# Usage: run_rechunk <variant_or_spec> [run_fields_json]
-# Run fields: {"variants_config":..,"image_name":..,"image_desc":..,
-#              "repo_organization":..,"force_build":0|1,"quiet":0|1}
-run_rechunk() {
-  local variant_or_spec="${1:?variant_or_spec required}"
-  local run_fields="${2:-}"
-  local variants_config image_name image_desc repo_organization force_build quiet
-  IFS=$'\037' read -r variants_config image_name image_desc repo_organization force_build quiet < <(jq -r '[(.variants_config // ".github/variants.json"), (.image_name // ""), (.image_desc // ""), (.repo_organization // ""), (.force_build // "0"), (.quiet // "0")] | join("\u001f")' <<<"$run_fields")
-  if [[ -z "$image_name" || -z "$repo_organization" ]]; then
-    echo "ERROR: image_name and repo_organization are required run fields" >&2
-    return 1
-  fi
-  [[ -n "$image_desc" ]] || image_desc="$DEFAULT_IMAGE_DESC"
-  local TAG="" VARIANT_NAME="" CANONICAL_TAG="" TAGS=""
-  local KERNEL_VERSION="" MANIFEST_PACKAGES="" SOURCE_REF="" FULL_BUILD_DIGEST="" BUILD_DIGEST=""
-
-  eval "$(resolve_variant "$variant_or_spec" "$variants_config" "$image_name" "$force_build")"
-
-  if ! buildah images --format '{{.Name}}' raw-img >/dev/null 2>&1; then
-    echo "ERROR: Base image '$(image_ref raw-img)' not found. Run build step first." >&2
-    return 1
-  fi
-
-  # force=1 so this always rechunks (never takes the skip-if-chunked-exists path)
-  local record_json built
-  record_json=$(resolved_variant_record_json "$repo_organization" "$image_name" "$image_desc")
-  built=$(build_variant_pipeline "$record_json" '{"rechunk":1,"force_rebuild":1,"build":"none"}') || return $?
-
-  # Human summary goes to stderr; stdout carries the eval-able assignments so
-  # callers can capture them (mirrors run_relabel's contract).
-  apply_build_record "$built"
-  [[ "$quiet" != "1" ]] && print_build_summary "Rechunk complete"
-  echo_build_assignments
-}
-
-# Relabel an existing image without rebuilding or rechunking, for iterating on
-# the relabel flow. Auto-detects the image to relabel: chunked-img when one
-# exists for the variant (rechunk path), else raw-img (non-rechunk path). Pass
-# an explicit image name (raw-img | chunked-img) to force the target.
-# Usage: run_relabel <variant_or_spec> <variants_config> <image_name> <image_desc> \
-#                     <repo_organization> [image_name_ref]
-# PRECONDITION: the target image exists and build-helpers.bash is sourced
-# ($JUST_HELPERS_BUILD).
-# Usage: run_relabel <variant_or_spec> [run_fields_json]
+# One variant entry point behind the three just recipes. It resolves the variant,
+# makes sure its working image exists, runs build_variant_pipeline, then prints
+# the human summary (stderr) and the eval-able assignments (stdout). Only the
+# options record and the entry checks differ per mode:
+#   rechunk  builds nothing and always rechunks raw-img
+#   relabel  re-applies labels to an existing image (chunked-img, else raw-img)
+#   pipeline builds, then rechunks only when rechunk:1 is passed
+# Usage: run_variant <rechunk|relabel|pipeline> <variant_or_spec> [run_fields_json]
 # Run fields: {"variants_config":..,"image_name":..,"image_desc":..,
 #              "repo_organization":..,"image_name_ref":raw-img|chunked-img,
+#              "base_image_override":..,"force_rebuild":0|1,"rechunk":0|1,
 #              "quiet":0|1}
 # Prints eval-able uppercase assignments (KERNEL_VERSION, MANIFEST_PACKAGES,
-# SOURCE_REF, FULL_BUILD_DIGEST, BUILD_DIGEST). Call with: eval "$(run_relabel ...)"
-run_relabel() {
-  local variant_or_spec="${1:?variant_or_spec required}"
-  local run_fields="${2:-}"
-  local variants_config image_name image_desc repo_organization image_name_ref quiet
-  IFS=$'\037' read -r variants_config image_name image_desc repo_organization image_name_ref quiet < <(jq -r '[(.variants_config // ".github/variants.json"), (.image_name // ""), (.image_desc // ""), (.repo_organization // ""), (.image_name_ref // ""), (.quiet // "0")] | join("\u001f")' <<<"$run_fields")
+# SOURCE_REF, FULL_BUILD_DIGEST, BUILD_DIGEST) for rechunk and relabel.
+run_variant() {
+  local mode="${1:?mode required}"
+  local variant_or_spec="${2:?variant_or_spec required}"
+  local run_fields="${3:-}"
+
+  local variants_config image_name image_desc repo_organization image_name_ref base_image_override force_rebuild rechunk quiet
+  IFS=$'\037' read -r variants_config image_name image_desc repo_organization image_name_ref base_image_override force_rebuild rechunk quiet < <(jq -r '[(.variants_config // ".github/variants.json"), (.image_name // ""), (.image_desc // ""), (.repo_organization // ""), (.image_name_ref // ""), (.base_image_override // ""), (.force_rebuild // "0"), (.rechunk // "0"), (.quiet // "0")] | join("\u001f")' <<<"$run_fields")
+  case "$mode" in
+  rechunk | relabel | pipeline) ;;
+  *)
+    echo "ERROR: mode must be rechunk, relabel, or pipeline" >&2
+    return 1
+    ;;
+  esac
   if [[ -z "$image_name" || -z "$repo_organization" ]]; then
     echo "ERROR: image_name and repo_organization are required run fields" >&2
     return 1
   fi
   [[ -n "$image_desc" ]] || image_desc="$DEFAULT_IMAGE_DESC"
-  local TAG="" VARIANT_NAME="" CANONICAL_TAG="" TAGS=""
-  local KERNEL_VERSION="" MANIFEST_PACKAGES="" SOURCE_REF="" FULL_BUILD_DIGEST="" BUILD_DIGEST=""
-  local anchor_tag
 
-  eval "$(resolve_variant "$variant_or_spec" "$variants_config" "$image_name")"
+  # shellcheck disable=SC2034
+  local TARGET_IMAGE="" TAG="" BASE_IMAGE="" BUILD_SCRIPT="" VARIANT_NAME="" CANONICAL_TAG="" TAGS=""
+  local KERNEL_VERSION="" MANIFEST_PACKAGES="" SOURCE_REF="" FULL_BUILD_DIGEST="" BUILD_DIGEST=""
+  local anchor_tag options_json record_json built
+
+  eval "$(resolve_variant "$variant_or_spec" "$variants_config" "$image_name" "$force_rebuild")"
+  [[ -n "$base_image_override" ]] && BASE_IMAGE="$base_image_override"
 
   # Anchor on the variant name so different variant pipelines never clobber
   # each other's working images (raw-img:<variant> / chunked-img:<variant>).
   anchor_tag="$VARIANT_NAME"
-  if [[ -z "$image_name_ref" ]]; then
+
+  if [[ "$mode" == "rechunk" ]] && ! buildah images --format '{{.Name}}' raw-img >/dev/null 2>&1; then
+    echo "ERROR: Base image '$(image_ref raw-img)' not found. Run build step first." >&2
+    return 1
+  fi
+
+  if [[ "$mode" == "relabel" && -z "$image_name_ref" ]]; then
     if buildah images --format '{{.Name}}:{{.Tag}}' "$(image_ref chunked-img "$VARIANT_NAME")" >/dev/null 2>&1; then
       image_name_ref="chunked-img"
     elif buildah images --format '{{.Name}}:{{.Tag}}' "$(image_ref raw-img "$VARIANT_NAME")" >/dev/null 2>&1; then
@@ -307,63 +293,58 @@ run_relabel() {
       return 1
     fi
   fi
+  if [[ "$mode" == "relabel" ]]; then
+    echo "=== Relabel existing $(image_ref "$image_name_ref" "$anchor_tag") ===" >&2
+  fi
+  if [[ "$mode" == "pipeline" ]]; then
+    # Preview which alias tags this build will generate (mirrors the workflow's Preview step)
+    preview_tags "$variant_or_spec" "$variants_config" "$image_name" "$repo_organization"
+  fi
 
-  echo "=== Relabel existing $(image_ref "$image_name_ref" "$anchor_tag") ===" >&2
+  case "$mode" in
+  rechunk)
+    # Always rechunks, so never take the skip-if-chunked-exists path.
+    options_json='{"rechunk":1,"force_rebuild":1,"build":"none"}'
+    ;;
+  relabel)
+    options_json=$(jq -cn --arg image_name_ref "$image_name_ref" \
+      --arg extract_ref "$(image_ref "$image_name_ref" "$anchor_tag")" \
+      '{build: "none", rechunk: 0, image_name_ref: $image_name_ref, extract_ref: $extract_ref}')
+    ;;
+  pipeline)
+    if [[ "$rechunk" == "1" ]]; then
+      force_rebuild="1"
+    fi
+    options_json=$(jq -cn --arg rechunk "$rechunk" --arg force_rebuild "$force_rebuild" '{rechunk: $rechunk, force_rebuild: $force_rebuild, build: "skip"}')
+    ;;
+  esac
 
-  local record_json options_json built
   record_json=$(resolved_variant_record_json "$repo_organization" "$image_name" "$image_desc")
-  options_json=$(jq -cn --arg image_name_ref "$image_name_ref" \
-    --arg extract_ref "$(image_ref "$image_name_ref" "$anchor_tag")" \
-    '{build: "none", rechunk: 0, image_name_ref: $image_name_ref, extract_ref: $extract_ref}')
   built=$(build_variant_pipeline "$record_json" "$options_json") || return $?
   apply_build_record "$built"
 
-  # Human summary goes to stderr; stdout carries the eval-able assignments so
-  # callers can capture them (mirrors run_rechunk's contract).
-  [[ "$quiet" != "1" ]] && print_build_summary "Relabel complete"
-  echo_build_assignments
+  if [[ "$quiet" != "1" ]]; then
+    print_build_summary "${mode^} complete"
+  fi
+  if [[ "$mode" != "pipeline" ]]; then
+    echo_build_assignments
+  fi
 }
 
-# Run the full build pipeline for a single variant:
-#   build → extract image info → assemble labels → [relabel] → [rechunk] → extract final ref
-# Rechunk is disabled by default; pass rechunk:1 in the run fields to enable.
+# The three just-recipe entry points differ only in mode.
+# Usage: run_rechunk <variant_or_spec> [run_fields_json]
+# Usage: run_relabel <variant_or_spec> [run_fields_json]
 # Usage: run_pipeline <variant_or_spec> [run_fields_json]
-# Run fields: {"variants_config":..,"image_name":..,"image_desc":..,
-#              "repo_organization":..,"base_image_override":..,
-#              "force_rebuild":0|1,"rechunk":0|1}
+run_rechunk() {
+  run_variant rechunk "$@"
+}
+
+run_relabel() {
+  run_variant relabel "$@"
+}
+
 run_pipeline() {
-  local variant_or_spec="${1:?variant_or_spec required}"
-  local run_fields="${2:-}"
-  local variants_config image_name image_desc repo_organization base_image_override force_rebuild rechunk
-  IFS=$'\037' read -r variants_config image_name image_desc repo_organization base_image_override force_rebuild rechunk < <(jq -r '[(.variants_config // ".github/variants.json"), (.image_name // ""), (.image_desc // ""), (.repo_organization // ""), (.base_image_override // ""), (.force_rebuild // "0"), (.rechunk // "0")] | join("\u001f")' <<<"$run_fields")
-  if [[ -z "$image_name" || -z "$repo_organization" ]]; then
-    echo "ERROR: image_name and repo_organization are required run fields" >&2
-    return 1
-  fi
-  [[ -n "$image_desc" ]] || image_desc="$DEFAULT_IMAGE_DESC"
-  # shellcheck disable=SC2034
-  local TARGET_IMAGE="" TAG="" BASE_IMAGE="" BUILD_SCRIPT="" VARIANT_NAME="" CANONICAL_TAG="" TAGS=""
-  local KERNEL_VERSION="" MANIFEST_PACKAGES="" SOURCE_REF="" FULL_BUILD_DIGEST="" BUILD_DIGEST=""
-
-  eval "$(resolve_variant "$variant_or_spec" "$variants_config" "$image_name" "$force_rebuild")"
-  [[ -n "$base_image_override" ]] && BASE_IMAGE="$base_image_override"
-
-  # Preview which alias tags this build will generate (mirrors the workflow's Preview step)
-  preview_tags "$variant_or_spec" "$variants_config" "$image_name" "$repo_organization"
-
-  # Phase 2: extract → assemble labels → [relabel | rechunk] → final ref, in one
-  # sequence that takes the record. The rechunk path forces a rechunk so a
-  # previously chunked image is rebuilt (mirrors run_rechunk).
-  local record_json options_json built pipeline_force="$force_rebuild"
-  record_json=$(resolved_variant_record_json "$repo_organization" "$image_name" "$image_desc")
-  if [[ "$rechunk" == "1" ]]; then
-    pipeline_force="1"
-  fi
-  options_json=$(jq -cn --arg rechunk "$rechunk" --arg force_rebuild "$pipeline_force" '{rechunk: $rechunk, force_rebuild: $force_rebuild, build: "skip"}')
-  built=$(build_variant_pipeline "$record_json" "$options_json") || return $?
-  apply_build_record "$built"
-
-  print_build_summary "Pipeline complete"
+  run_variant pipeline "$@"
 }
 
 # ── CI parity (mirrors the old build-reusable / push-reusable / release-reusable actions) ──
@@ -388,145 +369,6 @@ build_variant_ci() {
 
   if [[ -n "$gh_output" ]]; then
     echo "record=${built}" >>"$gh_output"
-  fi
-}
-
-# Push, sign, and verify a built image (mirrors old push-reusable action).
-# Usage: push_variant <record_json> [options_json]
-# Record fields read: source_ref, tags, suffix, variant, parent_version (the
-# pipeline returned them). Options record: {"registry":..,"repo":..,"date":..,
-# "cosign_pub":..} are the run fields the caller already has.
-# Env required: GITHUB_ACTOR, GITHUB_TOKEN, SIGNING_SECRET.
-# Writes to $GITHUB_OUTPUT (remote_digest, remote_digest_ref, status) when set.
-push_variant() {
-  local record_json="${1:?record_json required}"
-  local options_json="${2:-}"
-
-  local source_ref tags_csv suffix variant_name parent_version
-  local registry repo date cosign_pub
-  IFS=$'\037' read -r source_ref tags_csv suffix variant_name parent_version < <(jq -r '[.source_ref, .tags, (.suffix // ""), .variant, (.parent_version // "")] | join("\u001f")' <<<"$record_json")
-  IFS=$'\037' read -r registry repo date cosign_pub < <(jq -r '[(.registry // ""), (.repo // ""), (.date // ""), (.cosign_pub // "cosign.pub")] | join("\u001f")' <<<"$options_json")
-  if [[ -z "$registry" || -z "$repo" ]]; then
-    echo "::error::registry and repo are required push fields" >&2
-    return 1
-  fi
-
-  : "${GITHUB_ACTOR:?GITHUB_ACTOR required}"
-  : "${GITHUB_TOKEN:?GITHUB_TOKEN required}"
-  if [[ -z "${SIGNING_SECRET:-}" ]]; then
-    echo "::error::SIGNING_SECRET required for cosign signing" >&2
-    return 1
-  fi
-
-  local authfile="/tmp/skopeo-auth/auth.json"
-  local base_img="${registry}/${repo}${suffix}"
-  local push_output sign_output remote_digest_ref
-
-  export MAX_ATTEMPTS="${MAX_ATTEMPTS:-3}"
-  export RETRY_DELAY="${RETRY_DELAY:-15}"
-
-  mkdir -p /tmp/skopeo-auth
-  run_with_retry "skopeo login ghcr.io" \
-    --stdin-data "${GITHUB_TOKEN}" \
-    skopeo login ghcr.io \
-    --username "${GITHUB_ACTOR}" \
-    --password-stdin \
-    --authfile "$authfile"
-
-  push_output="$(push_image_with_tags "$source_ref" "$tags_csv" "$base_img" "$authfile")"
-  [[ -n "${GITHUB_OUTPUT:-}" ]] && printf '%s\n' "$push_output" >>"$GITHUB_OUTPUT"
-  eval "$push_output"
-
-  sign_output="$(sign_and_verify_image "$remote_digest_ref" "$cosign_pub" "$authfile" \
-    "$GITHUB_ACTOR" "$GITHUB_TOKEN" "${GITHUB_STEP_SUMMARY:-}" \
-    "$variant_name" "$tags_csv" "$date" "$parent_version" "$registry" "$repo" "$suffix")"
-  [[ -n "${GITHUB_OUTPUT:-}" ]] && printf '%s\n' "$sign_output" >>"$GITHUB_OUTPUT"
-  eval "$sign_output"
-}
-
-# Generate a GitHub release for a variant (mirrors old release-reusable action).
-# Usage: release_variant <record_json> [options_json]
-# Record fields read: variant, disabled (the caller resolved the record with
-# variant_record). Options: {"handwritten":..,"variants_config":..,
-# "allow_disabled":..,"registry":..,"repo":..,"dry_run":0|1}
-# Auth: ambient gh session (gh auth login) or GH_TOKEN/GITHUB_TOKEN.
-# Only publishes a release when the computed version tag isn't already released.
-# dry_run=1 previews (WOULD CREATE / SKIP) without publishing anything.
-# Requires a git checkout with recent history.
-# Writes the changelog and its TITLE/TAG file under $ARTIFACTS_DIR/<variant>/.
-# Writes to $GITHUB_OUTPUT (title, tag) when set.
-release_variant() {
-  local record_json="${1:?record_json required}"
-  local options_json="${2:-}"
-
-  local variant disabled
-  IFS=$'\037' read -r variant disabled < <(jq -r '[.variant, (.disabled // false)] | join("\u001f")' <<<"$record_json")
-  if [[ -z "$variant" ]]; then
-    echo "::error::record has no variant field" >&2
-    return 1
-  fi
-
-  local handwritten variants_config allow_disabled registry repo dry_run
-  IFS=$'\037' read -r handwritten variants_config allow_disabled registry repo dry_run < <(jq -r '[(.handwritten // ""), (.variants_config // ".github/variants.json"), (.allow_disabled // "false"), (.registry // ""), (.repo // ""), (.dry_run // "0")] | join("\u001f")' <<<"$options_json")
-
-  local owner
-  owner="$(registry_owner)"
-  registry="${registry:-$(registry_url "$owner")}"
-  registry="${registry,,}"
-  repo="${repo:-$(package_repo)}"
-
-  if [[ "$allow_disabled" != "true" && "$disabled" == "true" ]]; then
-    echo "::error::Variant '${variant}' is disabled in variants.json" >&2
-    return 1
-  fi
-
-  local target
-  target="${variant##*/}"
-  [[ "$target" == "main" ]] && target="stable"
-
-  export IMAGE_PREFIX="${registry}/${repo}"
-  [[ -z "${GITHUB_REPOSITORY:-}" ]] && export GITHUB_REPOSITORY="${owner}/${repo}"
-
-  local artifact_dir="$ARTIFACTS_DIR/$variant"
-  mkdir -p "$artifact_dir"
-
-  python3 scripts/changelog.py "$target" "$artifact_dir/output.env" "$artifact_dir/changelog.md" \
-    --workdir . --handwritten "$handwritten" --variants-config "$variants_config" --package "$repo"
-
-  # shellcheck disable=SC1091
-  source "$artifact_dir/output.env"
-
-  # TITLE and TAG are assigned by the sourced output.env (written by changelog.py)
-  # shellcheck disable=SC2153
-  local gh_args=(-t "$TITLE" --notes-file "$artifact_dir/changelog.md")
-  if [[ "$target" == "stable" ]]; then
-    gh_args+=(--latest)
-  else
-    gh_args+=(--prerelease)
-  fi
-
-  # Only publish a release for a version tag that isn't already documented.
-  # changelog.py computes TAG as the newest version tag; gh release view tells
-  # us whether that version already has a release (same gate for all variants).
-  if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-    echo "::notice::Release for $TAG already exists — skipping" >&2
-    return 0
-  fi
-
-  if [[ "$dry_run" == "1" ]]; then
-    echo "WOULD CREATE release: $TAG"
-    echo "  Title   : $TITLE"
-    echo "  Latest  : $([[ "$target" == "stable" ]] && echo true || echo false)"
-    echo "  Notes   : $artifact_dir/changelog.md"
-    echo "  (dry run — nothing published)"
-    return 0
-  fi
-
-  gh release create "$TAG" --repo "$GITHUB_REPOSITORY" "${gh_args[@]}"
-
-  if [[ -n "${GITHUB_OUTPUT:-}" ]]; then
-    echo "title=${TITLE}" >>"$GITHUB_OUTPUT"
-    echo "tag=${TAG}" >>"$GITHUB_OUTPUT"
   fi
 }
 

@@ -33,17 +33,25 @@ MAJOR_ROWS = [
 
 
 def inspect(ref: str, docker: bool) -> dict:
-    """skopeo inspect an image, returning the manifest dict.
+    """Read one image manifest: the registry through skopeo, local storage through podman.
 
     docker=True inspects a registry ref (docker://, no pull, no sudo);
-    docker=False inspects a containers-storage image.
+    docker=False inspects a podman storage image.
     """
     if docker:
-        cmd = ["skopeo", "inspect", f"docker://{ref}"]
-    else:
-        cmd = ["skopeo", "inspect", f"containers-storage:{ref}"]
-    proc = subprocess.run(cmd, check=True, capture_output=True, text=True)
-    return json.loads(proc.stdout)
+        # podman reaches the registry by pulling layers, so the registry half stays skopeo.
+        proc = subprocess.run(
+            ["skopeo", "inspect", f"docker://{ref}"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return json.loads(proc.stdout)
+
+    proc = subprocess.run(
+        ["podman", "inspect", ref], check=True, capture_output=True, text=True
+    )
+    return json.loads(proc.stdout)[0]
 
 
 def render(rows, prev_versions: dict[str, str], versions: dict[str, str]) -> None:
