@@ -138,9 +138,18 @@ EOF
   [[ "$output" == *"ERROR: Unknown or disabled variant"* ]]
 }
 
+# Stub the upstream tag probe: every ref asked about resolves to a real tag.
+stub_upstream_probe() {
+  curl() {
+    printf '%s\n' '{"sha": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"}'
+  }
+}
+
 @test "resolve_variant outputs correct variable assignments" {
   local test_dir
   test_dir="$(setup_variant_json)"
+
+  stub_upstream_probe
 
   # Mock skopeo to return a version label
   skopeo() {
@@ -153,11 +162,14 @@ EOF
   [[ "$output" == *'TARGET_IMAGE="localhost/bazzite-nix"'* ]]
   [[ "$output" == *'VARIANT_NAME="testing"'* ]]
   [[ "$output" == *'BASE_IMAGE="ghcr.io/ublue-os/bazzite:stable"'* ]]
+  [[ "$output" == *'PARENT_VERSION="1.0.0"'* ]]
 }
 
 @test "resolve_variant bumps canonical on version collision (force_build)" {
   local test_dir
   test_dir="$(setup_variant_json)"
+
+  stub_upstream_probe
 
   # Mock skopeo: testing-1.0.1 is free, everything else exists
   skopeo() {
@@ -172,6 +184,8 @@ EOF
   output=$(resolve_variant "testing" "$test_dir/variants.json" "bazzite-nix" "1" "ghcr.io/test-owner")
   [[ "$output" == *'CANONICAL_TAG="1.0.1"'* ]]
   [[ "$output" == *'COLLISION_DETECTED="true"'* ]]
+  # The collision bump moves the tag name, not the upstream version the labels carry.
+  [[ "$output" == *'PARENT_VERSION="1.0.0"'* ]]
 }
 
 @test "resolve_variant drops {sha256} tags (digest is resolved at push time, not from upstream)" {
@@ -190,6 +204,8 @@ EOF
   ]
 }
 EOF
+
+  stub_upstream_probe
 
   # Mock skopeo: upstream has a digest — resolve_variant must NOT use it for tags
   skopeo() {
@@ -217,6 +233,28 @@ EOF
   output=$(resolve_variant "ghcr.io/ublue-os/bazzite:testing" "$test_dir/variants.json" "bazzite-nix")
   [[ "$output" == *'BASE_IMAGE="ghcr.io/ublue-os/bazzite:testing"'* ]]
   [[ "$output" == *'TAG="testing"'* ]]
+  # A spec has no upstream git probe: its parent version is the base image label.
+  [[ "$output" == *'PARENT_VERSION="2.0.0"'* ]]
+  # No registry collision check either, but the var must still be defined: the
+  # record composer reads it under `set -u`.
+  [[ "$output" == *'COLLISION_DETECTED="false"'* ]]
+}
+
+@test "resolve_variant stdout is only assignments, so eval cannot break" {
+  local test_dir
+  test_dir="$(setup_variant_json)"
+
+  stub_upstream_probe
+
+  skopeo() {
+    echo '{"Labels":{"org.opencontainers.image.version":"1.0.0"}}'
+  }
+  export -f skopeo
+
+  local output bad
+  output=$(resolve_variant "testing" "$test_dir/variants.json" "bazzite-nix")
+  bad=$(printf '%s\n' "$output" | grep -vE '^[A-Z_]+=".*"$' || true)
+  [[ -z "$bad" ]]
 }
 
 # ── build_bib ───────────────────────────────────────────────────────────────────────

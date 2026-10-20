@@ -111,10 +111,11 @@ def main() -> None:
         curr_v = manifest.get("Labels", {}).get("org.opencontainers.image.version")
         if prev_v and curr_v:
             branch = name.split(":", 1)[-1]
-            commits = changelog.get_commits(
-                changelog.upstream_tag(branch, prev_v),
-                changelog.upstream_tag(branch, curr_v),
-            )
+            prev_tag = changelog.upstream_tag(branch, prev_v)
+            curr_tag = changelog.upstream_tag(branch, curr_v)
+            prev_ref, _ = changelog.resolve_upstream_ref(prev_tag)
+            curr_ref, _ = changelog.resolve_upstream_ref(curr_tag)
+            commits = changelog.get_commits(prev_ref, curr_ref)
             if commits:
                 print("")
                 print(commits)

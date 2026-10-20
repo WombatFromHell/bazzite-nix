@@ -129,14 +129,18 @@ extract_image_info() {
 # ── assemble labels file ────────────────────────────────────────────────────
 # Usage: assemble_labels <date> <image_desc> <variant> <parent_version> \
 #                        <repo_owner> <repo_name> <kernel_version> \
-#                        <manifest_file_path> <output_file> [revision]
+#                        <manifest_file_path> <output_file> [revision] [upstream_tag]
 # Reads manifest JSON from manifest_file_path and writes labels to output_file.
 # revision (optional) is the upstream commit SHA, preserved from the base image.
+# upstream_tag (optional) is the exact upstream git tag this image was cut from
+# (`unstable-45.20261020.3`, or bare `44.20261012.1` for stable); images built
+# without a resolved identity omit it.
 
 assemble_labels() {
   local date="$1" image_desc="$2" variant="$3" parent_version="$4" repo_owner="$5"
   local repo_name="$6" kernel_version="$7" manifest_file="$8" output_file="$9"
   local revision="${10:-}"
+  local upstream_tag="${11:-}"
 
   # Read manifest from file to avoid shell quoting issues with JSON
   # Compact to single line so it survives label file write/read correctly
@@ -160,6 +164,9 @@ assemble_labels() {
     "containers.bootc=1"
     "ostree.rechunk.info=${manifest}"
   )
+  if [[ -n "$upstream_tag" ]]; then
+    labels+=("org.opencontainers.image.upstream-version=${upstream_tag}")
+  fi
   printf '%s\n' "${labels[@]}" >"${output_file}"
 }
 

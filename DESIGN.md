@@ -84,16 +84,16 @@ Gates and permissions:
   split the scheduled and manual runs apart). They wait for each other
   (`cancel-in-progress: false`) instead of racing on the same release.
 
-### 2.2 Justfile (30 recipes)
+### 2.2 Justfile (31 recipes)
 
 | Group           | Recipe:line -> function                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Just            | `check:24` check_just_files; `fix:31` fix_just_files                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | Utility         | `default:19` just --list; `clean:38` clean_oci_layout + remove_images_and_prune; `cleaner:46` clean_artifacts + remove_images_and_prune; `clean-vm:59` clean_vm_cache; `lint:66` lint_scripts; `format:74` format_scripts; `test:82` bats + pytest; `list-variants:240` list_available_variants                                                                                                                                                                                        |
-| Build container | `build:95` run_build; `rebuild:104` build 1; `rechunk:112` run_rechunk; `rootful-load:127` resolve_variant + podman save/load; `relabel:137` run_variant relabel; `pipeline:154` run_variant pipeline; `pipeline-rechunk:170` run_variant pipeline 1; `build-all:181` check_variants + build_all_variants; `release-preview:198` release_preview; `ci-pipeline:210` build_variant_ci; `push:219` push_variant; `release:229` release_variant; `check-variants:250` check_variants; `tags-preview:258` preview_tags |
-| VM              | `build-qcow2:268` build_vm_image; `build-raw:279` build_vm_image; `rebuild-qcow2:288` build-qcow2 1; `rebuild-raw:293` build-raw 1; `run-vm-qcow2:300` run_variant_vm; `run-vm-raw:311` run_variant_vm                                                                                                                                                                                                                                                                                    |                                                                                                                                                                                                                                                                                 |
+| Build container | `build:95` run_build; `rebuild:104` build 1; `rechunk:112` run_rechunk; `rootful-load:127` resolve_variant + podman save/load; `relabel:137` run_variant relabel; `pipeline:154` run_variant pipeline; `pipeline-rechunk:170` run_variant pipeline 1; `build-all:181` check_variants + build_all_variants; `release-preview:198` release_preview; `ci-pipeline:210` build_variant_ci; `push:219` push_variant; `release:229` release_variant; `check-variants:250` check_variants; `demo-changelog:260` changelog.py `--pair`; `tags-preview:270` preview_tags |
+| VM              | `build-qcow2:279` build_vm_image; `build-raw:290` build_vm_image; `rebuild-qcow2:299` build-qcow2 1; `rebuild-raw:304` build-raw 1; `run-vm-qcow2:311` run_variant_vm; `run-vm-raw:322` run_variant_vm                                                                                                                                                                                                                                                                                    |                                                                                                                                                                                                                                                                                 |
 
-Shell flags are set once at `Justfile:2`. 24 of the 30 recipes carry the
+Shell flags are set once at `Justfile:2`. 25 of the 31 recipes carry the
 `#!/usr/bin/env bash` + `source "{{ just_helpers }}"` preamble; the other 6
 delegate to another recipe (`default`, `test`, `rebuild`, `pipeline-rechunk`,
 `rebuild-qcow2`, `rebuild-raw`). The preamble is needed because this `just`
@@ -107,7 +107,7 @@ variant name; the Justfile turns it into a record with `variant_record`.
 | File                                | Contract                                                                                                                                                                                                                                                   |
 | ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `scripts/check-variants.sh`         | env in: `REGISTRY`, `REPO`, `FORCE_BUILD`, `IMAGE_DESC`, `DATE`, `VARIANTS_CONFIG`, `VARIANTS_OVERRIDE`, `ARTIFACTS_DIR`. Out: `$ARTIFACTS_DIR/variants_results.json`. Clears that directory first (`:51`). Emits `::` log directives                      |
-| `scripts/changelog.py`              | `target output changelog --package --variants-config [--pretty --workdir --handwritten]`; `--package` and `--variants-config` required (`:557`, `:562`); reads `IMAGE_PREFIX` for the registry half (`:15`); a variant whose newest version tag is its only one gets a first-release body with no diff tables; writes the two files where the caller pointed |
+| `scripts/changelog.py`              | `target output changelog --package --variants-config [--pretty --handwritten --pair PREV CURR]`; `--package` (`:668`) and `--variants-config` (`:673`) required; `--pair` (`:660`) names the release window with two published tags instead of letting each image's newest canonical tag win, and a pair no image carries exits non-zero (`:691`); reads `IMAGE_PREFIX` for the registry half (`:15`); the current release comes from each image's newest canonical tag (`release_ref` `:179`); a variant whose newest version tag is its only one gets a first-release body with no diff tables; writes the two files where the caller pointed |
 | `scripts/release-preview.py`        | `image_ref [--prev]`; reads a local image with podman, a registry ref with skopeo                                                                                                                                                                          |
 | `*.bats`, `tests/test_changelog.py` | run by `just test`                                                                                                                                                                                                                                         |
 
@@ -120,7 +120,7 @@ sources the two check parts (`:46`, `:48`), build, push, then the five
 
 | File                           | Functions                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `check-variants-registry.bash` | `registry_url:11` owner -> `ghcr.io/<owner>`; `registry_owner:18` CI owner or Justfile default; `package_repo:26` lowercase repo name; `variant_record:37` the one variant lookup, fails listing enabled names; `variant_names:51`; `enabled_variant_names:55`; `read_registry_json:67` the one retry loop; `inspect_image_with_retry:91`; `image_exists:100`; `get_parent_version:110`; `find_latest_versioned_tag:127`; `version_check:157`; `check_build_needed:181` |
+| `check-variants-registry.bash` | `registry_url:19` owner -> `ghcr.io/<owner>`; `registry_owner:26` CI owner or Justfile default; `package_repo:34` lowercase repo name; `variant_record:45` the one variant lookup, fails listing enabled names; `variant_names:59`; `enabled_variant_names:63`; `read_registry_json:75` the one retry loop; `inspect_image_with_retry:99`; `image_exists:108`; `get_parent_version:118`; `version_of_tag:133`; `find_latest_versioned_tag:150`; `upstream_repo:181`; `resolve_upstream_tag:199` upstream identity by exact-name probe; `upstream_version_candidates:239` build-counter walk; `version_check:261`; `check_build_needed:286` |
 | `check-variants-tags.bash`     | `extract_image_metadata:9`; `compute_canonical_tag:32` version-collision handling; `tag_needs_digest:96`; `generate_tags:106` `{canonical} {branch} {major} {sha256}`; `resolve_variant:150`                                                                                                                                                                                                                              |
 | `build-helpers.bash`           | `CACHE_DIR:9`; `image_ref:19` the one spelling of a local ref; `image_digest:26`; `image_tag:32`; `sudo_cache:39`; `build_image:49`; `build_image_or_skip:67`; `extract_image_info:89`; `assemble_labels:136`; `relabel_image:174`; `rechunk_image:218`; `extract_final_ref:306`                                                                                                                                          |
 | `push-helpers.bash`            | `is_transient_error:10`; `run_with_retry:23`; `push_image_with_tags:79`; `sign_and_verify_image:147`; `push_variant:218`; `release_variant:278`                                                                                                                                                                                                                                                                          |
@@ -155,7 +155,7 @@ variants.json entry   {name, base_image, suffix?, latest?, disabled?, cleanup?,
                        tags?, tags_default?, build_script?}   default build_script: build.sh
 variant_record()      adds {variant: .name, disabled: (.disabled // false)}
 CI matrix entry       {variant, base_image, build_script, suffix, parent_version,
-                       canonical_tag, tags, collision_detected}
+                       canonical_tag, upstream_tag, tags, collision_detected}
                       (needs_build is emitted then deleted by aggregate_variants)
 build.yml adds        {date, image_desc, repo_owner, repo_name,
                        version_label: .parent_version}          build.yml:110-117
@@ -229,6 +229,41 @@ Enabled variants: `stable`, `testing`, `unstable`. Disabled: `nvidia-open`,
    Justfile composes the record with `variant_record` or `vm_record_json` plus one
    `jq`. Cost accepted: `just push` and `just release` take quoted JSON.
 
+10. Upstream identity comes from upstream's git tags, not from the base image's
+    version label. The label moves ahead of the tag: probed 2026-10-19, `bazzite:testing`
+    held `45.20261019.4` while upstream's newest `testing` tag was `testing-45.20261019.3`,
+    and `bazzite:stable` is labelled `44.20261012.1`, which upstream tags bare, while its
+    testing and unstable builds carry a branch prefix. So the label version is probed against
+    both name families (`{branch}-{version}`, then `{version}`), each walked down its build
+    counter up to `UPSTREAM_BUILD_WALK` names, and nothing resolving is an error rather than
+    a guessed comparison. Paging the `/tags` list was rejected on the same evidence: unstable
+    pushes 40+ tags a day, so 500 tags never reached the stable branch. Cost: one probe per
+    variant, up to ten only during a tag race.
+
+11. `verify-upstream` compares versions, not tag names. Our published tags always
+    carry the branch prefix (`{variant}-{version}`), upstream names its stable line
+    bare, so the two name families are the same release under different names. The
+    check therefore asks whether the version our newest tag carries is the version
+    upstream's resolved tag names; a name-only comparison would fail on every stable
+    release. The tag-name rule is enforced separately over the whole tag list, which
+    also reports the bare `{version}` names published before decision 10 as legacy.
+
+12. The built image carries the upstream tag it was cut from as its own label,
+    `org.opencontainers.image.upstream-version` (`build-helpers.bash:168`), and the
+    push path hands that identity to the next run. Reading our own previous release
+    against upstream needs it: without the label the reader can only re-probe the
+    naming family from `org.opencontainers.image.version`, which is what happens for
+    releases published before this change.
+
+13. A variant's current release is read from its newest canonical tag (`release_ref`
+    `changelog.py:179`, feeding `get_manifests:196`), and the moving `{variant}` tag is
+    only the fallback for images that publish no canonical name. The moving tag is an
+    alias we do not always have: `ghcr.io/wombatfromhell/bazzite-nix` carries
+    `unstable-45.20261015.6` and `unstable-45.20261017.2` but no `unstable`, which made
+    the reader stop before printing a diff. Canonical names are also how the previous
+    release is addressed, and `version_sort_key:174` orders names by their number runs,
+    so build `.10` follows `.9` instead of sorting before `.6`.
+
 Removed since the previous map, with no caller left: `sudo_refresh`,
 `find_prev_ref`, `collect_successful_builds`, `recent_successful_builds`,
 `build_variant_core`, `skopeo_copy_with_retry`, and the `digest` / `prev_ref`
@@ -238,12 +273,12 @@ matrix fields.
 
 | Suite                          | Tests        | Exercises                                                            |
 | ------------------------------ | ------------ | -------------------------------------------------------------------- |
-| `scripts/just-helpers.bats`    | 36           | resolve, aggregate, release selection, pipeline and entrypoint mocks |
-| `scripts/check-variants.bats`  | 11           | the two check libraries                                              |
+| `scripts/just-helpers.bats`    | 47           | resolve (upstream probe stubbed, stdout stays eval-safe), aggregate, release selection, pipeline and entrypoint mocks |
+| `scripts/check-variants.bats`  | 31           | the two check libraries, upstream identity probes, bump-walk budget    |
 | `scripts/release-preview.bats` | 4            | `release-preview.py`                                                 |
-| `tests/build-helpers.bats`     | 8            | `build-helpers.bash`                                                 |
-| `scripts/push-helpers.bats`    | 5            | digest from push, one tag call, retry plumbing                       |
-| `tests/test_changelog.py`      | 173 (pytest) | `changelog.py`                                                       |
+| `tests/build-helpers.bats`     | 9            | `build-helpers.bash`                                                 |
+| `scripts/push-helpers.bats`    | 6            | digest from push, one tag call, retry plumbing                       |
+| `tests/test_changelog.py`      | 196 (pytest) | `changelog.py`, including a forced tag pair naming one release window |
 
 `just test` (`Justfile:82`) runs all six.
 

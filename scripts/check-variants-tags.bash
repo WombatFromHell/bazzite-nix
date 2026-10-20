@@ -1,6 +1,10 @@
 # check-variants-tags.bash — tag computation and variant resolution for check-variants.
 # Sourced by check-variants.sh and just-helpers.bash (no shebang/set — see those files).
 
+# Budget for the collision bump walk in compute_canonical_tag: bounded so a
+# registry that keeps holding bumped tags cannot be probed forever.
+COLLISION_BUMP_WALK=5
+
 # ── extract image metadata ──────────────────────────────────────────────────
 # Usage: extract_image_metadata <inspect_json>
 # Outputs parent_version and digest from skopeo inspect JSON
@@ -74,6 +78,7 @@ compute_canonical_tag() {
     next_num=$((BASH_REMATCH[2] + 1))
   fi
 
+  local probe_start="$next_num"
   while true; do
     local next_canonical="${search_base}.${next_num}"
     local next_check_tag="$next_canonical"
@@ -85,6 +90,10 @@ compute_canonical_tag() {
     fi
     echo "::notice::${next_check_tag} also exists, checking next..." >&2
     ((next_num++))
+    if ((next_num - probe_start >= COLLISION_BUMP_WALK)); then
+      echo "::error::${COLLISION_BUMP_WALK} bumped tags after ${search_base} already exist; stopping the bump walk" >&2
+      return 1
+    fi
   done
 
   canonical="${search_base}.${next_num}"
@@ -154,7 +163,8 @@ resolve_variant() {
   local force_build="${4:-0}"
   local registry="${5:-}"
   local spec row base_image build_script suffix image_name_resolved tag canonical
-  local latest tags_json tags_csv collision_detected
+  local latest tags_json tags_csv collision_detected bump
+  local base_label base_version upstream_tag upstream_version tag_family identity
 
   spec="$variant_or_spec"
 
@@ -183,6 +193,9 @@ resolve_variant() {
     echo "BUILD_SCRIPT=\"$build_script\""
     echo "VARIANT_NAME=\"$tag\""
     echo "CANONICAL_TAG=\"$canonical\""
+    echo "PARENT_VERSION=\"$canonical\""
+    echo "UPSTREAM_TAG=\"\""
+    echo "COLLISION_DETECTED=\"false\""
     echo "TAGS=\"$tags_csv\""
     return 0
   fi
@@ -204,8 +217,18 @@ resolve_variant() {
   image_name_resolved="$image_name${suffix}"
   tag="${base_image##*:}"
 
-  # Extract real version from upstream image label
-  canonical="$(get_parent_version "$base_image")" || canonical="$tag"
+  # Canonical version comes from upstream's git tag, the same rule CI uses:
+  # the base image's own label version is probed against upstream's two naming
+  # forms, and the tag that resolves names the release we are cutting from.
+  base_label="$(get_parent_version "$base_image")" || base_label="$tag"
+  base_version="$(version_of_tag "$base_label" "$spec")"
+  if ! identity=$(resolve_upstream_tag "$(upstream_repo "$base_image")" "$spec" "$base_version"); then
+    echo "ERROR: no upstream git tag names $base_version of branch $spec in $(upstream_repo "$base_image")" >&2
+    return 1
+  fi
+  read -r upstream_tag upstream_version tag_family <<<"$identity"
+  canonical="$upstream_version"
+  echo "::notice::Upstream identity for $spec: git tag $upstream_tag (family $tag_family)" >&2
 
   # Strip branch prefix from canonical and handle version collisions the same way
   # CI does (compute_canonical_tag): on force_build, if <branch>-<canonical> already
@@ -227,7 +250,11 @@ resolve_variant() {
   fi
 
   if [[ -n "$registry_prefix" ]]; then
-    read -r canonical collision_detected <<<"$(compute_canonical_tag "$canonical" "$registry_prefix" "$force_build" "$spec")"
+    bump=$(compute_canonical_tag "$canonical" "$registry_prefix" "$force_build" "$spec") || {
+      echo "ERROR: no free version tag within $COLLISION_BUMP_WALK bumps of $canonical in $registry_prefix" >&2
+      return 1
+    }
+    read -r canonical collision_detected <<<"$bump"
   elif [[ "$canonical" =~ ^[a-zA-Z]+-([0-9].*)$ ]]; then
     canonical="${BASH_REMATCH[1]}"
   fi
@@ -246,6 +273,8 @@ resolve_variant() {
   echo "BUILD_SCRIPT=\"${build_script}\""
   echo "VARIANT_NAME=\"${spec}\""
   echo "CANONICAL_TAG=\"$canonical\""
+  echo "PARENT_VERSION=\"$upstream_version\""
+  echo "UPSTREAM_TAG=\"$upstream_tag\""
   echo "COLLISION_DETECTED=\"$collision_detected\""
   echo "TAGS=\"$tags_csv\""
 }

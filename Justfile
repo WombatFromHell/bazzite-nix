@@ -252,6 +252,18 @@ check-variants $force_build="0" $variants_override="":
     source "{{ just_helpers }}"
     check_variants "{{ force_build }}" "{{ repo_organization }}" "{{ image_name }}" "{{ variants_config }}" "{{ variants_override }}"
 
+# Demo one release window locally: two published tags from one release branch become the
+# changelog body and TITLE/TAG the real generator writes (under .artifacts, gitignored).
+# Needs ghcr auth for skopeo: podman login ghcr.io.
+# Usage: just demo-changelog unstable unstable-45.20261015.6 unstable-45.20261017.2
+[group('Build Container Image')]
+demo-changelog $variant $prev-tag $curr-tag:
+    #!/usr/bin/env bash
+    source "{{ just_helpers }}"
+    export IMAGE_PREFIX="$(registry_url "{{ repo_organization }}")/{{ image_name }}"
+    mkdir -p .artifacts/demo
+    python3 scripts/changelog.py "{{ variant }}" ".artifacts/demo/{{ variant }}-output.env" ".artifacts/demo/{{ variant }}-changelog.md" --package "{{ image_name }}" --variants-config "{{ variants_config }}" --pair "{{ prev-tag }}" "{{ curr-tag }}"
+
 # Preview which alias tags (and the step-summary markdown) a build would generate
 # Usage: just tags-preview [variant-name | image:tag]
 [group('Build Container Image')]

@@ -311,7 +311,7 @@ release_variant() {
   mkdir -p "$artifact_dir"
 
   python3 scripts/changelog.py "$target" "$artifact_dir/output.env" "$artifact_dir/changelog.md" \
-    --workdir . --handwritten "$handwritten" --variants-config "$variants_config" --package "$repo"
+    --handwritten "$handwritten" --variants-config "$variants_config" --package "$repo"
 
   # shellcheck disable=SC1091
   source "$artifact_dir/output.env"

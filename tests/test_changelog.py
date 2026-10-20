@@ -10,9 +10,17 @@ of generating accurate changelogs.
 import pytest
 import json
 import os
+import subprocess
 import tempfile
+import changelog  # for monkeypatching the curl transport
 from changelog import (
     other_start_pattern,
+    release_ref,
+    get_manifests,
+    release_time,
+    fetch_release_hash,
+    resolve_upstream_ref,
+    get_commits,
     get_images,
     is_nvidia,
     get_packages,
@@ -30,6 +38,7 @@ from changelog import (
     PATTERN_PKGREL,
     load_variants,
     registry_prefix,
+    generate_changelog,
 )
 
 
@@ -620,9 +629,9 @@ class TestGetTags:
         ]
         manifests = {img: make_manifest_with_tags(tags) for img in IMAGES}
         prev, curr = get_tags("stable", manifests)
-        # String sorted: stable-1.20240101, stable-10.20241231, stable-2.20240201, stable-5.20240601
-        assert prev == "stable-2.20240201"
-        assert curr == "stable-5.20240601"
+        # Number runs sorted: stable-1, stable-2, stable-5, stable-10
+        assert prev == "stable-5.20240601"
+        assert curr == "stable-10.20241231"
 
     def test_stable_does_not_match_prefixed_tags(self):
         """Stable target should match its own stable-* tags, ignoring other branches and legacy bare tags."""
@@ -1413,3 +1422,492 @@ class TestVersionHandlingIntegration:
         result = get_packages(manifests)
 
         assert result["bazzite"]["kernel"] == "6.19.8"
+
+
+class FakeGitHubTransport:
+    """Stands in for curl so ref probes are answered from a declared set of refs."""
+
+    def __init__(
+        self,
+        known_refs: dict[str, str],
+        compare_commits: list[dict] | None = None,
+        heads_at: dict[str, list[dict]] | None = None,
+    ):
+        self.known_refs = known_refs
+        self.probed_refs: list[str] = []
+        self.compare_requests: list[str] = []
+        self.head_requests: list[str] = []
+        self.heads_at = heads_at or {}
+        self.compare_commits = compare_commits or []
+
+    def request(self, cmd, **_kwargs):
+        url = cmd[-1]
+        if "/commits?" in url:
+            self.head_requests.append(url)
+            until = url.split("until=", 1)[1].split("&")[0]
+            body = self.heads_at.get(until, [])
+        elif "/commits/" in url:
+            ref = url.split("/commits/", 1)[1]
+            self.probed_refs.append(ref)
+            head_sha = self.known_refs.get(ref, "")
+            body = {"sha": head_sha} if head_sha else {"message": "Not Found"}
+        else:
+            self.compare_requests.append(url)
+            body = {
+                "commits": self.compare_commits,
+                "total_count": len(self.compare_commits),
+            }
+        return subprocess.CompletedProcess(
+            args=cmd, returncode=0, stdout=json.dumps(body).encode()
+        )
+
+
+class TestResolveUpstreamRef:
+    """Our tag name is walked down its collision counter to the published upstream build."""
+
+    def test_exact_ref_resolves_in_one_probe(self, monkeypatch):
+        transport = FakeGitHubTransport({"unstable-45.20261019.7": "sha-published"})
+        monkeypatch.setattr(changelog.subprocess, "run", transport.request)
+
+        ref, head_sha = resolve_upstream_ref("unstable-45.20261019.7")
+
+        assert ref == "unstable-45.20261019.7"
+        assert head_sha == "sha-published"
+        assert transport.probed_refs == ["unstable-45.20261019.7"]
+
+    def test_collision_bumped_tag_walks_the_counter_down(self, monkeypatch):
+        transport = FakeGitHubTransport({"unstable-45.20261019.7": "sha-published"})
+        monkeypatch.setattr(changelog.subprocess, "run", transport.request)
+
+        ref, head_sha = resolve_upstream_ref("unstable-45.20261019.8")
+
+        assert ref == "unstable-45.20261019.7"
+        assert head_sha == "sha-published"
+        assert transport.probed_refs == [
+            "unstable-45.20261019.8",
+            "unstable-45.20261019.7",
+        ]
+
+    def test_probes_are_bounded_when_upstream_has_the_ref_nowhere(self, monkeypatch):
+        transport = FakeGitHubTransport({})
+        monkeypatch.setattr(changelog.subprocess, "run", transport.request)
+
+        ref, head_sha = resolve_upstream_ref("unstable-45.20261020.9")
+
+        assert ref == ""
+        assert head_sha == ""
+        assert len(transport.probed_refs) == changelog.UPSTREAM_REF_PROBES
+
+    def test_counter_one_falls_back_to_the_bare_published_name(self, monkeypatch):
+        transport = FakeGitHubTransport(
+            {"testing-44.20261014": "bd3ae008d5213861cb37d849f576c4a1fd3dfd75"}
+        )
+        monkeypatch.setattr(changelog.subprocess, "run", transport.request)
+
+        ref, head_sha = resolve_upstream_ref("testing-44.20261014.1")
+
+        assert ref == "testing-44.20261014"
+        assert head_sha == "bd3ae008d5213861cb37d849f576c4a1fd3dfd75"
+        assert transport.probed_refs == ["testing-44.20261014.1", "testing-44.20261014"]
+
+    def test_probed_sha_is_the_build_the_title_names(self, monkeypatch):
+        real_sha = "ba999d306030404fdbbc8be25357acf6c5d5d27b"
+        transport = FakeGitHubTransport({"unstable-45.20261019.8": real_sha})
+        monkeypatch.setattr(changelog.subprocess, "run", transport.request)
+
+        ref, head_sha = resolve_upstream_ref("unstable-45.20261019.8")
+
+        assert ref == "unstable-45.20261019.8"
+        assert head_sha == real_sha
+        assert transport.probed_refs == ["unstable-45.20261019.8"]
+
+    def test_compare_is_skipped_when_a_ref_is_unresolved(self, monkeypatch):
+        transport = FakeGitHubTransport({"unstable-45.20261019.7": "sha-published"})
+        monkeypatch.setattr(changelog.subprocess, "run", transport.request)
+
+        section = get_commits("", "unstable-45.20261019.7")
+
+        assert section == ""
+        assert transport.compare_requests == []
+        assert transport.probed_refs == []
+
+
+SKOOPO_LIST_TAGS = "list-tags"
+
+
+class FakeRegistryTransport:
+    """Answers skopeo list-tags and inspect from declared tag lists, so no registry is touched."""
+
+    def __init__(
+        self, tag_lists: dict[str, list[str]], unlisted_images: set[str] | None = None
+    ):
+        self.tag_lists = tag_lists
+        self.unlisted_images = unlisted_images if unlisted_images else set()
+        self.requested_refs: list[str] = []
+
+    def request(self, cmd, **_kwargs):
+        ref = cmd[-1]
+        image, _, tag = ref.removeprefix(registry_prefix()).partition(":")
+
+        if cmd[1] == SKOOPO_LIST_TAGS:
+            self.requested_refs.append(image)
+            if image in self.unlisted_images:
+                raise subprocess.CalledProcessError(1, cmd)
+            body = {"Repository": image, "Tags": self.tag_lists[image]}
+        else:
+            self.requested_refs.append(f"{image}:{tag}")
+            body = {"RepoTags": self.tag_lists[image], "Labels": {}}
+        return subprocess.CompletedProcess(
+            args=cmd, returncode=0, stdout=json.dumps(body).encode()
+        )
+
+
+class TestReleaseRef:
+    """A variant's current release is read from its newest canonical tag."""
+
+    def test_newest_canonical_tag_is_read_when_the_moving_tag_is_absent(
+        self, monkeypatch
+    ):
+        tag_lists = {
+            image: [
+                "latest",
+                "unstable-45",
+                "unstable-45.20261015.6",
+                "unstable-45.20261017.2",
+            ]
+            for image in IMAGES
+        }
+        transport = FakeRegistryTransport(tag_lists)
+        monkeypatch.setattr(changelog.subprocess, "run", transport.request)
+        monkeypatch.setenv("IMAGE_PREFIX", "ghcr.io/owner/bazzite-nix")
+
+        assert release_ref("bazzite-nix", "unstable") == "unstable-45.20261017.2"
+
+    def test_moving_tag_is_the_fallback_when_no_canonical_tag_exists(self, monkeypatch):
+        tag_lists = {image: ["latest", "unstable"] for image in IMAGES}
+        transport = FakeRegistryTransport(tag_lists)
+        monkeypatch.setattr(changelog.subprocess, "run", transport.request)
+        monkeypatch.setenv("IMAGE_PREFIX", "ghcr.io/owner/bazzite-nix")
+
+        assert release_ref("bazzite-nix", "unstable") == "unstable"
+
+    def test_build_counter_ten_follows_nine(self, monkeypatch):
+        tag_lists = {
+            image: ["unstable-45.20261019.6", "unstable-45.20261019.10"]
+            for image in IMAGES
+        }
+        transport = FakeRegistryTransport(tag_lists)
+        monkeypatch.setattr(changelog.subprocess, "run", transport.request)
+        monkeypatch.setenv("IMAGE_PREFIX", "ghcr.io/owner/bazzite-nix")
+
+        assert release_ref("bazzite-nix", "unstable") == "unstable-45.20261019.10"
+
+    def test_stable_ignores_the_bare_names_published_before_decision_ten(
+        self, monkeypatch
+    ):
+        tag_lists = {
+            image: ["44.20261012.1", "stable-44.20261012.1"] for image in IMAGES
+        }
+        transport = FakeRegistryTransport(tag_lists)
+        monkeypatch.setattr(changelog.subprocess, "run", transport.request)
+        monkeypatch.setenv("IMAGE_PREFIX", "ghcr.io/owner/bazzite-nix")
+
+        assert release_ref("bazzite-nix", "stable") == "stable-44.20261012.1"
+
+    def test_tag_list_failure_still_reads_the_moving_tag(self, monkeypatch):
+        tag_lists = {image: ["unstable-45.20261017.2"] for image in IMAGES}
+        transport = FakeRegistryTransport(tag_lists, unlisted_images={"bazzite-nix"})
+        monkeypatch.setattr(changelog.subprocess, "run", transport.request)
+        monkeypatch.setattr(changelog.time, "sleep", lambda _seconds: None)
+        monkeypatch.setenv("IMAGE_PREFIX", "ghcr.io/owner/bazzite-nix")
+
+        assert release_ref("bazzite-nix", "unstable") == "unstable"
+
+    def test_each_image_is_read_at_its_own_newest_tag(self, monkeypatch):
+        tag_lists = {
+            "bazzite-nix": ["unstable-45.20261017.2", "unstable-45.20261019.1"],
+            "bazzite-nix-deck": ["unstable-45.20261017.2"],
+        }
+        transport = FakeRegistryTransport(tag_lists)
+        monkeypatch.setattr(changelog.subprocess, "run", transport.request)
+        monkeypatch.setenv("IMAGE_PREFIX", "ghcr.io/owner/bazzite-nix")
+
+        images = list(tag_lists)
+        manifests = get_manifests(
+            {image: release_ref(image, "unstable") for image in images}
+        )
+
+        assert set(manifests) == set(images)
+        assert transport.requested_refs == [
+            *images,
+            "bazzite-nix:unstable-45.20261019.1",
+            "bazzite-nix-deck:unstable-45.20261017.2",
+        ]
+
+    def test_tag_pairs_order_by_build_counter(self):
+        tags = ["unstable-45.20261019.6", "unstable-45.20261019.10"]
+        manifests = {image: {"RepoTags": tags} for image in IMAGES}
+
+        prev, curr = get_tags("unstable", manifests)
+
+        assert prev == "unstable-45.20261019.6"
+        assert curr == "unstable-45.20261019.10"
+
+
+class TestChangelogTagPair:
+    """Two published tags name the release window, so the demo needs no local build."""
+
+    SHA_HEAD = "ba999d306030404fdbbc8be25357acf6c5d5d27b"
+    SHA_TAIL = "5420ea4e06c831b20a8a965e82bf354071936059"
+
+    def test_a_forced_pair_names_the_window_instead_of_the_registry_newest(
+        self, monkeypatch
+    ):
+        transport = FakeGitHubTransport(
+            {
+                "unstable-45.20261015.6": self.SHA_TAIL,
+                "unstable-45.20261017.2": self.SHA_HEAD,
+            },
+            compare_commits=[
+                {
+                    "sha": self.SHA_HEAD,
+                    "commit": {
+                        "author": {"name": "Josh"},
+                        "message": "Release 2026.10.17\nbody",
+                    },
+                }
+            ],
+        )
+        monkeypatch.setattr(changelog.subprocess, "run", transport.request)
+        manifests = {
+            image: make_manifest_with_tags(
+                [
+                    "unstable-45.20261015.6",
+                    "unstable-45.20261017.2",
+                    "unstable-45.20261019.1",
+                ]
+            )
+            for image in IMAGES
+        }
+
+        title, body = generate_changelog(
+            None,
+            "unstable",
+            None,
+            {image: make_manifest_with_packages({}) for image in IMAGES},
+            manifests,
+            _VARIANTS,
+            PACKAGE,
+            tags=("unstable-45.20261015.6", "unstable-45.20261017.2"),
+        )
+
+        assert title == "unstable-45.20261017.2: Unstable (F45.20261017, #ba999d3)"
+        assert transport.probed_refs == [
+            "unstable-45.20261017.2",
+            "unstable-45.20261015.6",
+        ]
+        assert f"**[{self.SHA_HEAD[:7]}](https://github.com" in body
+        assert "compare/unstable-45.20261015.6...unstable-45.20261017.2" in body
+
+    def test_no_pair_keeps_the_registry_newest_two_as_the_window(self, monkeypatch):
+        transport = FakeGitHubTransport(
+            {
+                "unstable-45.20261017.2": self.SHA_TAIL,
+                "unstable-45.20261019.1": self.SHA_HEAD,
+            }
+        )
+        monkeypatch.setattr(changelog.subprocess, "run", transport.request)
+        manifests = {
+            image: make_manifest_with_tags(
+                [
+                    "unstable-45.20261015.6",
+                    "unstable-45.20261017.2",
+                    "unstable-45.20261019.1",
+                ]
+            )
+            for image in IMAGES
+        }
+
+        title, _body = generate_changelog(
+            None,
+            "unstable",
+            None,
+            {image: make_manifest_with_packages({}) for image in IMAGES},
+            manifests,
+            _VARIANTS,
+            PACKAGE,
+        )
+
+        assert transport.probed_refs == [
+            "unstable-45.20261019.1",
+            "unstable-45.20261017.2",
+        ]
+        assert title == "unstable-45.20261019.1: Unstable (F45.20261019, #ba999d3)"
+
+    def test_a_forced_name_that_upstream_raced_still_walks_the_counter(
+        self, monkeypatch
+    ):
+        transport = FakeGitHubTransport({"unstable-45.20261017.1": self.SHA_HEAD})
+        monkeypatch.setattr(changelog.subprocess, "run", transport.request)
+        manifests = {
+            image: make_manifest_with_tags(["unstable-45.20261017.2"])
+            for image in IMAGES
+        }
+
+        title, _body = generate_changelog(
+            None,
+            "unstable",
+            None,
+            {image: make_manifest_with_packages({}) for image in IMAGES},
+            manifests,
+            _VARIANTS,
+            PACKAGE,
+            tags=("unstable-45.20261015.6", "unstable-45.20261017.2"),
+        )
+
+        assert transport.probed_refs[:2] == [
+            "unstable-45.20261017.2",
+            "unstable-45.20261017.1",
+        ]
+        assert title == "unstable-45.20261017.2: Unstable (F45.20261017, #ba999d3)"
+
+    def test_a_forced_stable_pair_maps_to_upstream_tag_names(self, monkeypatch):
+        transport = FakeGitHubTransport(
+            {"44.20261012.1": self.SHA_TAIL, "45.20261015.2": self.SHA_HEAD}
+        )
+        monkeypatch.setattr(changelog.subprocess, "run", transport.request)
+        manifests = {
+            image: make_manifest_with_tags(
+                ["stable-44.20261012.1", "stable-45.20261015.2"]
+            )
+            for image in IMAGES
+        }
+
+        title, _body = generate_changelog(
+            None,
+            "stable",
+            None,
+            {image: make_manifest_with_packages({}) for image in IMAGES},
+            manifests,
+            _VARIANTS,
+            PACKAGE,
+            tags=("stable-44.20261012.1", "stable-45.20261015.2"),
+        )
+
+        assert transport.probed_refs == ["45.20261015.2", "44.20261012.1"]
+        assert title == "stable-45.20261015.2: Stable (F45.20261015)"
+
+
+class TestReleaseParentHash:
+    """The title hash is the upstream commit that release was cut from."""
+
+    # Real upstream shas: tag .2 aliases the 10-16 build, the branch head on
+    # 2026-10-17 is 4598ce0 (upstream's own parent-release hash).
+    TAG_SHA = "ba999d306030404fdbbc8be25357acf6c5d5d27b"
+    BRANCH_SHA = "4598ce095fb2bd8a66a94feec6e05c663e26f017"
+    MERGE_SHA = "1b8e54ca051a66d532fee21a87bcf6a955d02a1d"
+    CHANGE_SHA = "3f2505a5c0f1d7600874a28aa12f1c3d00cc0ebf"
+
+    def commit(self, sha: str, subject: str) -> dict:
+        return {"sha": sha, "commit": {"author": {"name": "Josh"}, "message": subject}}
+
+    def test_tag_version_date_becomes_the_end_of_that_day(self):
+        assert release_time("unstable-45.20261017.2") == "2026-10-17T23:59:59Z"
+        assert release_time("no-date-here") == ""
+
+    def test_unanswered_branch_query_falls_back_to_the_tag_head(self, monkeypatch):
+        transport = FakeGitHubTransport({"unstable-45.20261017.2": self.TAG_SHA})
+        monkeypatch.setattr(changelog.subprocess, "run", transport.request)
+
+        assert fetch_release_hash("unstable", "2026-10-17T23:59:59Z") == ""
+
+    def test_unknown_branch_reports_no_commits_instead_of_crashing(self, monkeypatch):
+        transport = FakeGitHubTransport(
+            {}, heads_at={"2026-10-12T23:59:59Z": {"message": "Not Found"}}
+        )
+        monkeypatch.setattr(changelog.subprocess, "run", transport.request)
+
+        assert fetch_release_hash("deck", "2026-10-12T23:59:59Z") == ""
+
+    def test_stable_windows_skip_the_branch_query(self, monkeypatch):
+        transport = FakeGitHubTransport(
+            {"45.20261015.2": self.TAG_SHA, "44.20261012.1": self.TAG_SHA}
+        )
+        monkeypatch.setattr(changelog.subprocess, "run", transport.request)
+        manifests = {
+            image: make_manifest_with_tags(
+                ["stable-44.20261012.1", "stable-45.20261015.2"]
+            )
+            for image in IMAGES
+        }
+
+        title, _body = generate_changelog(
+            None,
+            "stable",
+            None,
+            {image: make_manifest_with_packages({}) for image in IMAGES},
+            manifests,
+            _VARIANTS,
+            PACKAGE,
+            tags=("stable-44.20261012.1", "stable-45.20261015.2"),
+        )
+
+        assert transport.head_requests == []
+        assert title == "stable-45.20261015.2: Stable (F45.20261015)"
+
+    def test_branch_head_at_release_time_wins_over_the_tag_alias(self, monkeypatch):
+        transport = FakeGitHubTransport(
+            {
+                "unstable-45.20261017.2": self.TAG_SHA,
+                "unstable-45.20261015.6": self.TAG_SHA,
+            },
+            compare_commits=[
+                self.commit(self.TAG_SHA, "chore(deps): update system_files")
+            ],
+            heads_at={
+                "2026-10-17T23:59:59Z": [
+                    self.commit(self.BRANCH_SHA, "fix(ci): ensure tera")
+                ]
+            },
+        )
+        monkeypatch.setattr(changelog.subprocess, "run", transport.request)
+        manifests = {
+            image: make_manifest_with_tags(
+                ["unstable-45.20261015.6", "unstable-45.20261017.2"]
+            )
+            for image in IMAGES
+        }
+
+        title, body = generate_changelog(
+            None,
+            "unstable",
+            None,
+            {image: make_manifest_with_packages({}) for image in IMAGES},
+            manifests,
+            _VARIANTS,
+            PACKAGE,
+            tags=("unstable-45.20261015.6", "unstable-45.20261017.2"),
+        )
+
+        assert title == "unstable-45.20261017.2: Unstable (F45.20261017, #4598ce0)"
+        assert transport.head_requests == [
+            "https://api.github.com/repos/ublue-os/bazzite/commits"
+            "?sha=unstable&until=2026-10-17T23:59:59Z&per_page=5"
+        ]
+        assert f"**[{self.TAG_SHA[:7]}](https://github.com" in body
+
+    def test_merge_commits_never_name_the_parent_release(self, monkeypatch):
+        transport = FakeGitHubTransport(
+            {},
+            heads_at={
+                "2026-10-17T23:59:59Z": [
+                    self.commit(
+                        self.MERGE_SHA, "Merge remote-tracking branch 'origin/main'"
+                    ),
+                    self.commit(self.CHANGE_SHA, "chore(deps): update system_files"),
+                ]
+            },
+        )
+        monkeypatch.setattr(changelog.subprocess, "run", transport.request)
+
+        assert fetch_release_hash("unstable", "2026-10-17T23:59:59Z") == self.CHANGE_SHA

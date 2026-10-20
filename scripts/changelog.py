@@ -22,6 +22,7 @@ def registry_prefix() -> str:
     return f"docker://{registry}/"
 
 
+GH_CURL_RETRIES = 2
 RETRIES = 3
 RETRY_WAIT = 5
 FEDORA_PATTERN = re.compile(r"(?<=[-0-9a-z])\.fc\d{2}(?![0-9])")
@@ -41,6 +42,11 @@ PATTERN_PKGREL = "{version}"
 # Upstream GitHub repo for commit fetching. bazzite-nix tags mirror upstream's
 # (e.g. testing-44.20260820.1), so the compare is tag-to-tag on ublue-os/bazzite.
 UPSTREAM_REPO = "ublue-os/bazzite"
+# Our tags that collide with an already-published upstream version carry a bumped
+# counter ({version}.{n}); that counter is walked down to the upstream build ours
+# is forked from. Probes are bounded so a runaway run cannot hammer the API.
+UPSTREAM_REF_PROBES = 5
+UPSTREAM_BUMP_PATTERN = re.compile(r"\.\d{8}\.(?P<counter>\d+)$")
 
 COMMON_PAT = "### All Images\n| | Name | Previous | New |\n| --- | --- | --- | --- |{changes}\n\n"
 OTHER_NAMES = {
@@ -139,31 +145,69 @@ def get_images(variants: list[dict[str, Any]], package: str):
         yield img, base, de
 
 
-def get_manifests(target: str, variants: list[dict[str, Any]], package: str):
-    out = {}
-    imgs = list(get_images(variants, package))
-    prefix = registry_prefix()
-    for j, (img, _, _) in enumerate(imgs):
-        output = None
-        print(f"Getting {img}:{target} manifest ({j + 1}/{len(imgs)}).")
-        for i in range(RETRIES):
-            try:
-                output = subprocess.run(
-                    ["skopeo", "inspect", prefix + img + ":" + target],
-                    check=True,
-                    stdout=subprocess.PIPE,
-                ).stdout
-                break
-            except subprocess.CalledProcessError:
-                print(
-                    f"Failed to get {img}:{target}, retrying in {RETRY_WAIT} seconds ({i + 1}/{RETRIES})"
-                )
-                time.sleep(RETRY_WAIT)
-        if output is None:
-            print(f"Failed to get {img}:{target}, skipping")
+def skopeo_json(args: list[str], what_was_read: str) -> dict[str, Any] | None:
+    """Run one skopeo command, retrying transient failures, and parse its JSON.
+
+    Returns None when every attempt failed.
+    """
+    for attempt in range(RETRIES):
+        try:
+            return json.loads(
+                subprocess.run(args, check=True, stdout=subprocess.PIPE).stdout
+            )
+        except subprocess.CalledProcessError:
+            print(
+                f"Failed to get {what_was_read}, retrying in {RETRY_WAIT} seconds "
+                f"({attempt + 1}/{RETRIES})"
+            )
+            time.sleep(RETRY_WAIT)
+    return None
+
+
+def image_tag_names(image: str) -> list[str]:
+    """Tag names published on one registry image; empty when the listing failed."""
+    listing = skopeo_json(
+        ["skopeo", "list-tags", registry_prefix() + image], f"{image} tag list"
+    )
+    return listing.get("Tags", []) if listing else []
+
+
+def version_sort_key(tag: str) -> tuple[int, ...]:
+    """Order release names by their number runs, so build 10 follows build 9."""
+    return tuple(int(number) for number in re.findall(r"\d+", tag))
+
+
+def release_ref(image: str, variant: str) -> str:
+    """The tag a variant's current release is published under.
+
+    A canonical {variant}-{version} name wins: this fork publishes one per release,
+    while the moving {variant} tag can be absent or left behind an older build.
+    """
+    canonical_start = (
+        STABLE_START_PATTERN if variant == "stable" else other_start_pattern(variant)
+    )
+    canonical_tags = [
+        tag for tag in image_tag_names(image) if canonical_start.match(tag)
+    ]
+    if not canonical_tags:
+        return variant
+    return max(canonical_tags, key=version_sort_key)
+
+
+def get_manifests(image_refs: dict[str, str]) -> dict[str, Any]:
+    """Inspect each image at its own ref; images the registry lacks are skipped."""
+    manifests = {}
+    for image, ref in image_refs.items():
+        print(f"Getting {image}:{ref} manifest.")
+        manifest = skopeo_json(
+            ["skopeo", "inspect", registry_prefix() + image + ":" + ref],
+            f"{image}:{ref}",
+        )
+        if manifest is None:
+            print(f"Failed to get {image}:{ref}, skipping")
             continue
-        out[img] = json.loads(output)
-    return out
+        manifests[image] = manifest
+    return manifests
 
 
 def get_tags(target: str, manifests: dict[str, Any]) -> tuple[str | None, str]:
@@ -190,7 +234,7 @@ def get_tags(target: str, manifests: dict[str, Any]) -> tuple[str | None, str]:
             if tag not in manifest["RepoTags"]:
                 tags.remove(tag)
 
-    tags = list(sorted(tags))
+    tags = sorted(tags, key=version_sort_key)
     assert tags, "No current and previous tags found"
     # One version tag: this variant's first release, so there is nothing to diff.
     if len(tags) == 1:
@@ -380,6 +424,72 @@ def calculate_changes(pkgs: list[str], prev: dict[str, str], curr: dict[str, str
     return out
 
 
+def gh_headers() -> list[str]:
+    """curl headers for the GitHub endpoints this script reads."""
+    headers = ["-s", "-H", "Accept: application/vnd.github+json"]
+    if token := os.environ.get("GH_TOKEN"):
+        headers += ["-H", f"Authorization: Bearer {token}"]
+    return headers
+
+
+def gh_json(url: str, failure: str) -> Any:
+    """One GitHub API GET, curl-retried on transient failures.
+
+    Returns the decoded payload, or None with `failure` plus the reason printed.
+    """
+    try:
+        response = subprocess.run(
+            ["curl", *gh_headers(), "--retry", str(GH_CURL_RETRIES), url],
+            check=True,
+            stdout=subprocess.PIPE,
+        ).stdout.decode("utf-8")
+        return json.loads(response)
+    except Exception as error:
+        print(f"{failure}:\n{error}")
+        return None
+
+
+def fetch_tag_sha(ref: str) -> str:
+    """Head commit of an upstream ref, or "" when the repository has no such ref."""
+    payload = gh_json(
+        f"https://api.github.com/repos/{UPSTREAM_REPO}/commits/{ref}",
+        f"Failed to resolve upstream ref {ref}",
+    )
+    if payload is None:
+        return ""
+
+    head_sha = payload.get("sha")
+    if head_sha:
+        return head_sha
+    print(
+        f"Upstream repository has no ref {ref}: {payload.get('message', 'Unknown error')}"
+    )
+    return ""
+
+
+def resolve_upstream_ref(ref: str) -> tuple[str, str]:
+    """Resolve our tag name to a ref upstream knows, plus that ref's head sha.
+
+    A collision-bumped tag ({version}.{n}) is our fork build of a base upstream
+    already published as {version}.{n-1} or lower, so the counter walks down.
+    Returns ("", "") when no name in the bounded probe budget exists upstream.
+    """
+    candidates = [ref]
+    bump = UPSTREAM_BUMP_PATTERN.search(ref)
+    if bump:
+        version_prefix = ref[: bump.start("counter")]
+        for counter in range(int(bump["counter"]) - 1, 0, -1):
+            candidates.append(f"{version_prefix}{counter}")
+        # Build .1 of a fresh date is the first build, published under the bare name.
+        candidates.append(version_prefix.removesuffix("."))
+
+    for candidate in candidates[:UPSTREAM_REF_PROBES]:
+        head_sha = fetch_tag_sha(candidate)
+        if head_sha:
+            return candidate, head_sha
+    return "", ""
+
+
 def upstream_tag(branch: str, version: str) -> str:
     """Map a container version label/tag to the upstream git tag GitHub can compare.
 
@@ -393,30 +503,71 @@ def upstream_tag(branch: str, version: str) -> str:
     return version
 
 
-def get_commits(prev: str, curr: str):
-    """Fetch upstream commits between two tags, e.g. testing-44.20260812.1...testing-44.20260820.1."""
-    try:
-        headers = ["-s", "-H", "Accept: application/vnd.github+json"]
-        if token := os.environ.get("GH_TOKEN"):
-            headers += ["-H", f"Authorization: Bearer {token}"]
-        api_url = (
-            f"https://api.github.com/repos/{UPSTREAM_REPO}/compare/{prev}...{curr}"
+def is_merge(message: str) -> bool:
+    """Branch merges carry no change of their own, in rows and in hash picks."""
+    return message.split("\n")[0].lower().startswith("merge")
+
+
+def release_time(tag: str) -> str:
+    """End of the version date a tag names, the last moment that release could pick up."""
+    date = re.search(r"(\d{4})(\d{2})(\d{2})", tag)
+    if not date:
+        return ""
+    year, month, day = date.groups()
+    return f"{year}-{month}-{day}T23:59:59Z"
+
+
+def fetch_release_hash(branch: str, as_of: str) -> str:
+    """Newest upstream commit on <branch> at or before as_of: the parent release.
+
+    Container build tags alias the older commit that build was cut from (several
+    counters share one commit), so upstream's own release hash is the branch head
+    at release time, not the head of the tag name we resolved.
+    """
+    if not as_of:
+        return ""
+    api_url = (
+        f"https://api.github.com/repos/{UPSTREAM_REPO}/commits"
+        f"?sha={branch}&until={as_of}&per_page={UPSTREAM_REF_PROBES}"
+    )
+    commits = gh_json(
+        api_url,
+        f"Failed to get the upstream release for {branch} at {as_of}",
+    )
+    if commits is None:
+        return ""
+    if not isinstance(commits, list):
+        print(
+            f"Upstream has no branch {branch}: {commits.get('message', 'Unknown error')}"
         )
+        return ""
+    if not commits:
+        print(f"Upstream branch {branch} has no commit at or before {as_of}")
+        return ""
+    for commit in commits:
+        if not is_merge(commit["commit"]["message"]):
+            return commit["sha"]
+    return commits[0]["sha"]
 
-        response = subprocess.run(
-            ["curl", *headers, api_url],
-            check=True,
-            stdout=subprocess.PIPE,
-        ).stdout.decode("utf-8")
 
-        data = json.loads(response)
+def get_commits(prev_ref: str, curr_ref: str):
+    """Fetch upstream commits between two resolved upstream refs."""
+    if not prev_ref or not curr_ref:
+        print("Failed to get commits: an upstream ref could not be resolved")
+        return ""
+    api_url = (
+        f"https://api.github.com/repos/{UPSTREAM_REPO}/compare/{prev_ref}...{curr_ref}"
+    )
+    data = gh_json(api_url, "Failed to get commits from the GitHub API")
+    if data is None:
+        return ""
+    if "commits" not in data:
+        print(
+            f"Failed to get commits from GitHub API: {data.get('message', 'Unknown error')}"
+        )
+        return ""
 
-        if "commits" not in data:
-            print(
-                f"Failed to get commits from GitHub API: {data.get('message', 'Unknown error')}"
-            )
-            return ""
-
+    try:
         out = ""
         for commit in data["commits"]:
             sha = commit["sha"]
@@ -424,7 +575,7 @@ def get_commits(prev: str, curr: str):
             author = commit["commit"]["author"]["name"]
             subject = commit["commit"]["message"].split("\n")[0]
 
-            if subject.lower().startswith("merge"):
+            if is_merge(subject):
                 continue
 
             out += (
@@ -437,7 +588,7 @@ def get_commits(prev: str, curr: str):
 
         if out:
             return COMMITS_FORMAT.format(
-                repo=UPSTREAM_REPO, prev=prev, curr=curr, commits=out
+                repo=UPSTREAM_REPO, prev=prev_ref, curr=curr_ref, commits=out
             )
         return ""
     except Exception as e:
@@ -449,35 +600,37 @@ def generate_changelog(
     handwritten: str | None,
     target: str,
     pretty: str | None,
-    workdir: str,
     prev_manifests,
     manifests,
     variants: list[dict[str, Any]],
     package: str,
+    tags: tuple[str | None, str] | None = None,
+    as_of: str = "",
 ):
     common, others = get_package_groups(prev_manifests, manifests, variants, package)
     versions = get_versions(manifests)
     prev_versions = get_versions(prev_manifests)
 
-    prev, curr = get_tags(target, manifests)
+    prev, curr = tags if tags else get_tags(target, manifests)
+
+    # Refs upstream actually publishes, plus the head commit of the current one:
+    # the title hash names the upstream build our notes describe, not our image.
+    curr_ref, head_sha = resolve_upstream_ref(upstream_tag(target, curr))
+    # Stable titles never carry a hash, so its branch query would only be noise.
+    if target != "stable":
+        head_sha = fetch_release_hash(target, as_of or release_time(curr)) or head_sha
+    prev_ref = ""
+    if prev is not None:
+        prev_ref, _ = resolve_upstream_ref(upstream_tag(target, prev))
 
     if not pretty:
-        # Generate pretty version since we dont have it
-        try:
-            finish: str = next(iter(manifests.values()))["Labels"][
-                "org.opencontainers.image.revision"
-            ]
-        except Exception as e:
-            print(f"Failed to get finish hash:\n{e}")
-            finish = ""
-
         # Remove .0 from curr
         curr_pretty = re.sub(r"\.\d{1,2}$", "", curr)
         # Remove target- from curr
         curr_pretty = re.sub(r"^[a-z]+-", "", curr_pretty)
         pretty = target.capitalize() + " (F" + curr_pretty
-        if finish and target != "stable":
-            pretty += ", #" + finish[:7]
+        if head_sha and target != "stable":
+            pretty += ", #" + head_sha[:7]
         pretty += ")"
 
     title = CHANGELOG_TITLE.format_map(defaultdict(str, tag=curr, pretty=pretty))
@@ -548,7 +701,7 @@ def generate_changelog(
             chg = calculate_changes(v, prev_versions, versions)
             if chg:
                 changes += OTHER_NAMES[k].format(changes=chg)
-        changes += get_commits(upstream_tag(target, prev), upstream_tag(target, curr))
+        changes += get_commits(prev_ref, curr_ref)
 
     changelog = changelog.replace("{changes}", changes)
 
@@ -562,8 +715,18 @@ def main():
     parser.add_argument("target", help="Target tag")
     parser.add_argument("output", help="Output environment file")
     parser.add_argument("changelog", help="Output changelog file")
+    parser.add_argument(
+        "--pair",
+        nargs=2,
+        metavar=("PREV-TAG", "CURR-TAG"),
+        help="Two published tags to name the release window (default: the registry's newest two)",
+    )
+    parser.add_argument(
+        "--as-of",
+        default="",
+        help="ISO timestamp of the release cut (default: the tag's version date)",
+    )
     parser.add_argument("--pretty", help="Subject for the changelog")
-    parser.add_argument("--workdir", help="Git directory for commits")
     parser.add_argument("--handwritten", help="Handwritten changelog")
     parser.add_argument(
         "--package",
@@ -583,8 +746,18 @@ def main():
         target = "stable"
 
     variants = load_variants(args.variants_config)
-    manifests = get_manifests(target, variants, args.package)
-    prev, curr = get_tags(target, manifests)
+    images = [image for image, _, _ in get_images(variants, args.package)]
+    if args.pair:
+        prev, curr = args.pair
+        manifests = get_manifests({image: curr for image in images})
+        if not manifests:
+            print(f"No image carries {curr}: check both tag names against the registry")
+            raise SystemExit(1)
+    else:
+        manifests = get_manifests(
+            {image: release_ref(image, target) for image in images}
+        )
+        prev, curr = get_tags(target, manifests)
     if prev is None:
         print(f"No previous tag for {target}: first release")
     else:
@@ -593,16 +766,17 @@ def main():
 
     prev_manifests = {}
     if prev is not None:
-        prev_manifests = get_manifests(prev, variants, args.package)
+        prev_manifests = get_manifests({image: prev for image in images})
     title, changelog = generate_changelog(
         args.handwritten,
         target,
         args.pretty,
-        args.workdir,
         prev_manifests,
         manifests,
         variants,
         args.package,
+        tags=args.pair,
+        as_of=args.as_of,
     )
 
     print(f"Changelog:\n# {title}\n{changelog}")

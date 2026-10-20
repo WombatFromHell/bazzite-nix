@@ -40,11 +40,16 @@ JSON
 EOF
     chmod +x "$FAKE_BIN/podman"
 
-    # curl: record the compare URL, never hit the network.
+    # curl: record the request, never hit the network. Ref probes answer with a
+    # head commit so the compare request is reached.
     cat >"$FAKE_BIN/curl" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$@" >>"$BATS_RUN_TMPDIR/curl.args"
-echo '{"commits":[]}'
+if [[ "$*" == *"/commits/"* ]]; then
+    echo '{"sha":"deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbe"}'
+else
+    echo '{"commits":[]}'
+fi
 EOF
     chmod +x "$FAKE_BIN/curl"
 

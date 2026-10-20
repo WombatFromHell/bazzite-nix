@@ -6,6 +6,14 @@
 MAX_RETRIES=3
 RETRY_DELAY=10
 
+# How many build counters to try when upstream has published a container build
+# but not its git tag yet (upstream names releases {major}.{date}.{build}).
+UPSTREAM_BUILD_WALK=5
+
+# A version is {major}.{YYYYMMDD}[.{build}]; moving tags such as {branch}-{major}
+# do not match and are never treated as a version.
+VERSIONED_TAG_PATTERN='^[0-9]+\.[0-9]{8}(\.[0-9]+)?$'
+
 # The image package namespace: owner-derived, lowercase (ADR 0006).
 # Usage: registry_url <owner>
 registry_url() {
@@ -118,36 +126,156 @@ get_parent_version() {
   return 1
 }
 
+# Strip a branch prefix from a tag name to get its version: {branch}-{version} -> {version},
+# and a bare {version} passes through unchanged (upstream stable tags are bare).
+# Usage: version_of_tag <tag> <branch>
+# Prints: the version
+version_of_tag() {
+  local tag="${1:?tag required}"
+  local branch="${2:?branch required}"
+  local prefix="${branch}-"
+  if [[ "$tag" == "$prefix"* ]]; then
+    printf '%s\n' "${tag:${#prefix}}"
+    return 0
+  fi
+  printf '%s\n' "$tag"
+}
+
+# Upstream version an image we published was cut from, read back from its own
+# labels: the exact upstream tag name in org.opencontainers.image.upstream-version
+# (every image built since that label exists), or the plain version label for
+# releases published before it, whose value already held the upstream version.
+# Usage: upstream_version_of_our_image <image_ref> <branch>
+# Prints: the version on success; returns 1 when the image carries neither label
+upstream_version_of_our_image() {
+  local image_ref="${1:?image ref required}"
+  local branch="${2:?branch required}"
+  local labels tag version
+
+  labels=$(skopeo inspect "docker://${image_ref}" 2>/dev/null | jq '.Labels // {}') || return 1
+
+  tag=$(jq -r '.["org.opencontainers.image.upstream-version"] // empty' <<<"$labels")
+  if [[ -n "$tag" ]]; then
+    version_of_tag "$tag" "$branch"
+    return 0
+  fi
+
+  version=$(jq -r '.["org.opencontainers.image.version"] // empty' <<<"$labels")
+  [[ -n "$version" ]] || return 1
+  version_of_tag "$version" "$branch"
+}
+
 # ── find latest versioned tag ───────────────────────────────────────────────
-# Usage: find_latest_versioned_tag <prefix> <base_image_tag>
-# Finds the latest {branch}-{version} tag in the registry.
+# Usage: find_latest_versioned_tag <prefix> <branch>
+# Finds the latest {branch}-{version} tag of one variant branch in the registry.
 # Prints: tag name on success
-# Returns: 0 on success, 1 on failure
+# Returns: 0 on success, 1 when the branch has no versioned tag
 
 find_latest_versioned_tag() {
   local prefix="$1"
-  local base_image_tag="$2"
-  local available_tags latest_versioned_tag="" latest_version=""
+  local branch="${2:?branch required}"
+  local available_tags
+  local versions=()
 
   available_tags=$(read_registry_json "list tags of ${prefix}" skopeo list-tags "docker://${prefix}") || return 1
-  available_tags=$(jq -r '.Tags[]' <<<"$available_tags")
 
   local tag tag_version
   while IFS= read -r tag; do
-    if [[ "$tag" == "${base_image_tag}-"* ]]; then
-      tag_version="${tag#"${base_image_tag}"-}"
-      if [[ -z "$latest_version" || "$tag_version" > "$latest_version" ]]; then
-        latest_version="$tag_version"
-        latest_versioned_tag="$tag"
-      fi
+    [[ "$tag" == "${branch}-"* ]] || continue
+    tag_version=$(version_of_tag "$tag" "$branch")
+    if [[ "$tag_version" =~ $VERSIONED_TAG_PATTERN ]]; then
+      versions+=("$tag_version")
     fi
-  done <<<"$available_tags"
+  done < <(jq -r '.Tags[]' <<<"$available_tags")
 
-  if [[ -n "$latest_versioned_tag" ]]; then
-    echo "$latest_versioned_tag"
-    return 0
+  if [[ "${#versions[@]}" -eq 0 ]]; then
+    return 1
   fi
+
+  tag_version=$(printf '%s\n' "${versions[@]}" | sort -V | tail -1)
+  echo "${branch}-${tag_version}"
+}
+
+# ── upstream git identity ───────────────────────────────────────────────────
+# The upstream GitHub repository behind a base image reference: the ghcr
+# namespace and the repository are the same name for every upstream image here.
+# Usage: upstream_repo <base_image>
+# Prints: <owner>/<package>
+
+upstream_repo() {
+  local base_image="${1:?base image required}"
+  local package="${base_image#ghcr.io/}"
+  printf '%s\n' "${package%%:*}"
+}
+
+# Upstream git tag that names a variant's release, found by exact-name probe
+# instead of paging the tag list: upstream pushes 40+ tags a day, so a page
+# window never reaches an older branch. The version comes from the base image's
+# own label; upstream names that release either "{branch}-{version}" (its
+# testing and unstable builds) or a bare "{version}" (its stable build), tried
+# in that order, and each family is walked down its build counter, because
+# upstream publishes container builds a few counters before tagging them. No
+# name in any family resolves is an error rather than a guess.
+# Usage: resolve_upstream_tag <upstream_repo> <branch> <version>
+# Prints: "<git tag name> <version> <family>" on success, where <version> is the
+# one upstream actually named
+# Returns: 1 when the lookup fails or upstream has no tag for that version
+resolve_upstream_tag() {
+  local upstream="${1:?upstream repo required}"
+  local branch="${2:?branch required}"
+  local version="${3:?version required}"
+  local headers=(-s -H "Accept: application/vnd.github+json")
+  if [[ -n "${GH_TOKEN:-}" ]]; then
+    headers+=(-H "Authorization: Bearer ${GH_TOKEN}")
+  fi
+
+  local family tag json head_sha candidate
+  local -a candidates=()
+  for family in prefixed bare-version; do
+    mapfile -t candidates < <(upstream_version_candidates "$version")
+
+    for candidate in "${candidates[@]}"; do
+      if [[ "$family" == "prefixed" ]]; then
+        tag="${branch}-${candidate}"
+      else
+        tag="$candidate"
+      fi
+
+      json=$(read_registry_json "probe upstream tag ${tag} of ${upstream}" curl "${headers[@]}" "https://api.github.com/repos/${upstream}/commits/${tag}") || return 1
+
+      head_sha=$(jq -r '.sha // empty' <<<"$json")
+      if [[ -n "$head_sha" ]]; then
+        printf '%s\n' "$tag $candidate $family"
+        return 0
+      fi
+
+      echo "  upstream has no tag ${tag}: $(jq -r '.message // "no such ref"' <<<"$json")" >&2
+    done
+  done
+
+  echo "::error::No upstream git tag for version ${version} of branch ${branch} in ${upstream}" >&2
   return 1
+}
+
+# Versions upstream might have named, newest first: the labelled version and the
+# same date's lower build counters, up to UPSTREAM_BUILD_WALK names.
+# Usage: upstream_version_candidates <version>
+upstream_version_candidates() {
+  local version="${1:?version required}"
+  local -a candidates=("$version")
+
+  if [[ "$version" =~ ^([0-9]+\.[0-9]{8})\.([0-9]+)$ ]]; then
+    local base="${BASH_REMATCH[1]}"
+    local counter="10#${BASH_REMATCH[2]}"
+    local walked=1
+    while ((counter > 1 && walked < UPSTREAM_BUILD_WALK)); do
+      counter=$((counter - 1))
+      candidates+=("$base.$counter")
+      walked=$((walked + 1))
+    done
+  fi
+
+  printf '%s\n' "${candidates[@]}"
 }
 
 # Decide build-needed from a fetched parent_version. Prints the REASON= line;
@@ -173,17 +301,17 @@ version_check() {
 }
 
 # ── check build needed ──────────────────────────────────────────────────────
-# Usage: check_build_needed <prefix> <variant_name> <base_image_tag> <upstream_parent_version> <force_build>
-# Checks if build is needed for this variant.
+# Usage: check_build_needed <prefix> <branch> <upstream_parent_version> <force_build>
+# Checks if build is needed for this variant branch. The branch is its own primary
+# tag, so the decision never compares another variant's newest tag.
 # Returns: 0 if build needed, 1 if skip.
 # Prints: REASON=<reason> to stdout (can be eval'd)
 
 check_build_needed() {
   local prefix="$1"
-  local variant_name="$2"
-  local base_image_tag="$3"
-  local upstream_parent_version="$4"
-  local force_build="$5"
+  local branch="${2:?branch required}"
+  local upstream_parent_version="$3"
+  local force_build="${4:-false}"
 
   if [[ "$force_build" == "true" ]]; then
     echo "REASON=\"Force build requested\""
@@ -191,34 +319,28 @@ check_build_needed() {
   fi
 
   # Determine primary tag for version comparison
-  local primary_tag
-  case "${base_image_tag}" in
-  "stable") primary_tag="stable" ;;
-  "testing") primary_tag="testing" ;;
-  *) primary_tag="latest" ;;
-  esac
-
+  local primary_tag="$branch"
   local primary_ref="${prefix}:${primary_tag}"
 
-  # Strategy 1: Compare parent_version on primary tag
+  # Strategy 1: Compare the upstream identity our own primary tag carries
   if image_exists "$primary_ref"; then
     local local_parent_version=""
-    local_parent_version=$(inspect_image_with_retry "$primary_ref" | jq -r '.Labels["org.opencontainers.image.version"] // empty' 2>/dev/null) || true
+    local_parent_version=$(upstream_version_of_our_image "$primary_ref" "$branch") || true
     if [[ -n "$local_parent_version" ]]; then
-      version_check "$local_parent_version" "$variant_name" "$upstream_parent_version" && return 0 || return 1
+      version_check "$local_parent_version" "$branch" "$upstream_parent_version" && return 0 || return 1
     fi
-    echo "::debug::Primary tag exists but has no parent_version, falling back to versioned tags" >&2
+    echo "::debug::Primary tag exists but carries no upstream identity, falling back to versioned tags" >&2
   fi
 
   # Strategy 2: Primary tag missing or versionless — compare via latest versioned tag
   local latest_versioned_tag
-  if latest_versioned_tag=$(find_latest_versioned_tag "$prefix" "$base_image_tag"); then
+  if latest_versioned_tag=$(find_latest_versioned_tag "$prefix" "$branch"); then
     echo "::debug::Using latest versioned tag: ${latest_versioned_tag}" >&2
     local local_parent_version
-    if local_parent_version=$(get_parent_version "${prefix}:${latest_versioned_tag}"); then
-      version_check "$local_parent_version" "$variant_name" "$upstream_parent_version" "$latest_versioned_tag" && return 0 || return 1
+    if local_parent_version=$(upstream_version_of_our_image "${prefix}:${latest_versioned_tag}" "$branch"); then
+      version_check "$local_parent_version" "$branch" "$upstream_parent_version" "$latest_versioned_tag" && return 0 || return 1
     fi
-    echo "::debug::Latest versioned tag ${latest_versioned_tag} has no parent_version" >&2
+    echo "::debug::Latest versioned tag ${latest_versioned_tag} carries no upstream identity" >&2
   fi
 
   # Strategy 3: No comparable image found — need to build

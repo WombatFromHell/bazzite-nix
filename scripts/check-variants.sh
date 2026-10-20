@@ -134,22 +134,49 @@ for ((i = 0; i < variant_count; i++)); do
 
   echo "::group::Checking variant: $variant"
 
-  # Extract metadata from upstream image
+  # Upstream identity for a variant: the configured base image's own label gives
+  # the version it now holds, and upstream's git tag of that version names the
+  # release whose commits the notes describe. The tag is probed by exact name
+  # ("{branch}-{version}", then a bare "{version}") rather than found by paging
+  # the tag list, because upstream pushes 40+ tags a day and an older branch is
+  # never inside a page window (DESIGN.md section 2).
+  upstream="$(upstream_repo "$base_image")"
+
   inspect_json=$(inspect_image_with_retry "$base_image") || {
-    echo "::error::Failed to inspect upstream image for variant $variant"
+    echo "::error::Failed to inspect base image after retries: $base_image"
     echo "::endgroup::"
     exit 1
   }
 
   if ! metadata=$(extract_image_metadata "$inspect_json"); then
-    echo "::error::Failed to extract metadata from upstream image for variant $variant"
+    echo "::error::Failed to extract metadata from base image $base_image"
     echo "::endgroup::"
     exit 1
   fi
-  parent_version=$(echo "$metadata" | awk '{print $1}')
 
-  # Parse base image for output naming
-  base_image_tag="${base_image##*:}"
+  label_version=$(echo "$metadata" | awk '{print $1}')
+  base_version=$(version_of_tag "$label_version" "$variant")
+  if [[ ! "$base_version" =~ $VERSIONED_TAG_PATTERN ]]; then
+    echo "::error::Base image $base_image is labelled $label_version, which is not a release version"
+    echo "::endgroup::"
+    exit 1
+  fi
+
+  upstream_identity=$(resolve_upstream_tag "$upstream" "$variant" "$base_version") || {
+    echo "::error::No upstream git tag names version $base_version of variant $variant in $upstream"
+    echo "::endgroup::"
+    exit 1
+  }
+  read -r upstream_tag upstream_version tag_family <<<"$upstream_identity"
+  if [[ -z "$upstream_tag" || -z "$upstream_version" || -z "$tag_family" ]]; then
+    echo "::error::Upstream identity for variant $variant is incomplete: $upstream_identity"
+    echo "::endgroup::"
+    exit 1
+  fi
+
+  parent_version="$upstream_version"
+  echo "::notice::Upstream identity for $variant: git tag $upstream_tag (version $parent_version, family $tag_family)"
+  echo "Resolved parent_version from upstream git tag: $parent_version"
 
   # Standardized image reference components
   # shellcheck disable=SC2153
@@ -157,14 +184,19 @@ for ((i = 0; i < variant_count; i++)); do
   prefix="${REGISTRY}/${output_image}"
 
   # Compute canonical tag, passing the variant name as branch for accurate collision checks.
-  read -r canonical collision_detected <<<"$(compute_canonical_tag "$parent_version" "$prefix" "$FORCE_BUILD" "$variant")"
+  canonical_bump=$(compute_canonical_tag "$parent_version" "$prefix" "$FORCE_BUILD" "$variant") || {
+    echo "::error::Variant $variant: no free version tag to name a build; skipping"
+    echo "::endgroup::"
+    continue
+  }
+  read -r canonical collision_detected <<<"$canonical_bump"
 
   # Generate tags (no digest — {sha256} tags are resolved at push time from the
   # built image's digest, not the upstream base image's)
   tags=$(generate_tags "$variant" "$canonical" "$latest" "$tags_json")
 
   # Check if build is needed
-  check_output=$(check_build_needed "$prefix" "$variant" "$base_image_tag" "$parent_version" "$FORCE_BUILD") || {
+  check_output=$(check_build_needed "$prefix" "$variant" "$parent_version" "$FORCE_BUILD") || {
     echo "::endgroup::"
     continue
   }
@@ -180,6 +212,7 @@ for ((i = 0; i < variant_count; i++)); do
     --arg suffix "$suffix" \
     --arg parent_version "$parent_version" \
     --arg canonical_tag "$canonical" \
+    --arg upstream_tag "$upstream_tag" \
     --arg tags "$tags" \
     --arg collision_detected "$collision_detected" \
     '{
@@ -189,6 +222,7 @@ for ((i = 0; i < variant_count; i++)); do
         suffix: $suffix,
         parent_version: $parent_version,
         canonical_tag: $canonical_tag,
+        upstream_tag: $upstream_tag,
         tags: $tags,
         collision_detected: ($collision_detected == "true"),
         needs_build: true

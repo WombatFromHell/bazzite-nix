@@ -17,7 +17,7 @@ run_build() {
   local image_name="${3:?image_name required}"
   local base_image_override="${4:-}"
   local force_rebuild="${5:-0}"
-  local TARGET_IMAGE TAG BASE_IMAGE BUILD_SCRIPT VARIANT_NAME CANONICAL_TAG TAGS
+  local TARGET_IMAGE TAG BASE_IMAGE BUILD_SCRIPT VARIANT_NAME CANONICAL_TAG TAGS PARENT_VERSION
   eval "$(resolve_variant "$variant_or_spec" "$variants_config" "$image_name" "$force_rebuild")"
   [[ -n "$base_image_override" ]] && BASE_IMAGE="$base_image_override"
   build_image_or_skip "$BASE_IMAGE" "$BUILD_SCRIPT" "$CANONICAL_TAG" "$VARIANT_NAME" "$force_rebuild"
@@ -59,7 +59,8 @@ resolved_variant_record_json() {
     --arg base_image "$BASE_IMAGE" \
     --arg build_script "$BUILD_SCRIPT" \
     --arg canonical_tag "$CANONICAL_TAG" \
-    --arg version_label "$CANONICAL_TAG" \
+    --arg version_label "$PARENT_VERSION" \
+    --arg upstream_tag "${UPSTREAM_TAG:-}" \
     --arg tags "$TAGS" \
     --arg collision_detected "$COLLISION_DETECTED" \
     --arg repo_owner "$repo_owner" \
@@ -71,6 +72,7 @@ resolved_variant_record_json() {
       build_script: $build_script,
       canonical_tag: $canonical_tag,
       version_label: $version_label,
+      upstream_tag: $upstream_tag,
       tags: $tags,
       collision_detected: ($collision_detected == "true"),
       repo_owner: $repo_owner,
@@ -109,7 +111,8 @@ run_fields() {
 # Options record: {"build":"always|skip|none","rechunk":0|1,"force_rebuild":0|1,
 #                  "image_name_ref":"raw-img|chunked-img","extract_ref":"<image ref>"}
 # Record fields read: variant, version_label, repo_owner, repo_name (required),
-#                     date, image_desc, base_image, build_script, canonical_tag.
+#                     date, image_desc, base_image, build_script, canonical_tag,
+#                     upstream_tag.
 # PRECONDITION: localhost/raw-img exists (built by the caller) and build-helpers.bash
 # is sourced ($JUST_HELPERS_BUILD).
 # Prints the input record with source_ref, full_build_digest, build_digest,
@@ -128,7 +131,8 @@ build_variant_pipeline() {
         then "MISSING:" + ($missing | join(" "))
         else [$record.variant, $record.version_label, $record.repo_owner, $record.repo_name,
               ($record.date // ""), ($record.image_desc // ""),
-              ($record.base_image // ""), ($record.build_script // ""), ($record.canonical_tag // "")] | join("\u001f")
+              ($record.base_image // ""), ($record.build_script // ""), ($record.canonical_tag // ""),
+              ($record.upstream_tag // "")] | join("\u001f")
         end
     ' <<<"$record_json"); then
     echo "ERROR: variant record is not valid JSON" >&2
@@ -139,8 +143,8 @@ build_variant_pipeline() {
     return 1
   fi
 
-  local variant version_label repo_owner repo_name date image_desc base_image build_script canonical_tag
-  IFS=$'\037' read -r variant version_label repo_owner repo_name date image_desc base_image build_script canonical_tag <<<"$fields"
+  local variant version_label repo_owner repo_name date image_desc base_image build_script canonical_tag upstream_tag
+  IFS=$'\037' read -r variant version_label repo_owner repo_name date image_desc base_image build_script canonical_tag upstream_tag <<<"$fields"
   [[ -n "$date" ]] || date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   [[ -n "$image_desc" ]] || image_desc="$DEFAULT_IMAGE_DESC"
   local rechunk force_rebuild build image_name_ref extract_ref
@@ -201,7 +205,7 @@ build_variant_pipeline() {
     assemble_labels \
       "$date" "$image_desc" "$variant" "$version_label" \
       "$repo_owner" "$repo_name" "$KERNEL_VERSION" \
-      "$manifest_file" "$labels_file" "$revision"
+      "$manifest_file" "$labels_file" "$revision" "$upstream_tag"
     if [[ "$rechunk" == "1" ]]; then
       _step "Rechunk image (chunkah)"
       # chunkah applies the labels at chunk time (--label), so no separate
@@ -267,7 +271,7 @@ run_variant() {
   [[ -n "$image_desc" ]] || image_desc="$DEFAULT_IMAGE_DESC"
 
   # shellcheck disable=SC2034
-  local TARGET_IMAGE="" TAG="" BASE_IMAGE="" BUILD_SCRIPT="" VARIANT_NAME="" CANONICAL_TAG="" TAGS=""
+  local TARGET_IMAGE="" TAG="" BASE_IMAGE="" BUILD_SCRIPT="" VARIANT_NAME="" CANONICAL_TAG="" TAGS="" PARENT_VERSION=""
   local KERNEL_VERSION="" MANIFEST_PACKAGES="" SOURCE_REF="" FULL_BUILD_DIGEST="" BUILD_DIGEST=""
   local anchor_tag options_json record_json built
 
@@ -395,7 +399,7 @@ build_all_variants() {
   echo "Building $count variant(s)..."
   for ((i = 0; i < count; i++)); do
     record_json=$(echo "$variants" | jq -c --arg repo_owner "$repo_organization" --arg repo_name "$image_name" --arg image_desc "$image_desc" \
-      '.[$i] + {repo_owner: $repo_owner, repo_name: $repo_name, image_desc: $image_desc, version_label: .canonical_tag}')
+      '.[$i] + {repo_owner: $repo_owner, repo_name: $repo_name, image_desc: $image_desc, version_label: .parent_version}')
 
     built=$(build_variant_pipeline "$record_json" '{"rechunk":1,"force_rebuild":0,"build":"skip"}') || return $?
     echo "Variant $(jq -r '.variant' <<<"$built") complete: $(jq -r '.source_ref' <<<"$built") ($(jq -r '.build_digest' <<<"$built"))"
