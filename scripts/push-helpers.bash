@@ -142,7 +142,7 @@ push_image_with_tags() {
 # ── sign, verify, and inspect image ─────────────────────────────────────────
 # Usage: sign_and_verify_image <record_json>
 # Record fields: digest_ref, authfile (required); cosign_pub, variant, tags,
-#                date, parent_version, base_img (optional, used in the summary).
+#                date, upstream_tag, base_img (optional, used in the summary).
 # Reads GITHUB_ACTOR, GITHUB_TOKEN, SIGNING_SECRET from the environment.
 # Writes to stderr (logs/groups) and $GITHUB_STEP_SUMMARY; prints to stdout:
 #   status=success
@@ -150,9 +150,9 @@ push_image_with_tags() {
 sign_and_verify_image() {
   local record_json="${1:?record_json required}"
 
-  local digest_ref cosign_pub authfile variant_name tags date parent_version base_img
-  IFS=$'\037' read -r digest_ref cosign_pub authfile variant_name tags date parent_version base_img < <(
-    jq -r '[.digest_ref, (.cosign_pub // "cosign.pub"), .authfile, (.variant // ""), (.tags // ""), (.date // ""), (.parent_version // ""), (.base_img // "")] | join("\u001f")' <<<"$record_json"
+  local digest_ref cosign_pub authfile variant_name tags date upstream_tag base_img
+  IFS=$'\037' read -r digest_ref cosign_pub authfile variant_name tags date upstream_tag base_img < <(
+    jq -r '[.digest_ref, (.cosign_pub // "cosign.pub"), .authfile, (.variant // ""), (.tags // ""), (.date // ""), (.upstream_tag // ""), (.base_img // "")] | join("\u001f")' <<<"$record_json"
   )
   if [[ -z "$digest_ref" || -z "$authfile" ]]; then
     fail "digest_ref and authfile are required sign fields"
@@ -198,7 +198,7 @@ sign_and_verify_image() {
     echo "| **Image**             | \`${base_img}\` |"
     echo "| **Digest**            | \`${remote_digest}\` |"
     echo "| **Tags**              | \`${tags}\` |"
-    echo "| **Parent version**    | \`${parent_version}\` |"
+    echo "| **Parent version**    | \`${upstream_tag}\` |"
     echo "| **Built**             | \`${date}\` |"
     echo "| **Image size**        | \`${total_mb} MB\` |"
     echo "| **Signed & verified** | ✅ |"
@@ -213,7 +213,7 @@ sign_and_verify_image() {
 
 # Push, sign, and verify a built image (mirrors old push-reusable action).
 # Usage: push_variant <record_json> [options_json]
-# Record fields read: source_ref, tags, suffix, variant, parent_version (the
+# Record fields read: source_ref, tags, suffix, variant, upstream_tag (the
 # pipeline returned them). Options record: {"registry":..,"repo":..,"date":..,
 # "cosign_pub":..} are the run fields the caller already has.
 # Env required: GITHUB_ACTOR, GITHUB_TOKEN, SIGNING_SECRET.

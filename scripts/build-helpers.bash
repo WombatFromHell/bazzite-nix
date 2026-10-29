@@ -20,10 +20,13 @@ oci_output_root() { echo "${OCI_OUTPUT_DIR:-${CACHE_DIR}/oci}"; }
 # only the fallback for sourcing helpers outside the Justfile.
 default_variant() { echo "${DEFAULT_TAG:-testing}"; }
 
-# Fixed build epoch. finalize.sh clamps /usr /etc /opt mtimes to 1970-01-01, so every
-# step that writes an image manifest uses this same epoch: reruns of one input then keep
-# the manifest creation time and the layer mtimes still, instead of the wall clock.
-IMAGE_SOURCE_DATE_EPOCH=0
+# No --source-date-epoch anywhere: rpm-ostree derives the deployment timestamp shown by
+# `rpm-ostree status -v` from the image manifest creation time, and a pinned epoch of 0
+# leaves that timestamp unset, which aborts rpm-ostreed. Upstream bazzite stamps images
+# with the wall clock too; finalize.sh still clamps /usr /etc /opt mtimes for chunkah's
+# layer plan. The devShell exports SOURCE_DATE_EPOCH (nixpkgs reproducible-builds hook),
+# which buildah and rpm-ostree would otherwise pick up and stamp 2000-01-01.
+unset SOURCE_DATE_EPOCH
 
 # ── image identity ──────────────────────────────────────────────────────────────────
 # The one spelling of a local image reference: localhost/<name>[:tag].
@@ -53,31 +56,31 @@ sudo_cache() {
 }
 
 # ── build image ─────────────────────────────────────────────────────────────
-# Usage: build_image <base_image> <build_script> <canonical_tag> <variant> <containerfile_path> <raw_tag>
+# Usage: build_image <base_image> <build_script> <version_tag> <variant> <containerfile_path> <raw_tag>
 # Tags the result as both `raw-img` (default/latest) and `raw-img:<raw_tag>`.
 # raw_tag should be the variant's full primary versioned tag (e.g. "testing-44.20260814"),
 # not the bare canonical_tag — canonical_tag is branch-stripped and only correct
-# as a label value, not as the registry tag (that's reserved for stable).
+# as a label value, not as the registry tag.
+# version_tag carries the branch prefix, which init.sh strips back off for the
+# ostree/os-release version.
 build_image() {
-  local base_image="$1" build_script="$2" canonical_tag="$3" variant="$4" containerfile_path="$5"
-  local raw_tag="${6:-$canonical_tag}"
+  local base_image="$1" build_script="$2" version_tag="$3" variant="$4" containerfile_path="$5"
+  local raw_tag="${6:-$version_tag}"
 
   buildah build \
     --tag raw-img \
     --tag "raw-img:${raw_tag}" \
-    --source-date-epoch "$IMAGE_SOURCE_DATE_EPOCH" \
-    --rewrite-timestamp \
     --build-arg BASE_IMAGE="${base_image}" \
     --build-arg BUILD_SCRIPT="${build_script}" \
-    --build-arg CANONICAL_TAG="${canonical_tag}" \
+    --build-arg CANONICAL_TAG="${version_tag}" \
     --build-arg VARIANT="${variant}" \
     --file "${containerfile_path}" .
 }
 
 # ── build raw-img unless it already exists (or force rebuilds) ──────────────
-# Usage: build_image_or_skip <base_image> <build_script> <canonical_tag> <variant> [force_rebuild]
+# Usage: build_image_or_skip <base_image> <build_script> <version_tag> <variant> [force_rebuild]
 build_image_or_skip() {
-  local base_image="$1" build_script="$2" canonical_tag="$3" variant="$4"
+  local base_image="$1" build_script="$2" version_tag="$3" variant="$4"
   local force_rebuild="${5:-0}"
 
   if [[ "$force_rebuild" == "1" ]] || ! buildah images --format '{{.Name}}' raw-img >/dev/null 2>&1; then
@@ -85,7 +88,7 @@ build_image_or_skip() {
       echo "Force rebuild: removing existing container image..."
       buildah rmi --force raw-img 2>/dev/null || true
     fi
-    build_image "$base_image" "$build_script" "$canonical_tag" "$variant" "./Containerfile" "$variant"
+    build_image "$base_image" "$build_script" "$version_tag" "$variant" "./Containerfile" "$variant"
   else
     echo "Container image raw-img already exists, skipping build"
   fi
@@ -139,20 +142,22 @@ extract_image_info() {
 }
 
 # ── assemble labels file ────────────────────────────────────────────────────
-# Usage: assemble_labels <date> <image_desc> <variant> <parent_version> \
+# Usage: assemble_labels <date> <image_desc> <variant> <version_tag> \
 #                        <repo_owner> <repo_name> <kernel_version> \
-#                        <manifest_file_path> <output_file> [revision] [upstream_tag]
+#                        <manifest_file_path> <output_file> [revision] [parent_version]
 # Reads manifest JSON from manifest_file_path and writes labels to output_file.
 # revision (optional) is the upstream commit SHA, preserved from the base image.
-# upstream_tag (optional) is the exact upstream git tag this image was cut from
-# (`unstable-45.20261020.3`, or bare `44.20261012.1` for stable); images built
+# version_tag is our own version ({branch}-{canonical}, e.g. "unstable-45.20261020.3"),
+# so the embedded version never reads identical to upstream's.
+# parent_version (optional) is the upstream tag this image was cut from
+# (`unstable-45.20261020.2`, or bare `44.20261012.1` for stable); images built
 # without a resolved identity omit it.
 
 assemble_labels() {
-  local date="$1" image_desc="$2" variant="$3" parent_version="$4" repo_owner="$5"
+  local date="$1" image_desc="$2" variant="$3" version_tag="$4" repo_owner="$5"
   local repo_name="$6" kernel_version="$7" manifest_file="$8" output_file="$9"
   local revision="${10:-}"
-  local upstream_tag="${11:-}"
+  local parent_version="${11:-}"
 
   # Read manifest from file to avoid shell quoting issues with JSON
   # Compact to single line so it survives label file write/read correctly
@@ -170,14 +175,14 @@ assemble_labels() {
     "org.opencontainers.image.title=${variant}"
     "org.opencontainers.image.url=https://github.com/${repo_owner}/${repo_name}"
     "org.opencontainers.image.vendor=${repo_owner}"
-    "org.opencontainers.image.version=${parent_version}"
+    "org.opencontainers.image.version=${version_tag}"
     "org.opencontainers.image.revision=${revision}"
     "org.opencontainers.image.kernel-version=${kernel_version}"
     "containers.bootc=1"
     "ostree.rechunk.info=${manifest}"
   )
-  if [[ -n "$upstream_tag" ]]; then
-    labels+=("org.opencontainers.image.upstream-version=${upstream_tag}")
+  if [[ -n "$parent_version" ]]; then
+    labels+=("org.opencontainers.image.parent-version=${parent_version}")
   fi
   printf '%s\n' "${labels[@]}" >"${output_file}"
 }
@@ -289,7 +294,6 @@ rechunk_image() {
     --verbose \
     --compressed \
     --max-layers 256 \
-    --source-date-epoch "$IMAGE_SOURCE_DATE_EPOCH" \
     --prune /sysroot/ \
     --prune /run/ \
     --prune /tmp/ \

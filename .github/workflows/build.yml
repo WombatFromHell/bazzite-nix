@@ -112,7 +112,7 @@ jobs:
             --arg image_desc "${{ needs.check_and_aggregate.outputs.image_desc }}" \
             --arg repo_owner "${{ github.repository_owner }}" \
             --arg repo_name "${{ env.IMAGE_NAME }}" \
-            '. + {date: $date, image_desc: $image_desc, repo_owner: $repo_owner, repo_name: $repo_name, version_label: .parent_version}' \
+            '. + {date: $date, image_desc: $image_desc, repo_owner: $repo_owner, repo_name: $repo_name, version_label: .version_tag}' \
             <<< '${{ toJSON(matrix.variant_data) }}')
           just ci-pipeline "$RECORD" '{"rechunk":1}'
 

@@ -17,12 +17,12 @@ run_build() {
   local image_name="${3:?image_name required}"
   local base_image_override="${4:-}"
   local force_rebuild="${5:-0}"
-  local record base_image build_script canonical_tag variant
+  local record base_image build_script version_tag variant
 
-  record=$(resolve_variant "$variant_or_spec" "$variants_config" "$image_name" "$force_rebuild") || return 1
+  record=$(resolve_variant "$variant_or_spec" "$variants_config" "$image_name") || return 1
   [[ -n "$base_image_override" ]] && record=$(jq -c --arg bi "$base_image_override" '.base_image = $bi' <<<"$record")
-  IFS=$'\037' read -r base_image build_script canonical_tag variant < <(jq -r '[.base_image, .build_script, .canonical_tag, .variant] | join("\u001f")' <<<"$record")
-  build_image_or_skip "$base_image" "$build_script" "$canonical_tag" "$variant" "$force_rebuild"
+  IFS=$'\037' read -r base_image build_script version_tag variant < <(jq -r '[.base_image, .build_script, .version_tag, .variant] | join("\u001f")' <<<"$record")
+  build_image_or_skip "$base_image" "$build_script" "$version_tag" "$variant" "$force_rebuild"
 }
 
 # Human-readable build summary (reads the record the build returned)
@@ -34,7 +34,7 @@ print_build_summary() {
     echo "=== ${title} ==="
     jq -r '
       "  Variant      : \(.variant // "")",
-      "  Version      : \(.canonical_tag // "")",
+      "  Version      : \(.version_tag // "")",
       "  Tags         : \(.tags // "")",
       "  Kernel       : \(.kernel_version // "")",
       "  Manifest pkgs: \(.manifest_packages // "")",
@@ -65,7 +65,7 @@ resolved_variant_record_json() {
   local image_desc="${4:-$DEFAULT_IMAGE_DESC}"
   jq -c --arg repo_owner "$repo_owner" --arg repo_name "$repo_name" --arg image_desc "$image_desc" \
     '. + {repo_owner: $repo_owner, repo_name: $repo_name, image_desc: $image_desc,
-          version_label: (.parent_version // .canonical_tag)}' <<<"$record_json"
+          version_label: (.version_tag // .canonical_tag)}' <<<"$record_json"
 }
 
 _step() {
@@ -108,7 +108,7 @@ build_variant_pipeline() {
         then "MISSING:" + ($missing | join(" "))
         else [$record.variant, $record.version_label, $record.repo_owner, $record.repo_name,
               ($record.date // ""), ($record.image_desc // ""),
-              ($record.base_image // ""), ($record.build_script // ""), ($record.canonical_tag // ""),
+              ($record.base_image // ""), ($record.build_script // ""),
               ($record.upstream_tag // "")] | join("\u001f")
         end
     ' <<<"$record_json"); then
@@ -120,8 +120,8 @@ build_variant_pipeline() {
     return 1
   fi
 
-  local variant version_label repo_owner repo_name date image_desc base_image build_script canonical_tag upstream_tag
-  IFS=$'\037' read -r variant version_label repo_owner repo_name date image_desc base_image build_script canonical_tag upstream_tag <<<"$fields"
+  local variant version_label repo_owner repo_name date image_desc base_image build_script upstream_tag
+  IFS=$'\037' read -r variant version_label repo_owner repo_name date image_desc base_image build_script upstream_tag <<<"$fields"
   [[ -n "$date" ]] || date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   [[ -n "$image_desc" ]] || image_desc="$DEFAULT_IMAGE_DESC"
   local rechunk force_rebuild build image_name_ref extract_ref
@@ -143,11 +143,11 @@ build_variant_pipeline() {
   case "$build" in
   always)
     _step "Build container image"
-    build_image "$base_image" "$build_script" "$canonical_tag" "$variant" "./Containerfile" "$variant" 1>&2
+    build_image "$base_image" "$build_script" "$version_label" "$variant" "./Containerfile" "$variant" 1>&2
     ;;
   skip)
     _step "Build container image (skip if present)"
-    build_image_or_skip "$base_image" "$build_script" "$canonical_tag" "$variant" "$force_rebuild" 1>&2
+    build_image_or_skip "$base_image" "$build_script" "$version_label" "$variant" "$force_rebuild" 1>&2
     ;;
   none) ;;
   *)
@@ -247,7 +247,7 @@ run_variant() {
 
   local record anchor_tag options_json record_json built variant
 
-  record=$(resolve_variant "$variant_or_spec" "$variants_config" "$image_name" "$force_rebuild") || return 1
+  record=$(resolve_variant "$variant_or_spec" "$variants_config" "$image_name") || return 1
   [[ -n "$base_image_override" ]] && record=$(jq -c --arg bi "$base_image_override" '.base_image = $bi' <<<"$record")
   variant=$(jq -r .variant <<<"$record")
 
@@ -358,7 +358,7 @@ rootful_load() {
 # old build-reusable action. No re-resolution — preserves matrix collision handling.
 # Usage: build_variant_ci <record_json> [options_json]
 # The record comes from the CI matrix (see the schema in .pi/PLAN.md); its version_label
-# is parent_version, the upstream version the labels carry. options_json carries
+# is version_tag, the version this build embeds. options_json carries
 # {"rechunk":0|1} (build.yml passes 1).
 # Writes record=<updated record> to $GITHUB_OUTPUT when set.
 build_variant_ci() {
@@ -400,7 +400,7 @@ build_all_variants() {
   echo "Building $count variant(s)..."
   for ((i = 0; i < count; i++)); do
     record_json=$(echo "$variants" | jq -c --arg repo_owner "$repo_organization" --arg repo_name "$image_name" --arg image_desc "$image_desc" \
-      '.[$i] + {repo_owner: $repo_owner, repo_name: $repo_name, image_desc: $image_desc, version_label: .parent_version}')
+      '.[$i] + {repo_owner: $repo_owner, repo_name: $repo_name, image_desc: $image_desc, version_label: .version_tag}')
 
     built=$(build_variant_pipeline "$record_json" '{"rechunk":1,"force_rebuild":0,"build":"skip"}') || return $?
     echo "Variant $(jq -r '.variant' <<<"$built") complete: $(jq -r '.source_ref' <<<"$built") ($(jq -r '.build_digest' <<<"$built"))"

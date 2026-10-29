@@ -156,7 +156,7 @@ release-preview $variants="" $prev="" $config="":
 # ── CI recipes (called from build.yml; use pre-resolved matrix values) ──────
 
 # Build a single pre-resolved variant (mirrors old build-reusable action).
-# The record comes from check-variants output; its version_label is parent_version.
+# The record comes from check-variants output; its version_label is version_tag.
 # Usage: just ci-pipeline <record_json> [options_json]
 # options_json carries {"rechunk":0|1} (build.yml passes 1; leave 0 for raw-img-only).
 [group('Build Container Image')]

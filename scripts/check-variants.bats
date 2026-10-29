@@ -97,30 +97,40 @@ teardown() {
 
 # ── compute_canonical_tag ───────────────────────────────────────────────────
 
-@test "compute_canonical_tag strips branch prefix" {
+# Our version is the upstream version verbatim; it is bumped only when
+# {branch}-{version} already exists in our registry — which is what a force_build
+# re-run of the same upstream release hits. No registry means no bump at all.
+@test "compute_canonical_tag keeps the upstream version when we have not published it" {
   local out
-  out=$(compute_canonical_tag "testing-44.20260520" "ghcr.io/owner/repo" "false" "testing")
+  out=$(compute_canonical_tag "testing-44.20260520" "" "testing")
   [ "$out" = "44.20260520 false" ]
 }
 
-@test "compute_canonical_tag force_build with free tag passes through" {
-  export FAKE_REGISTRY_TAGS=""
+@test "compute_canonical_tag keeps the counter upstream already used" {
   local out
-  out=$(compute_canonical_tag "stable-44.20260520" "ghcr.io/owner/repo" "true" "stable")
-  [ "$out" = "44.20260520 false" ]
+  out=$(compute_canonical_tag "stable-44.20260520.3" "" "stable")
+  [ "$out" = "44.20260520.3 false" ]
 }
 
-@test "compute_canonical_tag bumps past colliding tags" {
+@test "compute_canonical_tag adds a minor version when the upstream one is already ours" {
+  export FAKE_REGISTRY_TAGS="stable-44.20260520"
+  local out
+  out=$(compute_canonical_tag "44.20260520" "ghcr.io/owner/repo" "stable")
+  [ "$out" = "44.20260520.1 true" ]
+}
+
+@test "compute_canonical_tag walks past tags our registry already holds" {
   export FAKE_REGISTRY_TAGS="testing-44.20260520.1 testing-44.20260520.2"
   local out
-  out=$(compute_canonical_tag "testing-44.20260520.1" "ghcr.io/owner/repo" "true" "testing")
+  out=$(compute_canonical_tag "testing-44.20260520.1" "ghcr.io/owner/repo" "testing")
+  # .1 and .2 are ours already, so the first free counter is .3.
   [ "$out" = "44.20260520.3 true" ]
 }
 
 @test "compute_canonical_tag stops the bump walk at the budget" {
   export FAKE_REGISTRY_TAGS="testing-44.20260520.1 testing-44.20260520.2 testing-44.20260520.3 testing-44.20260520.4 testing-44.20260520.5 testing-44.20260520.6 testing-44.20260520.7"
   local out
-  ! out=$(compute_canonical_tag "testing-44.20260520.1" "ghcr.io/owner/repo" "true" "testing" 2>&1)
+  ! out=$(compute_canonical_tag "testing-44.20260520.1" "ghcr.io/owner/repo" "testing" 2>&1)
   [[ "$out" == *"stopping the bump walk"* ]]
 }
 
@@ -350,10 +360,26 @@ EOF
 
   run check_build_needed "ghcr.io/owner/repo" "unstable" "45.20261019.7" "false"
   [ "$status" -eq 1 ]
-  [[ "$output" == *'REASON="Upstream unchanged (parent_version: 45.20261019.7)"'* ]]
+  [[ "$output" == *'REASON="Upstream unchanged (upstream version: 45.20261019.7)"'* ]]
 }
 
 # ── upstream identity of an image we published ──────────────────────────────
+
+@test "upstream_version_of_our_image reads the parent-version label before its own version" {
+  cat >"$STUB_DIR/skopeo" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${2:-}" == "docker://ghcr.io/owner/repo:unstable" ]]; then
+    printf '{"Labels":{"org.opencontainers.image.parent-version":"unstable-45.20261019.7","org.opencontainers.image.version":"unstable-45.20261019.8"}}\n'
+    exit 0
+fi
+exit 1
+EOF
+  chmod +x "$STUB_DIR/skopeo"
+
+  run upstream_version_of_our_image "ghcr.io/owner/repo:unstable" "unstable"
+  [ "$status" -eq 0 ]
+  [ "$output" = "45.20261019.7" ]
+}
 
 @test "upstream_version_of_our_image names the version its upstream tag label holds" {
   cat >"$STUB_DIR/skopeo" <<'EOF'
@@ -470,12 +496,15 @@ ci_run() {
   ci_run "$dir" >/dev/null 2>&1
 
   driver="$(jq -c '.[0]' "$dir/artifacts/variants_results.json")"
-  resolver="$(resolve_variant "stable" "$dir/variants.json" "repo" "false" "ghcr.io/test")"
+  resolver="$(resolve_variant "stable" "$dir/variants.json" "repo" "ghcr.io/test")"
 
   [ "$(jq -r '.needs_build' <<<"$driver")" = "true" ]
-  for field in variant base_image build_script suffix parent_version canonical_tag upstream_tag tags collision_detected; do
+  for field in variant base_image build_script suffix version_tag upstream_version canonical_tag upstream_tag tags collision_detected; do
     [[ "$(jq -r ".$field" <<<"$driver")" == "$(jq -r ".$field" <<<"$resolver")" ]]
   done
+  # The embedded version is our own tag: upstream's 44.20261012.1, unpublished so far.
+  [ "$(jq -r '.version_tag' <<<"$resolver")" = "stable-44.20261012.1" ]
+  [ "$(jq -r '.tags' <<<"$resolver")" = "stable-44.20261012.1,stable-44,stable" ]
 }
 
 @test "a base image labelled latest is not a release version, in either driver" {
@@ -510,7 +539,7 @@ EOF
   [[ "$output" == *'::error::'* ]]
   [ "$(jq -c '.[0] // "no record"' "$dir/artifacts/variants_results.json")" = '"no record"' ]
 
-  run resolve_variant "stable" "$dir/variants.json" "repo" "false" "ghcr.io/test"
+  run resolve_variant "stable" "$dir/variants.json" "repo" "ghcr.io/test"
   [ "$status" -eq 1 ]
 }
 
@@ -569,7 +598,7 @@ EOF
   [ "$(jq -r '.[0].variant' "$dir/artifacts/variants_results.json")" = "stable" ]
   [ "$(jq -r '.[0].upstream_tag' "$dir/artifacts/variants_results.json")" = "44.20261012.1" ]
 
-  run resolve_variant "testing" "$dir/variants.json" "repo" "false" "ghcr.io/test"
+  run resolve_variant "testing" "$dir/variants.json" "repo" "ghcr.io/test"
   [ "$status" -eq 2 ]
 }
 

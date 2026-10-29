@@ -24,6 +24,13 @@ setup() {
   grep -q '^sudo -v$' "$log"
 }
 
+@test "sourcing helpers drops the devShell SOURCE_DATE_EPOCH" {
+  export SOURCE_DATE_EPOCH=315532800
+  source "$BATS_TEST_DIRNAME/../scripts/build-helpers.bash"
+  # Asserting the variable, not env: bats' own BATS_TEST_DESCRIPTION carries the name.
+  [ -z "${SOURCE_DATE_EPOCH:-}" ]
+}
+
 # ── build_image_or_skip ─────────────────────────────────────────────────────
 
 @test "build_image_or_skip skips when raw-img exists, builds when missing" {
@@ -48,7 +55,7 @@ setup() {
   grep -q '^build_image ' "$log"
 }
 
-@test "build_image pins buildah timestamps to the fixed epoch" {
+@test "build_image leaves the manifest creation time at the wall clock" {
   local log
   log="$(mktemp)"
   buildah() {
@@ -58,7 +65,9 @@ setup() {
   export LOG="$log"
 
   build_image "base" "build.sh" "1.0.0" "testing" "Containerfile" "testing-1.0.0"
-  grep -q -- '--source-date-epoch 0 --rewrite-timestamp' "$log"
+  # Pinning the epoch zeroes the timestamp rpm-ostree reads, aborting `rpm-ostree status -v`.
+  run ! grep -q -- '--source-date-epoch' "$log"
+  run ! grep -q -- '--rewrite-timestamp' "$log"
 }
 
 # ── extract_image_info ──────────────────────────────────────────────────────
@@ -94,6 +103,36 @@ EOF
   output=$(extract_image_info)
   echo "$output" | grep -q '^KERNEL_VERSION=6.19.8-400.fc41.x86_64$'
   echo "$output" | grep -q '^MANIFEST_PACKAGES=1$'
+}
+
+# ── assemble_labels ─────────────────────────────────────────────────────
+
+@test "assemble_labels embeds our prefixed version and the unbumped parent" {
+  local manifest labels_file
+  manifest="$(mktemp)"
+  labels_file="$(mktemp)"
+  printf '{"packages":{"kernel":"6.19.8"}}' >"$manifest"
+
+  assemble_labels "2026-10-20T00:00:00Z" "desc" "unstable" "unstable-45.20261020.3" \
+    "owner" "repo" "6.19.8" "$manifest" "$labels_file" "sha1234" "unstable-45.20261020.2"
+
+  grep -q '^org.opencontainers.image.version=unstable-45.20261020.3$' "$labels_file"
+  grep -q '^org.opencontainers.image.parent-version=unstable-45.20261020.2$' "$labels_file"
+  rm -f "$manifest" "$labels_file"
+}
+
+@test "assemble_labels omits parent-version when there is no upstream identity" {
+  local manifest labels_file
+  manifest="$(mktemp)"
+  labels_file="$(mktemp)"
+  printf '{"packages":{"kernel":"6.19.8"}}' >"$manifest"
+
+  assemble_labels "2026-10-20T00:00:00Z" "desc" "stable" "stable-44.20261012.2" \
+    "owner" "repo" "6.19.8" "$manifest" "$labels_file" ""
+
+  grep -q '^org.opencontainers.image.version=stable-44.20261012.2$' "$labels_file"
+  run ! grep -q 'parent-version' "$labels_file"
+  rm -f "$manifest" "$labels_file"
 }
 
 # ── relabel_image ───────────────────────────────────────────────────────────
@@ -188,8 +227,8 @@ EOF
   grep -q -- "--volume ${layout_base}:/run/out:Z" "$log"
   grep -q -- '--mount=type=image,src=localhost/raw-img,target=/chunkah' "$log"
   grep -q -- '--prune /sysroot/' "$log"
-  # the manifest creation time and layer mtimes are pinned, matching finalize's clamp
-  grep -q -- '--source-date-epoch 0' "$log"
+  # the manifest creation time must stay real, or 'rpm-ostree status -v' aborts
+  run ! grep -q -- '--source-date-epoch' "$log"
   # stale OSTree/build labels are dropped
   grep -q -- '--label ostree.commit-' "$log"
   # pulled back from the per-variant layout and tagged as chunked-img, plus the anchor tag

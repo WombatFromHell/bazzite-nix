@@ -37,6 +37,66 @@ When cleared, mark G0 `APPROVED <date>` and start G1.
 
 ---
 
+## L1 — embedded label normalization (DONE 2026-10-29)
+
+Implemented as described below, with one naming correction found while writing it: the
+identity our own image carries is its **upstream** tag, so the reader is
+`upstream_version_of_our_image` and the record field `check_build_needed` compares is
+`upstream_version` — no `parent_version` field exists anywhere in the tree. Q answered:
+rename, with fallbacks. The bump rule was corrected on 2026-10-29 to bump only on a
+registry collision, not unconditionally. Live run (2026-10-29) over the enabled
+variants: stable `stable-44.20261026` (upstream bare `44.20261026`), testing
+`testing-45.20261028.1` (upstream `testing-45.20261028.1`), unstable
+`unstable-45.20261028.6` (upstream `unstable-45.20261028.6`), and no registry tag
+collides. Green gate: 61 + 37 + 4 + 11 + 6 + 4 bats, 196 pytest, `just lint` clean, live
+`preview_tags` run.
+
+Rule, one sentence: every image we publish carries
+`org.opencontainers.image.version` = our own primary pushed tag
+`{variant}-{version}` (always branch-prefixed, upstream's version verbatim unless our
+registry already holds that tag), and
+`org.opencontainers.image.parent-version` = the unbumped upstream identity we were cut
+from, spelled the way upstream spells it (`unstable-45.20261028.2`, bare `44.20261026`
+for stable). That is today's `org.opencontainers.image.upstream-version` value, renamed;
+open question Q below says whether to keep both labels.
+
+Because the resolver already returns that identity as `upstream_tag`, the record drops
+`parent_version` and gains `version_tag`: one field added, one removed, no new value to
+compute.
+
+Bump rule: canonical = upstream version verbatim, then walk `{variant}-{canonical}` in
+our registry past existing tags until free, within `COLLISION_BUMP_WALK`. Only a tag we
+already published bumps — the case a `force_build` re-run of the same upstream release
+hits.
+
+| file | change |
+|---|---|
+| `scripts/check-variants-tags.bash` | `compute_canonical_tag` keeps upstream's version and bumps only on a registry collision; `resolve_variant` derives the registry prefix whenever an owner is known (warn + skip probing when not), emits `version_tag` = `{variant}-{canonical}`, drops `parent_version` (bare comparisons keep using `upstream_version`); explicit `image:tag` spec sets `version_tag` = that tag |
+| `scripts/check-variants.sh` | `check_build_needed` compares `.upstream_version` (bare) instead of `.parent_version` |
+| `scripts/check-variants-registry.bash` | `upstream_version_of_our_image` reads `parent-version` first, then `upstream-version`, then legacy `version` |
+| `scripts/build-helpers.bash` | `assemble_labels` writes `version={version_tag}` and `parent-version={upstream_tag}`; `build_image`/`build_image_or_skip` hand the prefixed tag to `CANONICAL_TAG` (so `init.sh`'s prefix strip is live again) |
+| `scripts/just-helpers-build.bash` | pipeline reads `version_tag`/`upstream_tag`; `resolved_variant_record_json` sets `version_label: .version_tag` |
+| `.github/workflows/build.yml` | `version_label: .version_tag` |
+| `scripts/just-helpers-variants.bash` | `preview_tags` prints `version_tag` |
+| `scripts/push-helpers.bash` | summary row reads `upstream_tag` instead of `parent_version` |
+| `.github/variants.json`, `DESIGN.md` | record-shape and decision 11/12 wording |
+| tests | `check-variants.bats`: 4 `compute_canonical_tag` tests rewritten for always-bump, end-to-end fixture asserts `version_tag` prefixed and `parent-version` unbumped; `tests/build-helpers.bats`: new `assemble_labels` test (prefixed version + `parent-version`) |
+
+Q (answer before implementation): rename `org.opencontainers.image.upstream-version` to
+`org.opencontainers.image.parent-version`, or keep both labels side by side? Default is
+rename — one identity label, and readers fall back to `upstream-version` then `version`
+for images published before this change.
+
+Red first: the new bats assertions above must fail before the implementation.
+Green gate: `just test`, `just lint`, live `scripts/check-variants.sh` run.
+
+Known risks for the user: a `force_build` re-run of a release we already published
+publishes a minor version (`stable-44.20261026` → `stable-44.20261026.1`), and stable's
+`version` is prefixed (`stable-44.20261026`) while upstream's tag stays bare
+`44.20261026`.
+
+---
+
 ## Phase 1 — tests first, no production change
 
 ### G1 — test-helper extraction (Q3)

@@ -106,9 +106,10 @@ oras() {
   cosign() { return 0; }
   oras() { printf '{"layers":[{"size":%s}]}' "$((1234 * 1024 * 1024))"; }
 
-  sign_and_verify_image '{"digest_ref":"ghcr.io/o/r@sha256:deadbeef","authfile":"/tmp/skopeo-auth/auth.json","variant":"stable","tags":"stable-44.20260520,stable","date":"2026-05-20","parent_version":"44.20260520","base_img":"ghcr.io/o/r:stable"}' >/dev/null
+  sign_and_verify_image '{"digest_ref":"ghcr.io/o/r@sha256:deadbeef","authfile":"/tmp/skopeo-auth/auth.json","variant":"stable","tags":"stable-44.20260520,stable","date":"2026-05-20","upstream_tag":"44.20260520","base_img":"ghcr.io/o/r:stable"}' >/dev/null
 
   grep -q '`ghcr.io/o/r:stable`' "$summary"
+  grep -q '`44.20260520`' "$summary"
   grep -q '`stable-44.20260520,stable`' "$summary"
   grep -q '`deadbeef`' "$summary"
   grep -q '1234 MB' "$summary"

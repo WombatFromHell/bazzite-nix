@@ -136,7 +136,7 @@ for ((i = 0; i < variant_count; i++)); do
   # within the collision bump walk is taken, or upstream published the labelled
   # build before tagging it. Either way one variant must not fail the whole check.
   record="" rc=0
-  record=$(resolve_variant "$variant" "$VARIANTS_CONFIG" "$REPO" "$FORCE_BUILD" "$REGISTRY") || rc=$?
+  record=$(resolve_variant "$variant" "$VARIANTS_CONFIG" "$REPO" "$REGISTRY") || rc=$?
   if [[ "$rc" -eq 2 ]]; then
     warn "Variant $variant: no version to build against; skipping"
     echo "::endgroup::"
@@ -147,10 +147,11 @@ for ((i = 0; i < variant_count; i++)); do
     exit 1
   fi
 
-  IFS=$'\037' read -r suffix parent_version < <(jq -r '[.suffix, .parent_version] | join("\u001f")' <<<"$record")
+  # The build-needed comparison is against upstream's version, never our own bumped one.
+  IFS=$'\037' read -r suffix upstream_version < <(jq -r '[.suffix, .upstream_version] | join("\u001f")' <<<"$record")
   prefix="${REGISTRY}/${REPO}${suffix}"
 
-  check_output=$(check_build_needed "$prefix" "$variant" "$parent_version" "$FORCE_BUILD") || {
+  check_output=$(check_build_needed "$prefix" "$variant" "$upstream_version" "$FORCE_BUILD") || {
     echo "::endgroup::"
     continue
   }

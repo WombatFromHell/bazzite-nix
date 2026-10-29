@@ -142,9 +142,10 @@ version_of_tag() {
 }
 
 # Upstream version an image we published was cut from, read back from its own
-# labels: the exact upstream tag name in org.opencontainers.image.upstream-version
-# (every image built since that label exists), or the plain version label for
-# releases published before it, whose value already held the upstream version.
+# labels: the upstream tag name in org.opencontainers.image.parent-version (what
+# every image carries now), its pre-rename spelling org.opencontainers.image.upstream-
+# version, or the plain version label for releases published before either, whose
+# value still held the upstream version.
 # Usage: upstream_version_of_our_image <image_ref> <branch>
 # Prints: the version on success; returns 1 when the image carries neither label
 upstream_version_of_our_image() {
@@ -154,7 +155,7 @@ upstream_version_of_our_image() {
 
   labels=$(skopeo inspect "docker://${image_ref}" 2>/dev/null | jq '.Labels // {}') || return 1
 
-  tag=$(jq -r '.["org.opencontainers.image.upstream-version"] // empty' <<<"$labels")
+  tag=$(jq -r '.["org.opencontainers.image.parent-version"] // .["org.opencontainers.image.upstream-version"] // empty' <<<"$labels")
   if [[ -n "$tag" ]]; then
     version_of_tag "$tag" "$branch"
     return 0
@@ -290,7 +291,7 @@ upstream_version_candidates() {
   printf '%s\n' "${candidates[@]}"
 }
 
-# Decide build-needed from a fetched parent_version. Prints the REASON= line;
+# Decide build-needed from upstream's version. Prints the REASON= line;
 # returns 0 (build needed) if it differs from upstream, 1 (skip) if identical.
 # Callers pass a non-empty local_version (the "no usable label" case is the
 # caller's to fall through on).
@@ -304,7 +305,7 @@ version_check() {
   [[ -n "$via" ]] && via_note=" via ${via}"
   if [[ "$local_version" == "$upstream" ]]; then
     [[ -n "$via" ]] && echo "::notice::Variant ${variant_name}: Upstream unchanged (via ${via})" >&2
-    echo "REASON=\"Upstream unchanged (parent_version: ${upstream})\""
+    echo "REASON=\"Upstream unchanged (upstream version: ${upstream})\""
     return 1
   fi
   echo "::notice::Variant ${variant_name}: Upstream changed${via_note} (${local_version} → ${upstream})" >&2
@@ -313,7 +314,7 @@ version_check() {
 }
 
 # ── check build needed ──────────────────────────────────────────────────────
-# Usage: check_build_needed <prefix> <branch> <upstream_parent_version> <force_build>
+# Usage: check_build_needed <prefix> <branch> <upstream_version> <force_build>
 # Checks if build is needed for this variant branch. The branch is its own primary
 # tag, so the decision never compares another variant's newest tag.
 # Returns: 0 if build needed, 1 if skip.
@@ -322,7 +323,7 @@ version_check() {
 check_build_needed() {
   local prefix="$1"
   local branch="${2:?branch required}"
-  local upstream_parent_version="$3"
+  local upstream_version="$3"
   local force_build="${4:-false}"
 
   if [[ "$force_build" == "true" ]]; then
@@ -336,10 +337,10 @@ check_build_needed() {
 
   # Strategy 1: Compare the upstream identity our own primary tag carries
   if image_exists "$primary_ref"; then
-    local local_parent_version=""
-    local_parent_version=$(upstream_version_of_our_image "$primary_ref" "$branch") || true
-    if [[ -n "$local_parent_version" ]]; then
-      version_check "$local_parent_version" "$branch" "$upstream_parent_version" && return 0 || return 1
+    local our_upstream_version=""
+    our_upstream_version=$(upstream_version_of_our_image "$primary_ref" "$branch") || true
+    if [[ -n "$our_upstream_version" ]]; then
+      version_check "$our_upstream_version" "$branch" "$upstream_version" && return 0 || return 1
     fi
     echo "::debug::Primary tag exists but carries no upstream identity, falling back to versioned tags" >&2
   fi
@@ -348,9 +349,9 @@ check_build_needed() {
   local latest_versioned_tag
   if latest_versioned_tag=$(find_latest_versioned_tag "$prefix" "$branch"); then
     echo "::debug::Using latest versioned tag: ${latest_versioned_tag}" >&2
-    local local_parent_version
-    if local_parent_version=$(upstream_version_of_our_image "${prefix}:${latest_versioned_tag}" "$branch"); then
-      version_check "$local_parent_version" "$branch" "$upstream_parent_version" "$latest_versioned_tag" && return 0 || return 1
+    local our_upstream_version
+    if our_upstream_version=$(upstream_version_of_our_image "${prefix}:${latest_versioned_tag}" "$branch"); then
+      version_check "$our_upstream_version" "$branch" "$upstream_version" "$latest_versioned_tag" && return 0 || return 1
     fi
     echo "::debug::Latest versioned tag ${latest_versioned_tag} carries no upstream identity" >&2
   fi

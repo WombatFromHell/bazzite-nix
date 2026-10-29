@@ -27,77 +27,50 @@ extract_image_metadata() {
   echo "$parent_version $digest"
 }
 
-# ── compute canonical tag ───────────────────────────────────────────────────
-# Usage: compute_canonical_tag <parent_version> <prefix> <force_build> <branch>
-# Computes canonical tag, handling version collisions when force_build is true.
-# Checks for <branch>-<canonical> tags in the registry to match what is actually pushed.
-# Prints: canonical collision_detected
-
+# ── compute our version ────────────────────────────────────────────────────
+# Usage: compute_canonical_tag <upstream_version> <prefix> [branch]
+# Our version is the upstream version we were cut from, verbatim. It gains a minor
+# version only when {branch}-{version} already exists in our registry — a force_build
+# re-run of the same upstream release — and then walks to the next free counter.
+# <prefix> is empty when no registry is known, so nothing is probed and nothing bumps.
+# Prints: canonical collision_detected  — the bare version; collision_detected means
+# the registry held our tag, which is what forced the bump.
 compute_canonical_tag() {
-  local parent_version="$1"
+  local upstream_version="$1"
   local prefix="$2"
-  local force_build="$3"
-  local branch="${4:-}"
+  local branch="${3:-}"
 
   # Strip branch prefix (e.g., "testing-") to get pure version number
   local canonical
-  if [[ "$parent_version" =~ ^[a-zA-Z]+-([0-9].*)$ ]]; then
+  if [[ "$upstream_version" =~ ^[a-zA-Z]+-([0-9].*)$ ]]; then
     canonical="${BASH_REMATCH[1]}"
   else
-    canonical="$parent_version"
+    canonical="$upstream_version"
   fi
 
-  local collision_detected="false"
-
-  if [[ "$force_build" != "true" ]]; then
-    echo "$canonical $collision_detected"
-    return 0
-  fi
-
-  # Construct the full tag to check, matching what is actually pushed.
-  # If a branch is provided, check <branch>-<canonical> (e.g., testing-44.20260520.2).
-  local check_tag="$canonical"
-  if [[ -n "$branch" ]]; then
-    check_tag="${branch}-${canonical}"
-  fi
-
-  if ! skopeo inspect "docker://${prefix}:${check_tag}" >/dev/null 2>&1; then
-    echo "$canonical $collision_detected"
-    return 0
-  fi
-
-  echo "::notice::Collision detected: ${check_tag} exists. Calculating next version..." >&2
-  collision_detected="true"
-
-  # Parse version number and increment
-  local next_num=1
-  local search_base="$canonical"
-
-  if [[ "$canonical" =~ ^(.*)\.([0-9]+)$ ]] && [ ${#BASH_REMATCH[2]} -lt 4 ]; then
-    search_base="${BASH_REMATCH[1]}"
-    next_num=$((BASH_REMATCH[2] + 1))
-  fi
-
-  local probe_start="$next_num"
-  while true; do
-    local next_canonical="${search_base}.${next_num}"
-    local next_check_tag="$next_canonical"
-    if [[ -n "$branch" ]]; then
-      next_check_tag="${branch}-${next_canonical}"
-    fi
-    if ! skopeo inspect "docker://${prefix}:${next_check_tag}" >/dev/null 2>&1; then
+  local candidate="$canonical" bumps=0 collision_detected="false" probe
+  while [[ -n "$prefix" ]]; do
+    probe="$candidate"
+    [[ -n "$branch" ]] && probe="${branch}-${probe}"
+    if ! skopeo inspect "docker://${prefix}:${probe}" >/dev/null 2>&1; then
       break
     fi
-    echo "::notice::${next_check_tag} also exists, checking next..." >&2
-    ((next_num++))
-    if ((next_num - probe_start >= COLLISION_BUMP_WALK)); then
-      fail "${COLLISION_BUMP_WALK} bumped tags after ${search_base} already exist; stopping the bump walk"
+    collision_detected="true"
+    echo "::notice::${probe} already exists, checking next..." >&2
+    # Next counter: upstream's counter +1, or a fresh .1 on a bare version.
+    if [[ "$candidate" =~ ^(.*)\.([0-9]+)$ ]] && ((${#BASH_REMATCH[2]} < 4)); then
+      candidate="${BASH_REMATCH[1]}.$((10#${BASH_REMATCH[2]} + 1))"
+    else
+      candidate="${candidate}.1"
+    fi
+    ((bumps++))
+    if ((bumps >= COLLISION_BUMP_WALK)); then
+      fail "${COLLISION_BUMP_WALK} bumped tags after ${canonical} already exist; stopping the bump walk"
       return 1
     fi
   done
 
-  canonical="${search_base}.${next_num}"
-  echo "$canonical $collision_detected"
+  echo "$candidate $collision_detected"
 }
 
 # Does this tag template want the image digest, which push resolves later?
@@ -153,12 +126,13 @@ generate_tags() {
 
 # ── Variant resolution ──────────────────────────────────────────────────────
 # Resolve a variant name or an explicit image:tag spec into one JSON record.
-# Usage: resolve_variant <variant_or_spec> [variants_config] [image_name] [force_build] [registry]
+# Usage: resolve_variant <variant_or_spec> [variants_config] [image_name] [registry]
 # Record: {variant, tag, target_image, base_image, build_script, suffix, latest,
-#          canonical_tag, parent_version, upstream_tag, upstream_version, tag_family,
+#          canonical_tag, version_tag, upstream_tag, upstream_version, tag_family,
 #          collision_detected, tags}  — a superset of the CI matrix entry shape.
-# force_build (4th arg, default "0"): enable version-collision handling like CI.
-# registry (5th arg, default derived from GITHUB_REPOSITORY_OWNER / repo_organization).
+# version_tag is the {branch}-{canonical} version this build embeds and pushes.
+# registry (4th arg): the namespace to probe for tags we already published; when empty
+# it is derived from GITHUB_REPOSITORY_OWNER / the Justfile's repo_organization.
 # Returns: 0 a record was printed; 1 the variant cannot be identified (unknown/disabled
 # name, base label is not a release version, the upstream search could not complete);
 # 2 it has no version to build against right now — upstream probed every name and none
@@ -168,20 +142,12 @@ resolve_variant() {
   local variant_or_spec="${1:?variant_or_spec required}"
   local variants_config="${2:-.github/variants.json}"
   local image_name="${3:?image_name required}"
-  local force_build="${4:-0}"
-  local registry="${5:-}"
+  local registry="${4:-}"
   local spec row base_image build_script suffix image_name_resolved tag canonical
-  local latest tags_json tags_csv collision_detected bump upstream_rc
+  local latest tags_json tags_csv version_tag collision_detected bump upstream_rc
   local base_label base_version upstream_tag upstream_version tag_family identity
 
   spec="$variant_or_spec"
-
-  # Normalize force_build to CI's "true"/"false" dialect
-  if [[ "$force_build" == "1" || "$force_build" == "true" ]]; then
-    force_build="true"
-  else
-    force_build="false"
-  fi
 
   # If it looks like an explicit image:tag or image ref, pass it through unchanged
   if [[ "$spec" == *"/"* ]] || [[ "$spec" == *":"* ]]; then
@@ -193,14 +159,15 @@ resolve_variant() {
     [[ -z "$build_script" ]] && build_script="build.sh"
     # Extract real version from upstream image label
     canonical="$(get_parent_version "$spec")" || canonical="$tag"
-    # No variants.json entry to source a tags template from — single-tag fallback
+    # No variants.json entry to source a tags template from — single-tag fallback,
+    # and the version we embed is the tag the spec pushes.
     tags_csv="$tag"
     jq -cn --arg variant "$tag" --arg tag "$tag" --arg target_image "$(image_ref "$image_name")" \
       --arg base_image "$spec" --arg build_script "$build_script" --arg canonical_tag "$canonical" \
-      --arg parent_version "$canonical" --arg tags "$tags_csv" \
+      --arg version_tag "$tag" --arg tags "$tags_csv" --arg upstream_version "$canonical" \
       '{variant: $variant, tag: $tag, target_image: $target_image, base_image: $base_image,
        build_script: $build_script, suffix: "", latest: false, canonical_tag: $canonical_tag,
-       parent_version: $parent_version, upstream_tag: "", upstream_version: $parent_version,
+       version_tag: $version_tag, upstream_tag: "", upstream_version: $upstream_version,
        tag_family: "", collision_detected: false, tags: $tags}'
     return 0
   fi
@@ -243,34 +210,29 @@ resolve_variant() {
   canonical="$upstream_version"
   echo "::notice::Upstream identity for $spec: git tag $upstream_tag (family $tag_family)" >&2
 
-  # Strip branch prefix from canonical and handle version collisions the same way
-  # CI does (compute_canonical_tag): on force_build, if <branch>-<canonical> already
-  # exists in the registry, bump the patch number. Registry defaults to
-  # ghcr.io/<owner>; owner comes from GITHUB_REPOSITORY_OWNER or the Justfile's
-  # exported repo_organization.
-  collision_detected="false"
+  # Our version is upstream's verbatim; only a tag we already published forces a bump.
+  # check-variants.sh passes REGISTRY explicitly (the CI namespace); local callers omit
+  # it, so the namespace is derived from the owner identity (GITHUB_REPOSITORY_OWNER /
+  # repo_organization), and with no owner there is nothing to probe.
   local registry_prefix="$registry"
   if [[ -n "$registry_prefix" ]]; then
     registry_prefix="${registry_prefix}/${image_name_resolved}"
-  elif [[ "$force_build" == "true" ]]; then
+  else
     local owner
     owner="$(registry_owner)"
     if [[ -n "$owner" ]]; then
       registry_prefix="$(registry_url "$owner")/${image_name_resolved}"
     else
-      warn "force_build collision handling needs GITHUB_REPOSITORY_OWNER (or a registry arg); skipping collision check"
+      warn "no registry to probe; our version stays upstream's"
     fi
   fi
 
-  if [[ -n "$registry_prefix" ]]; then
-    bump=$(compute_canonical_tag "$canonical" "$registry_prefix" "$force_build" "$spec") || {
-      echo "ERROR: no free version tag within $COLLISION_BUMP_WALK bumps of $canonical in $registry_prefix" >&2
-      return 2
-    }
-    read -r canonical collision_detected <<<"$bump"
-  elif [[ "$canonical" =~ ^[a-zA-Z]+-([0-9].*)$ ]]; then
-    canonical="${BASH_REMATCH[1]}"
-  fi
+  bump="$(compute_canonical_tag "$canonical" "$registry_prefix" "$spec")" || {
+    echo "ERROR: no free version tag within $COLLISION_BUMP_WALK bumps of $canonical in ${registry_prefix:-$canonical}" >&2
+    return 2
+  }
+  read -r canonical collision_detected <<<"$bump"
+  version_tag="${spec}-${canonical}"
 
   # Use the variant's config name as the branch — not $tag, which for variants
   # like "testing" is the base image's dated suffix (e.g. "testing-44.20260814"),
@@ -282,12 +244,12 @@ resolve_variant() {
 
   jq -cn --arg variant "$spec" --arg tag "$spec" --arg target_image "$(image_ref "$image_name_resolved")" \
     --arg base_image "$base_image" --arg build_script "$build_script" --arg suffix "$suffix" \
-    --arg canonical_tag "$canonical" --arg parent_version "$upstream_version" \
+    --arg canonical_tag "$canonical" --arg version_tag "$version_tag" \
     --arg upstream_tag "$upstream_tag" --arg upstream_version "$upstream_version" \
     --arg tag_family "$tag_family" --arg tags "$tags_csv" --arg latest "$latest" \
     --arg collision_detected "$collision_detected" \
     '{variant: $variant, tag: $tag, target_image: $target_image, base_image: $base_image,
      build_script: $build_script, suffix: $suffix, latest: ($latest == "true"), canonical_tag: $canonical_tag,
-     parent_version: $parent_version, upstream_tag: $upstream_tag, upstream_version: $upstream_version,
+     version_tag: $version_tag, upstream_tag: $upstream_tag, upstream_version: $upstream_version,
      tag_family: $tag_family, collision_detected: ($collision_detected == "true"), tags: $tags}'
 }

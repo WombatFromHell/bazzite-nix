@@ -121,7 +121,7 @@ sources the two check parts (`:46`, `:48`), build, push, then the five
 | File                           | Functions                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `check-variants-registry.bash` | `registry_url:19` owner -> `ghcr.io/<owner>`; `registry_owner:26` CI owner or Justfile default; `package_repo:34` lowercase repo name; `variant_record:45` the one variant lookup, fails listing enabled names; `variant_names:59`; `enabled_variant_names:63`; `read_registry_json:75` the one retry loop; `inspect_image_with_retry:99`; `image_exists:108`; `get_parent_version:118`; `version_of_tag:133`; `find_latest_versioned_tag:150`; `upstream_repo:181`; `resolve_upstream_tag:199` upstream identity by exact-name probe; `upstream_version_candidates:239` build-counter walk; `version_check:261`; `check_build_needed:286` |
-| `check-variants-tags.bash`     | `extract_image_metadata:9`; `compute_canonical_tag:32` version-collision handling; `tag_needs_digest:96`; `generate_tags:106` `{canonical} {branch} {major} {sha256}`; `resolve_variant:164`                                                                                                                                                                                                                              |
+| `check-variants-tags.bash`     | `extract_image_metadata:9`; `compute_canonical_tag:32` our version = upstream's +1, walked past tags we published; `tag_needs_digest:96`; `generate_tags:106` `{canonical} {branch} {major} {sha256}`; `resolve_variant:164`                                                                                                                                                                                                                              |
 | `build-helpers.bash`           | `CACHE_DIR:9`; `image_ref:19` the one spelling of a local ref; `image_digest:26`; `image_tag:32`; `sudo_cache:39`; `build_image:49`; `build_image_or_skip:67`; `extract_image_info:89`; `assemble_labels:136`; `relabel_image:174`; `rechunk_image:218`; `extract_final_ref:306`                                                                                                                                          |
 | `push-helpers.bash`            | `is_transient_error:10`; `run_with_retry:23`; `push_image_with_tags:79`; `sign_and_verify_image:147`; `push_variant:218`; `release_variant:278`                                                                                                                                                                                                                                                                          |
 | `just-helpers-build.bash`      | `run_build:14`; `print_build_summary:29`; `echo_build_assignments:50`; `resolved_variant_record_json:61`; `_step:71`; `run_fields:79`; `build_variant_pipeline:97` the one sequence; `run_variant:228` rechunk/relabel/pipeline modes (thin `run_rechunk:314`, `run_relabel:318`, `run_pipeline:322`); `build_variant_ci:335`; `build_all_variants:352`    |
@@ -156,11 +156,14 @@ variants.json entry   {name, base_image, suffix?, latest?, disabled?, cleanup?,
 variant_record()      adds {variant: .name, disabled: (.disabled // false)}
 resolve_variant     prints exactly one record line to stdout:
                     {variant, tag, target_image, suffix, base_image, build_script,
-                     latest, canonical_tag, parent_version, upstream_tag,
+                     latest, canonical_tag, version_tag, upstream_tag,
                      upstream_version, tag_family, tags,
                      collision_detected}   (variant == tag for an explicit image:tag spec)
+                    version_tag = {branch}-{canonical}, upstream's version verbatim,
+                    unless our registry already holds that tag — then it carries a
+                    minor version (decision 12)
 resolved_variant_record_json adds {repo_owner, repo_name, image_desc,
-                    version_label: .parent_version // .canonical_tag}
+                    version_label: .version_tag // .canonical_tag}
 vm record             is the resolve_variant record; no wrapper
 CI matrix entry       the resolve_variant record plus needs_build, which aggregate_variants
                       deletes, so the entry is that record verbatim: build.yml reads
@@ -168,9 +171,9 @@ CI matrix entry       the resolve_variant record plus needs_build, which aggrega
                       tag_family, upstream_version, latest, target_image — travel with
                       it                                                     (decision 14)
 build.yml adds        {date, image_desc, repo_owner, repo_name,
-                       version_label: .parent_version}          build.yml:110-117
+                       version_label: .version_tag}             build.yml:110-117
 pipeline requires     variant, version_label, repo_owner, repo_name
-pipeline reads        date, image_desc, base_image, build_script, canonical_tag
+pipeline reads        date, image_desc, base_image, build_script, upstream_tag
 pipeline returns      input + {source_ref, full_build_digest, build_digest,
                        kernel_version, manifest_packages}
 options (pipeline)    {build: always|skip|none, rechunk, force_rebuild,
@@ -259,7 +262,7 @@ Enabled variants: `stable`, `testing`, `unstable`. Disabled: `nvidia-open`,
     build is only ever named with the branch prefix — so counter `.1` has no lower name to
     try, every name in both families was probed, and the honest answer is that upstream
     published before tagging: return 2, skip that variant, never borrow a previous day's
-    version (the label we would carry, `org.opencontainers.image.upstream-version` of
+    version (the label we would carry, `org.opencontainers.image.parent-version` of
     decision 12, would then name a release this image is not cut from). A search cut short
     at `UPSTREAM_BUILD_WALK` names, or a probe upstream refused with a rate limit, means
     nothing was answered: return 1, the check job fails. Paging the `/tags` list stays
@@ -275,12 +278,18 @@ Enabled variants: `stable`, `testing`, `unstable`. Disabled: `nvidia-open`,
     release. The tag-name rule is enforced separately over the whole tag list, which
     also reports the bare `{version}` names published before decision 10 as legacy.
 
-12. The built image carries the upstream tag it was cut from as its own label,
-    `org.opencontainers.image.upstream-version` (`build-helpers.bash:168`), and the
-    push path hands that identity to the next run. Reading our own previous release
-    against upstream needs it: without the label the reader can only re-probe the
-    naming family from `org.opencontainers.image.version`, which is what happens for
-    releases published before this change.
+12. `org.opencontainers.image.version` is our own version (`version_tag`), spelled
+    `{branch}-{version}`. The version is upstream's verbatim — `stable-44.20261026` for
+    upstream's bare `44.20261026` — and gains a minor version only when
+    `{branch}-{version}` is already in our registry, which is what a `force_build`
+    re-run of the same upstream release hits (`stable-44.20261026.1`). The upstream
+    identity lives in its own label, `org.opencontainers.image.parent-version`
+    (`build-helpers.bash:168`), spelled the way upstream spells it, so the two labels
+    never confuse the release we were cut from with the version we published. Reading
+    our own previous release against upstream needs the parent label: without it the
+    reader can only re-probe the naming family from `org.opencontainers.image.version`,
+    which is what happens for releases published before this change (that reader also
+    still recognises the earlier `org.opencontainers.image.upstream-version` spelling).
 
 13. A variant's current release is read from its newest canonical tag (`release_ref`
     `changelog.py:179`, feeding `get_manifests:196`), and the moving `{variant}` tag is
@@ -335,10 +344,10 @@ matrix fields.
 
 | Suite                          | Tests        | Exercises                                                            |
 | ------------------------------ | ------------ | -------------------------------------------------------------------- |
-| `scripts/just-helpers.bats`    | 60           | resolve (upstream probe stubbed, stdout is one record), cleanup package identity, aggregate, release selection, pipeline and entrypoint mocks |
-| `scripts/check-variants.bats`  | 36           | the two check libraries, upstream identity probes (both naming families, the untagged-build skip, the walk budget), and `check-variants.sh` driven end to end over PATH stubs, against `resolve_variant` for the same fixture |
+| `scripts/just-helpers.bats`    | 61           | resolve (upstream probe stubbed, stdout is one record, the version label is our own tag), cleanup package identity, aggregate, release selection, pipeline and entrypoint mocks |
+| `scripts/check-variants.bats`  | 38           | the two check libraries, upstream identity probes (both naming families, the untagged-build skip, the walk budget), the bump-on-collision canonical and the registry walk past our own tags, and `check-variants.sh` driven end to end over PATH stubs, against `resolve_variant` for the same fixture |
 | `scripts/release-preview.bats` | 4            | `release-preview.py`                                                 |
-| `tests/build-helpers.bats`     | 9            | `build-helpers.bash`                                                 |
+| `tests/build-helpers.bats`     | 11           | `build-helpers.bash`, including the labels a published image carries (own `version`, `parent-version`) |
 | `scripts/push-helpers.bats`    | 6            | digest from push, one tag call, retry plumbing                       |
 | `tests/log-helpers.bats`       | 4            | one spelling for the `::error::` / `::warning::` directives, newline-flattened, and the grep invariant that no driver spells one |
 | `tests/test_changelog.py`      | 196 (pytest) | `changelog.py`, including a forced tag pair naming one release window |

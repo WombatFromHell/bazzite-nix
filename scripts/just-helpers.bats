@@ -145,17 +145,31 @@ stub_upstream_probe() {
   }
 }
 
+# Mock skopeo: answers the base image's version label (and digest), and nothing
+# else — a probe for a tag we have not published must fail, like it does upstream.
+# The answer is env, not a local: skopeo is called from resolve_variant, outside
+# this function's scope.
+stub_base_label() {
+  BASE_LABEL_JSON="$(jq -c -n --arg v "$1" --arg d "${2:-}" \
+    '{Labels: {"org.opencontainers.image.version": $v} + (if $d == "" then {} else {Digest: $d} end)}')"
+  export BASE_LABEL_JSON
+  skopeo() {
+    case "$*" in
+    *"/bazzite:"*) printf '%s\n' "$BASE_LABEL_JSON" ;;
+    *) return 1 ;;
+    esac
+  }
+  export -f skopeo
+}
+
 @test "resolve_variant returns one record" {
   local test_dir
   test_dir="$(setup_variant_json)"
 
   stub_upstream_probe
 
-  # Mock skopeo to return a version label (upstream spells it {major}.{date}.{build})
-  skopeo() {
-    echo '{"Labels":{"org.opencontainers.image.version":"44.20261012.1"}}'
-  }
-  export -f skopeo
+  # upstream spells its version {major}.{date}.{build}
+  stub_base_label "44.20261012.1"
 
   local output
   output=$(resolve_variant "testing" "$test_dir/variants.json" "bazzite-nix")
@@ -163,19 +177,22 @@ stub_upstream_probe() {
   [[ "$(jq -r .target_image <<<"$output")" == "localhost/bazzite-nix" ]]
   [[ "$(jq -r .variant <<<"$output")" == "testing" ]]
   [[ "$(jq -r .base_image <<<"$output")" == "ghcr.io/ublue-os/bazzite:stable" ]]
-  [[ "$(jq -r .parent_version <<<"$output")" == "44.20261012.1" ]]
+  [[ "$(jq -r .upstream_version <<<"$output")" == "44.20261012.1" ]]
+  # Our version is upstream's verbatim until our registry already holds that tag.
+  [[ "$(jq -r .version_tag <<<"$output")" == "testing-44.20261012.1" ]]
   [[ "$(jq -r .collision_detected <<<"$output")" == "false" ]]
 }
 
-@test "resolve_variant bumps canonical on version collision (force_build)" {
+@test "resolve_variant bumps one past a tag we already published (a force_build re-run)" {
   local test_dir
   test_dir="$(setup_variant_json)"
 
   stub_upstream_probe
 
-  # Mock skopeo: the bumped tag is free, everything else exists
+  # Mock skopeo: upstream's version is already ours, the next counter is free
   skopeo() {
     case "$*" in
+    *"testing-44.20261012.1"*) echo '{"Digest":"sha256:aa"}' ;;
     *"testing-44.20261012.2"*) return 1 ;;
     *) echo '{"Labels":{"org.opencontainers.image.version":"44.20261012.1"}}' ;;
     esac
@@ -183,12 +200,36 @@ stub_upstream_probe() {
   export -f skopeo
 
   local output
-  output=$(resolve_variant "testing" "$test_dir/variants.json" "bazzite-nix" "1" "ghcr.io/test-owner")
+  output=$(resolve_variant "testing" "$test_dir/variants.json" "bazzite-nix" "ghcr.io/test-owner")
   jq -e . >/dev/null <<<"$output"
   [[ "$(jq -r .canonical_tag <<<"$output")" == "44.20261012.2" ]]
+  [[ "$(jq -r .version_tag <<<"$output")" == "testing-44.20261012.2" ]]
+  # The bump is a registry collision, not a standing rule.
   [[ "$(jq -r .collision_detected <<<"$output")" == "true" ]]
-  # The collision bump moves the tag name, not the upstream version the labels carry.
-  [[ "$(jq -r .parent_version <<<"$output")" == "44.20261012.1" ]]
+  # The bump moves our version, never the upstream identity the labels carry.
+  [[ "$(jq -r .upstream_version <<<"$output")" == "44.20261012.1" ]]
+}
+
+@test "resolve_variant walks past a version our registry already published" {
+  local test_dir
+  test_dir="$(setup_variant_json)"
+
+  stub_upstream_probe
+
+  skopeo() {
+    case "$*" in
+    *"testing-44.20261012.1"*) echo '{"Digest":"sha256:aa"}' ;;
+    *"testing-44.20261012.2"*) echo '{"Digest":"sha256:aa"}' ;;
+    *"testing-44.20261012.3"*) return 1 ;;
+    *) echo '{"Labels":{"org.opencontainers.image.version":"44.20261012.1"}}' ;;
+    esac
+  }
+  export -f skopeo
+
+  local output
+  output=$(resolve_variant "testing" "$test_dir/variants.json" "bazzite-nix" "ghcr.io/test-owner")
+  [[ "$(jq -r .version_tag <<<"$output")" == "testing-44.20261012.3" ]]
+  [[ "$(jq -r .collision_detected <<<"$output")" == "true" ]]
 }
 
 @test "resolve_variant drops {sha256} tags (digest is resolved at push time, not from upstream)" {
@@ -211,10 +252,7 @@ EOF
   stub_upstream_probe
 
   # Mock skopeo: upstream has a digest — resolve_variant must NOT use it for tags
-  skopeo() {
-    echo '{"Labels":{"org.opencontainers.image.version":"44.20261012.1"},"Digest":"sha256:fbd9a04deadbeef"}'
-  }
-  export -f skopeo
+  stub_base_label "44.20261012.1" "sha256:fbd9a04deadbeef"
 
   local output
   output=$(resolve_variant "stable" "$test_dir/variants.json" "bazzite-nix")
@@ -239,7 +277,9 @@ EOF
   [[ "$(jq -r .base_image <<<"$output")" == "ghcr.io/ublue-os/bazzite:testing" ]]
   [[ "$(jq -r .tag <<<"$output")" == "testing" ]]
   # A spec has no upstream git probe: its parent version is the base image label.
-  [[ "$(jq -r .parent_version <<<"$output")" == "2.0.0" ]]
+  [[ "$(jq -r .upstream_version <<<"$output")" == "2.0.0" ]]
+  # The version we embed is the tag the spec pushes.
+  [[ "$(jq -r .version_tag <<<"$output")" == "testing" ]]
   # No registry collision check either, but the field must still be present:
   # every reader of the record reads it unguarded.
   [[ "$(jq -r .collision_detected <<<"$output")" == "false" ]]
@@ -252,10 +292,7 @@ EOF
 
   stub_upstream_probe
 
-  skopeo() {
-    echo '{"Labels":{"org.opencontainers.image.version":"44.20261012.1"}}'
-  }
-  export -f skopeo
+  stub_base_label "44.20261012.1"
 
   local output
   output=$(resolve_variant "testing" "$test_dir/variants.json" "bazzite-nix")
@@ -396,7 +433,7 @@ EOF
 
 @test "print_build_summary and echo_build_assignments emit the build refs" {
   local out record
-  record='{"variant":"stable","canonical_tag":"1.0.0","tags":"stable","kernel_version":"6.6.0","manifest_packages":"42","source_ref":"containers-storage:localhost/chunked-img:stable","full_build_digest":"sha256:abc","build_digest":"abc"}'
+  record='{"variant":"stable","version_tag":"stable-1.0.0","tags":"stable","kernel_version":"6.6.0","manifest_packages":"42","source_ref":"containers-storage:localhost/chunked-img:stable","full_build_digest":"sha256:abc","build_digest":"abc"}'
   out=$(print_build_summary "Test complete" "$record" 2>&1)
   [[ "$out" == *"=== Test complete ==="* ]]
   [[ "$out" == *"Variant      : stable"* ]]
@@ -722,7 +759,7 @@ push_variant_mocks() {
   gh="$(mktemp)"
   push_variant_mocks
   export GITHUB_ACTOR=actor GITHUB_TOKEN=token SIGNING_SECRET=secret GITHUB_OUTPUT="$gh"
-  push_variant '{"source_ref":"containers-storage:localhost/chunked-img:stable","tags":"stable-44.1,stable","variant":"stable","parent_version":"44.1","image_desc":"Customized Bazzite image with Nix mount support"}' '{"registry":"ghcr.io/owner","repo":"repo","date":"2026-10-16T02:44:40Z"}'
+  push_variant '{"source_ref":"containers-storage:localhost/chunked-img:stable","tags":"stable-44.1,stable","variant":"stable","upstream_tag":"44.1","image_desc":"Customized Bazzite image with Nix mount support"}' '{"registry":"ghcr.io/owner","repo":"repo","date":"2026-10-16T02:44:40Z"}'
   grep -q '^remote_digest=sha256:abc$' "$gh"
   grep -q '^status=success$' "$gh"
 }

@@ -16,16 +16,16 @@ preview_tags() {
   local registry
   registry="$(registry_url "$repo_organization")"
 
-  local spec variant canonical_tag tags target_image suffix record
+  local spec variant version_tag tags target_image suffix record
   local rows=()
   for spec in "${specs[@]}"; do
     record=$(resolve_variant "$spec" "$variants_config" "$image_name")
-    IFS=$'\037' read -r variant canonical_tag tags target_image < <(jq -r '[.variant, .canonical_tag, .tags, .target_image] | join("\u001f")' <<<"$record")
+    IFS=$'\037' read -r variant version_tag tags target_image < <(jq -r '[.variant, .version_tag, .tags, .target_image] | join("\u001f")' <<<"$record")
     suffix="${target_image#localhost/"${image_name}"}"
     rows+=("| \`${variant}\` | \`${registry}/${image_name}${suffix}\` | \`${tags}\` |")
     if [[ -z "${GITHUB_STEP_SUMMARY:-}" ]]; then
       echo "== Tags that would be generated for '${variant}' =="
-      echo "Canonical tag: ${canonical_tag}"
+      echo "Version tag   : ${version_tag}"
       echo "Alias tags    : ${tags}"
       echo ""
     fi
