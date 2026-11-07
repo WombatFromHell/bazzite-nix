@@ -10,8 +10,9 @@ OVERRIDES_ROOT="/ctx/overrides"
 # Three buckets, split by what the file is for, not by where it lands:
 #   beryl-utils  the /usr/bin helpers, products of the beryl-utils repo (.sh, .py, .pyz)
 #   session      the session stack: portal configs, session launchers, uwsm env, user
-#                units, niri and qt6ct config, gamescope env, service overrides, and our
-#                own gamescope-session-plus shim in /usr/bin
+#                units, niri and qt6ct config, gamescope env, service overrides, the
+#                systemd-oomd policy drop-ins, and our own gamescope-session-plus shim
+#                in /usr/bin
 #   extras       the ujust recipes
 # One interval per component: chunkah errors out if two files of a component
 # disagree, so the interval lives in this map and every install names a component.
@@ -197,6 +198,24 @@ install_tag session 0644 \
 install_tag session 0644 \
   /usr/lib/systemd/system/bluetooth.service.d/override.conf \
   "$OVERRIDES_ROOT"/usr/lib/systemd/system/bluetooth.service.d/override.conf
+# include our systemd-oomd policy (port of ~/.config/flakeroot/features/nixos-oom;
+# mapping and measured ground facts in .pi/PLAN-oomd.md). Shipped under /usr/lib so users
+# override in /etc; 90- sorts after Fedora's own 10-oomd-* drop-ins, last single value wins.
+install_tag session 0644 \
+  /usr/lib/systemd/oomd.conf.d/90-bazzite-nix.conf \
+  "$OVERRIDES_ROOT"/usr/lib/systemd/oomd.conf.d/90-bazzite-nix.conf
+install_tag session 0644 \
+  /usr/lib/systemd/system/-.slice.d/override.conf \
+  "$OVERRIDES_ROOT"/usr/lib/systemd/system/-.slice.d/override.conf
+install_tag session 0644 \
+  /usr/lib/systemd/system/user.slice.d/override.conf \
+  "$OVERRIDES_ROOT"/usr/lib/systemd/system/user.slice.d/override.conf
+install_tag session 0644 \
+  /usr/lib/systemd/user/app.slice.d/override.conf \
+  "$OVERRIDES_ROOT"/usr/lib/systemd/user/app.slice.d/override.conf
+install_tag session 0644 \
+  /usr/lib/systemd/system/display-manager.service.d/override.conf \
+  "$OVERRIDES_ROOT"/usr/lib/systemd/system/display-manager.service.d/override.conf
 #
 # ensure exiting the gamescope-session doesn't prevent Niri (UWSM) from starting up
 #
