@@ -117,7 +117,7 @@ dnf5_retry install -y https://github.com/WombatFromHell/niri-spicy-builder/relea
 dnf5 -y copr enable duxlabs/dux-repo &&
   dnf5 -y copr disable duxlabs/dux-repo &&
   dnf5_retry -y install --refresh --enable-repo="*duxlabs*" \
-    quickshell-git dms danksearch dankcalendar-git dgop fuzzel \
+    quickshell dms danksearch dankcalendar-git dgop fuzzel \
     cava matugen cups-pk-helper xdg-desktop-portal-kde \
     xdg-desktop-portal-gnome qt6ct-kde ghostty swayidle
 
