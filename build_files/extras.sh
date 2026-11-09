@@ -114,8 +114,8 @@ dnf5_retry install -y https://github.com/WombatFromHell/niri-spicy-builder/relea
 dnf5_retry install -y https://github.com/WombatFromHell/niri-spicy-builder/releases/download/v26.04.git%2B1bfaa83-1.fc44/niri-26.04.git+1bfaa83-1.fc44.x86_64.rpm
 
 # include DMS and friends from a verified repo
-dnf5 -y copr enable duxlabs/dux-repo &&
-  dnf5 -y copr disable duxlabs/dux-repo &&
+dnf5 -y copr enable duxlabs/dms-git &&
+  dnf5 -y copr disable duxlabs/dms-git &&
   dnf5_retry -y install --refresh --enable-repo="*duxlabs*" \
     quickshell dms danksearch dankcalendar-git dgop fuzzel \
     cava matugen cups-pk-helper xdg-desktop-portal-kde \

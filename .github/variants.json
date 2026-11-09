@@ -53,8 +53,7 @@
     {
       "name": "unstable",
       "base_image": "ghcr.io/ublue-os/bazzite:unstable",
-      "cleanup": true,
-      "disabled": true
+      "cleanup": true
     },
     {
       "name": "nvidia-open",
